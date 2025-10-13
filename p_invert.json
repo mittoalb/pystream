@@ -1,0 +1,12 @@
+{
+  "processors_dir": "processors",
+  "hot_reload": true,
+  "pipeline": [
+    {
+      "name": "invert",
+      "module": "invert",
+      "enabled": true,
+      "params": {}
+    }
+  ]
+}
