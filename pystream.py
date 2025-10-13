@@ -2,24 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-NTNDArray Real-time Viewer (Dark UI + Grayscale + Flat-field)
--------------------------------------------------------------
+NTNDArray Real-time Viewer (Dark UI + Grayscale + Flat-field + Plugins)
+-----------------------------------------------------------------------
 
 Usage:
     python pv_ntnda_viewer.py --pv 32idbSP1:Pva1:Image
-
 Options:
-    --pv <name>         NTNDArray PV (required)
-    --max-fps 30        UI redraw throttle (0 = unthrottled)
-    --no-toolbar        Hide Matplotlib toolbar
+    --pv <name>               NTNDArray PV (required)
+    --max-fps 30              UI redraw throttle (0 = unthrottled)
+    --no-toolbar              Hide Matplotlib toolbar
+    --proc-config processors.json   JSON pipeline config for plugins
+    --no-plugins              Disable plugin processing
 
 Features:
-  - Black/dark UI (Tk + Matplotlib)  ✅
+  - Black/dark UI (Tk + Matplotlib)
   - Grayscale enforced (RGB -> luminance) + cmap='gray'
   - Histogram (default ON), autoscale or manual Min/Max
   - Zoom/Pan, Flip H/V, Transpose
   - Flat-field normalization: Capture/Load/Save/Clear + Apply Flat toggle
   - Pause/Resume, Save frame (.png/.npy), FPS/UID readout
+  - **Plugin pipeline**: load processing steps from JSON (hot-reload via procplug.py)
 """
 
 import argparse
@@ -28,6 +30,7 @@ import math
 import time
 import queue
 import threading
+import os
 from typing import Optional, Tuple
 
 import numpy as np
@@ -39,17 +42,51 @@ from tkinter import ttk, filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-# Try to use user's AdImageUtility if available, else fallback reshaper
+# Optional AdImageUtility for reshape
 try:
     from AdImageUtility import AdImageUtility as _ADU  # noqa: F401
     _HAS_ADU = True
 except Exception:
     _HAS_ADU = False
 
+# ----------------------- Plugin pipeline (optional) -----------------------
+# We try to import procplug.py (sibling file) and construct a pipeline
+PIPE = None
+def _init_pipeline(proc_config_path: Optional[str]):
+    global PIPE
+    if proc_config_path is None:
+        return
+    try:
+        # Import procplug.py sitting next to this file
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(__file__))
+        procplug_path = os.path.join(here, "procplug.py")
+        if not os.path.exists(procplug_path):
+            # Also allow import if it's on PYTHONPATH
+            try:
+                import procplug  # type: ignore
+            except Exception:
+                return
+        else:
+            spec = importlib.util.spec_from_file_location("procplug", procplug_path)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            spec.loader.exec_module(mod)  # type: ignore
+            procplug = mod  # noqa: F841
 
-# -----------------------------------------------------------------------------
-# NTNDArray reshaping (uses AdImageUtility if available, else robust fallback)
-# -----------------------------------------------------------------------------
+        # Now import as normal (either found or installed)
+        import procplug  # type: ignore
+        cfg_path = proc_config_path
+        # If relative path, make it relative to script dir
+        if not os.path.isabs(cfg_path):
+            cfg_path = os.path.join(here, cfg_path)
+        PIPE = procplug.ProcessorPipeline.from_config(cfg_path)
+    except Exception as e:
+        sys.stderr.write(f"[Plugins] Failed to initialize pipeline: {e}\n")
+        PIPE = None
+
+
+# ----------------------- NTNDArray reshape -----------------------
 def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int, str]:
     """
     Returns: (imageId, image, nx, ny, nz, colorMode, fieldKey)
@@ -117,9 +154,7 @@ def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int,
     raise pva.InvalidArgument(f'Invalid NTNDArray dims: {dims}')
 
 
-# -----------------------------------------------------------------------------
-# PVA subscriber (background thread) -> Tk queue
-# -----------------------------------------------------------------------------
+# ----------------------- PVA subscriber -----------------------
 class NtndaSubscriber:
     def __init__(self, pv_name: str, out_queue: queue.Queue):
         self.pv_name = pv_name
@@ -138,6 +173,13 @@ class NtndaSubscriber:
                 img = (0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2])
                 if not np.issubdtype(img.dtype, np.floating):
                     img = img.astype(np.float32, copy=False)
+
+            # ---------------- apply plugin pipeline (if configured) ----------------
+            if PIPE is not None:
+                try:
+                    img = PIPE.apply(img, {"uid": uid, "timestamp": time.time()})
+                except Exception as e:
+                    sys.stderr.write(f"[Plugins] pipeline error: {e}\n")
 
             self.out_q.put((time.time(), uid, img))
         except Exception as exc:
@@ -166,9 +208,7 @@ class NtndaSubscriber:
             self.subscribed = False
 
 
-# -----------------------------------------------------------------------------
-# Tk viewer app (dark theme)
-# -----------------------------------------------------------------------------
+# ----------------------- Tk viewer app (dark) -----------------------
 class PvViewerApp:
     def __init__(self, root, pv_name: str, max_fps: int = 30, show_toolbar: bool = True):
         self.root = root
@@ -395,7 +435,6 @@ class PvViewerApp:
             sy = max(1, arr.shape[0] // 1000)
             sx = max(1, arr.shape[1] // 1000)
             arr = arr[::sy, ::sx]
-        # white ticks on black background handled by style below
         self.hist_ax.hist(arr.ravel(), bins=256, color="white")
         self.hist_ax.set_title("Histogram", color="white")
         self.hist_ax.axvline(vmin, linestyle="--", color="white", alpha=0.8)
@@ -571,15 +610,22 @@ class PvViewerApp:
         self.root.destroy()
 
 
+# ----------------------- Main -----------------------
 def main():
-    ap = argparse.ArgumentParser(description="Real-time NTNDArray Viewer (dark UI + grayscale + flat-field)")
+    ap = argparse.ArgumentParser(description="Real-time NTNDArray Viewer (dark UI + grayscale + flat-field + plugins)")
     ap.add_argument("--pv", required=True, help="PVAccess NTNDArray PV name")
     ap.add_argument("--max-fps", type=int, default=30, help="Max redraw FPS (0 = unthrottled)")
     ap.add_argument("--no-toolbar", action="store_true", help="Hide Matplotlib zoom/pan toolbar")
+    ap.add_argument("--proc-config", default="processors.json", help="Plugin pipeline JSON config (set to non-existent or use --no-plugins to disable)")
+    ap.add_argument("--no-plugins", action="store_true", help="Disable plugin processing")
     args = ap.parse_args()
 
+    # Initialize plugin pipeline (optional)
+    if not args.no_plugins:
+        _init_pipeline(args.proc_config)
+
     root = tk.Tk()
-    # --- Dark background for the whole window ---
+    # Dark window background and ttk styles
     root.configure(bg='black')
     try:
         style = ttk.Style()
