@@ -1,51 +1,30 @@
-# NTNDArray Real-time Viewer (Dark UI + Flat-field)
+# NTNDArray Real-time Viewer (Dark UI, Flat-field, Plugin Pipeline)
 
-A live viewer for **EPICS PVAccess NTNDArray** data streams, designed for X-ray or optical imaging workflows.  
-It provides real-time display, histogram and contrast control, and **flat-field normalization** with a modern dark interface.
-
----
+This application displays 2D images streamed from EPICS PVAccess `NTNDArray` PVs in real time.
+It provides a dark graphical interface, flat-field normalization, contrast control, and a flexible plugin
+system for custom processing pipelines defined in JSON configuration files.
 
 ## Features
-- **Dark UI** (black background for reduced glare)
-- Real-time image stream from any `NTNDArray` PV (e.g. `32idbSP1:Pva1:Image`)
-- Grayscale enforced (RGB → luminance)
-- ImageJ-like tools: zoom, pan, histogram, contrast sliders
-- **Flat-field correction** (Capture / Load / Save / Clear + toggle Apply Flat)
-- Pause / Resume stream
-- Frame save (`.npy` or `.png`)
-- FPS and UID display
-- Optional Matplotlib toolbar
 
----
+- Real-time 2D image display from `NTNDArray` PVs
+- Grayscale conversion (RGB → luminance)
+- Dark interface (black background, white text)
+- Histogram and manual contrast sliders
+- Flat-field correction (Capture / Load / Save / Clear / Apply)
+- Plugin-based processing pipeline (JSON-defined)
+- Pause / Resume, Save Frame (.npy or .png)
+- Automatic FPS and UID display
+- Optional Matplotlib toolbar for zoom and pan
 
-## ⚙️ Flat-field normalization
+## Requirements
 
-Flat-field correction removes illumination and detector nonuniformity:
+Install Python packages:
 
-\[
-I_{norm} = \frac{I_{raw}}{I_{flat}} \times \langle I_{flat} \rangle
-\]
-
-### Controls
-| Button | Function |
-|---------|-----------|
-| **Capture Flat** | Capture the current displayed image as the flat (open beam) |
-| **Apply Flat** | Toggle normalization ON/OFF in real time |
-| **Load Flat…** | Load a saved `.npy` flat file |
-| **Save Flat…** | Save the current flat for later use |
-| **Clear Flat** | Remove the stored flat |
-
----
-
-## Installation
-
-**Dependencies:**
 ```bash
 pip install pvapy numpy matplotlib
 ```
-*(and `python3-tk` via your OS package manager if missing, e.g. `sudo apt install python3-tk`)*
 
----
+Tkinter is required for the GUI (`sudo apt install python3-tk` on Linux).
 
 ## Usage
 
@@ -53,30 +32,96 @@ pip install pvapy numpy matplotlib
 python pv_ntnda_viewer.py --pv YOUR:NTNDARRAY:PV
 ```
 
-**Optional arguments:**
-| Option | Default | Description |
-|---------|----------|-------------|
-| `--max-fps` | `30` | UI redraw throttle (0 = unthrottled) |
-| `--no-toolbar` | _off_ | Hide Matplotlib zoom/pan toolbar |
+Optional arguments:
 
----
+| Option | Description | Default |
+|---------|--------------|----------|
+| `--max-fps` | Redraw rate (0 = unthrottled) | 30 |
+| `--no-toolbar` | Hide Matplotlib toolbar | off |
+| `--proc-config` | Path to plugin pipeline JSON | processors.json |
+| `--no-plugins` | Disable plugin processing | off |
 
-## 💡 Notes
-- The viewer automatically converts RGB NTNDArray frames to grayscale.
-- Histogram and contrast sliders update dynamically.
-- The flat is applied **after** orientation transforms (flip/transpose), ensuring correct alignment.
-- You can extend it with dark-field correction or ROI-based statistics.
+Example:
 
----
-
-## Example
 ```bash
-python pv_ntnda_viewer.py --pv 32idbSP1:Pva1:Image
+python pv_ntnda_viewer.py --pv 32idbSP1:Pva1:Image --proc-config processors.json
 ```
-Capture a flat under open-beam conditions, then enable **Apply Flat** to see live normalized images.
 
----
+## Flat-field correction
 
-**Author:** APS Imaging Group (Argonne National Laboratory)  
-**Version:** 2025-10  
-**License:** Internal research use only
+Flat-field normalization removes detector and illumination nonuniformity:
+
+I_norm = (I_raw / I_flat) * mean(I_flat)
+
+Controls:
+
+| Button | Description |
+|---------|-------------|
+| Capture Flat | Capture current image as flat |
+| Apply Flat | Enable or disable flat-field correction |
+| Load Flat | Load `.npy` flat file |
+| Save Flat | Save flat to `.npy` |
+| Clear Flat | Remove current flat |
+
+Flat-field correction is applied in real time if enabled.
+
+## Plugin system
+
+The viewer can apply a sequence of custom processing functions to each frame before display.
+Plugins are defined as Python modules under a `processors/` directory. Each module must define a
+function `process(img, meta=None, **params)` returning either `img` or `(img, meta)`.
+
+Example processor `processors/invert.py`:
+
+```python
+import numpy as np
+
+def process(img, meta=None):
+    img_f = img.astype(np.float32, copy=False)
+    lo, hi = np.nanmin(img_f), np.nanmax(img_f)
+    if hi <= lo:
+        return img
+    out = hi - (img_f - lo)
+    return out.astype(img.dtype, copy=False), meta
+```
+
+The pipeline configuration file defines the order, parameters, and enable flags for each processor.
+
+Example `processors_invert.json`:
+
+```json
+{
+  "processors_dir": "processors",
+  "hot_reload": true,
+  "pipeline": [
+    {"name": "invert", "module": "invert", "enabled": true, "params": {}}
+  ]
+}
+```
+
+Running with this configuration inverts the contrast of incoming frames.
+
+## Directory layout
+
+```
+pv_ntnda_viewer.py
+procplug.py
+processors.json
+processors/
+    normalize.py
+    median.py
+    invert.py
+```
+
+## Notes
+
+- Pipelines are hot-reloaded when files change (if `hot_reload` is true).
+- Processors are applied sequentially, top-to-bottom in the JSON file.
+- Flat-field correction can be combined with plugins (order depends on configuration).
+- Saving frames preserves the current contrast settings.
+
+## Author
+
+APS Imaging Group, Argonne National Laboratory
+Version: 2025-10
+License: Internal research use only
