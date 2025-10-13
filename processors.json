@@ -1,0 +1,23 @@
+{
+  "processors_dir": "processors",
+  "hot_reload": true,
+  "pipeline": [
+    {
+      "name": "normalize",
+      "module": "normalize",
+      "enabled": true,
+      "params": {
+        "percent_low": 0.5,
+        "percent_high": 99.5
+      }
+    },
+    {
+      "name": "median3",
+      "module": "median",
+      "enabled": false,
+      "params": {
+        "ksize": 3
+      }
+    }
+  ]
+}
