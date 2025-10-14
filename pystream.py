@@ -37,7 +37,7 @@ import threading
 import os
 import json
 import tempfile
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 import numpy as np
 import pvaccess as pva
@@ -62,7 +62,7 @@ def _app_dir() -> str:
 def _cfg_path(name: str = "viewer_config.json") -> str:
     return os.path.join(_app_dir(), name)
 
-def _load_config(defaults: dict | None = None, filename: str = "viewer_config.json") -> dict:
+def _load_config(defaults: Optional[Dict] = None, filename: str = "viewer_config.json") -> Dict:
     if defaults is None:
         defaults = {}
     path = _cfg_path(filename)
