@@ -23,6 +23,9 @@ Features:
   - Pause/Resume, Save frame (.png/.npy), FPS/UID readout
   - **Plugin pipeline**: load processing steps from JSON (hot-reload via procplug.py)
   - **PV field in GUI**: connect/disconnect and switch PVs at runtime
+
+Persistence:
+  - Remembers the last PV in viewer_config.json (next to this script).
 """
 
 import argparse
@@ -32,6 +35,8 @@ import time
 import queue
 import threading
 import os
+import json
+import tempfile
 from typing import Optional, Tuple
 
 import numpy as np
@@ -50,6 +55,42 @@ try:
 except Exception:
     _HAS_ADU = False
 
+# ----------------------- Small config I/O (PV persistence) -----------------------
+def _app_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _cfg_path(name: str = "viewer_config.json") -> str:
+    return os.path.join(_app_dir(), name)
+
+def _load_config(defaults: dict | None = None, filename: str = "viewer_config.json") -> dict:
+    if defaults is None:
+        defaults = {}
+    path = _cfg_path(filename)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        # fill missing keys from defaults
+        for k, v in defaults.items():
+            data.setdefault(k, v)
+        return data
+    except Exception:
+        return dict(defaults)
+
+def _save_config(data: dict, filename: str = "viewer_config.json") -> None:
+    path = _cfg_path(filename)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".cfg.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)  # atomic on POSIX
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
+
 # ----------------------- Plugin pipeline (optional) -----------------------
 PIPE = None
 def _init_pipeline(proc_config_path: Optional[str]):
@@ -57,7 +98,7 @@ def _init_pipeline(proc_config_path: Optional[str]):
     if not proc_config_path:
         return
     try:
-        import importlib.util, os
+        import importlib.util
         here = os.path.dirname(os.path.abspath(__file__))
         procplug_path = os.path.join(here, "procplug.py")
         if not os.path.exists(procplug_path):
@@ -202,8 +243,11 @@ class NtndaSubscriber:
 class PvViewerApp:
     def __init__(self, root, pv_name: Optional[str], max_fps: int = 30, show_toolbar: bool = True):
         self.root = root
-        self.root.title("NTNDArray DSV")#Data stream viewer
+        self.root.title("NTNDArray DSV")  # Data stream viewer
         self.root.geometry("1280x880")
+
+        # ---- Load persisted config; CLI --pv overrides the default on first run
+        self.cfg = _load_config(defaults={"pv_name": pv_name or ""}, filename="viewer_config.json")
 
         self.max_fps = int(max_fps)
         self.frame_interval = (1.0 / self.max_fps) if self.max_fps > 0 else 0.0
@@ -231,13 +275,13 @@ class PvViewerApp:
 
         self.show_toolbar = show_toolbar
 
-        # PV field
-        self.pv_var = tk.StringVar(value=pv_name or "")
+        # PV field (pre-fill from persisted config)
+        self.pv_var = tk.StringVar(value=self.cfg.get("pv_name", "") or "")
 
         self._build_ui()
 
-        # If a PV was provided, auto-connect
-        if pv_name:
+        # If a PV was provided (via CLI or persisted), auto-connect
+        if self.pv_var.get().strip():
             self._connect_pv()
 
         self._pump_queue()
@@ -383,10 +427,12 @@ class PvViewerApp:
                 self.sub.stop()
             except Exception:
                 pass
-            self.sub = None
-            self.root.title("NTNDArray Viewer")
-            if not silent:
-                messagebox.showinfo("Disconnect PV", "Disconnected.")
+            try:
+                self.sub = None
+            finally:
+                self.root.title("NTNDArray Viewer")
+                if not silent:
+                    messagebox.showinfo("Disconnect PV", "Disconnected.")
 
     # ------------- Queue pump -------------
     def _pump_queue(self):
@@ -543,7 +589,6 @@ class PvViewerApp:
                 self.im_artist.set_clim(vmin=self.vmin, vmax=self.vmax)
                 self.canvas.draw_idle()
 
-
     # ------------- Flat-field helpers -------------
     def _apply_flat_field(self, img: np.ndarray) -> np.ndarray:
         flat = self.flat
@@ -646,6 +691,13 @@ class PvViewerApp:
             np.save(path, arr)
 
     def _on_close(self):
+        # Persist current PV for next launch
+        try:
+            self.cfg["pv_name"] = self.pv_var.get().strip()
+            _save_config(self.cfg, filename="viewer_config.json")
+        except Exception as e:
+            sys.stderr.write(f"[Config] Failed to save viewer_config.json: {e}\n")
+
         try:
             self._disconnect_pv(silent=True)
         except Exception:
@@ -686,7 +738,7 @@ def main():
         pass
 
     app = PvViewerApp(root,
-                      pv_name=args.pv,           # pre-fill only; can change in GUI
+                      pv_name=args.pv,           # pre-fill only; persisted thereafter
                       max_fps=args.max_fps,
                       show_toolbar=not args.no_toolbar)
     root.mainloop()
