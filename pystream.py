@@ -54,37 +54,27 @@ except Exception:
 PIPE = None
 def _init_pipeline(proc_config_path: Optional[str]):
     global PIPE
-    if proc_config_path is None:
+    if not proc_config_path:
         return
     try:
-        # Import procplug.py sitting next to this file
-        import importlib.util
+        import importlib.util, os
         here = os.path.dirname(os.path.abspath(__file__))
         procplug_path = os.path.join(here, "procplug.py")
         if not os.path.exists(procplug_path):
-            # Also allow import if it's on PYTHONPATH
-            try:
-                import procplug  # type: ignore
-            except Exception:
-                return
-        else:
-            spec = importlib.util.spec_from_file_location("procplug", procplug_path)
-            mod = importlib.util.module_from_spec(spec)
-            assert spec and spec.loader
-            spec.loader.exec_module(mod)  # type: ignore
-            procplug = mod  # noqa: F841
+            sys.stderr.write("[Plugins] procplug.py not found next to script\n")
+            PIPE = None
+            return
 
-        # Now import as normal (either found or installed)
-        import procplug  # type: ignore
-        cfg_path = proc_config_path
-        # If relative path, make it relative to script dir
-        if not os.path.isabs(cfg_path):
-            cfg_path = os.path.join(here, cfg_path)
-        PIPE = procplug.ProcessorPipeline.from_config(cfg_path)
+        spec = importlib.util.spec_from_file_location("procplug", procplug_path)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(mod)  # type: ignore
+
+        cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
+        PIPE = mod.ProcessorPipeline.from_config(cfg_path)
     except Exception as e:
         sys.stderr.write(f"[Plugins] Failed to initialize pipeline: {e}\n")
         PIPE = None
-
 
 # ----------------------- NTNDArray reshape -----------------------
 def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int, str]:
@@ -212,7 +202,7 @@ class NtndaSubscriber:
 class PvViewerApp:
     def __init__(self, root, pv_name: Optional[str], max_fps: int = 30, show_toolbar: bool = True):
         self.root = root
-        self.root.title("NTNDArray Viewer")
+        self.root.title("NTNDArray DSV")#Data stream viewer
         self.root.geometry("1280x880")
 
         self.max_fps = int(max_fps)
@@ -669,7 +659,7 @@ def main():
     ap.add_argument("--pv", help="(Optional) PVAccess NTNDArray PV name to pre-fill the GUI field")
     ap.add_argument("--max-fps", type=int, default=30, help="Max redraw FPS (0 = unthrottled)")
     ap.add_argument("--no-toolbar", action="store_true", help="Hide Matplotlib zoom/pan toolbar")
-    ap.add_argument("--proc-config", default="processors.json", help="Plugin pipeline JSON config (set to non-existent or use --no-plugins to disable)")
+    ap.add_argument("--proc-config", default="pipelines/processors.json", help="Plugin pipeline JSON config (set to non-existent or use --no-plugins to disable)")
     ap.add_argument("--no-plugins", action="store_true", help="Disable plugin processing")
     args = ap.parse_args()
 

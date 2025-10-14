@@ -1,50 +1,58 @@
-# NTNDArray Real-time Viewer (Dark UI, Flat-field, Plugin Pipeline)
+# NTNDArray Real-time Viewer (`pystream`)
 
-This application displays 2D images streamed from EPICS PVAccess `NTNDArray` PVs in real time.
-It provides a dark graphical interface, flat-field normalization, contrast control, and a flexible plugin
-system for custom processing pipelines defined in JSON configuration files.
+Real-time viewer for EPICS PVAccess `NTNDArray` data with dark-themed UI, flat-field correction, and plugin-based image-processing pipelines.  
+Part of the APS Imaging Group real-time stream utilities.
 
 ## Features
 
-- Real-time 2D image display from `NTNDArray` PVs
-- Grayscale conversion (RGB → luminance)
-- Dark interface (black background, white text)
-- Histogram and manual contrast sliders
-- Flat-field correction (Capture / Load / Save / Clear / Apply)
-- Plugin-based processing pipeline (JSON-defined)
-- Pause / Resume, Save Frame (.npy or .png)
-- Automatic FPS and UID display
-- Optional Matplotlib toolbar for zoom and pan
+- Real-time 2D image display from `NTNDArray` PVs  
+- Grayscale conversion (RGB → luminance)  
+- Dark, minimal interface (black background, white text)  
+- Histogram and manual contrast sliders  
+- Flat-field correction (Capture / Load / Save / Clear / Apply)  
+- Plugin-based processing pipeline (JSON-defined)  
+- Pause / Resume, Save Frame (`.npy`, `.png`)  
+- Automatic FPS and UID display  
+- Optional Matplotlib toolbar for zoom/pan  
+- Extensible: easily add new processors without modifying core code
 
-## Requirements
+## Installation
 
-Install Python packages:
+Install directly in editable mode or from source:
 
 ```bash
-pip install pvapy numpy matplotlib
+pip install -e .
 ```
 
-Tkinter is required for the GUI (`sudo apt install python3-tk` on Linux).
+or simply install dependencies manually:
+
+```bash
+pip install numpy matplotlib pvaccess
+```
+
+Tkinter is required for GUI operation:
+```bash
+sudo apt install python3-tk     # Linux
+```
 
 ## Usage
 
 ```bash
-python pv_ntnda_viewer.py --pv YOUR:NTNDARRAY:PV
+pystream --pv YOUR:NTNDARRAY:PV
 ```
 
 Optional arguments:
 
 | Option | Description | Default |
-|---------|--------------|----------|
+|---------|-------------|----------|
 | `--max-fps` | Redraw rate (0 = unthrottled) | 30 |
 | `--no-toolbar` | Hide Matplotlib toolbar | off |
-| `--proc-config` | Path to plugin pipeline JSON | processors.json |
+| `--proc-config` | Path to JSON pipeline configuration | `processors.json` |
 | `--no-plugins` | Disable plugin processing | off |
 
 Example:
-
 ```bash
-python pv_ntnda_viewer.py --pv 32idbSP1:Pva1:Image --proc-config processors.json
+pystream --pv 32idbSP1:Pva1:Image --proc-config processors.json
 ```
 
 ## Flat-field correction
@@ -53,41 +61,38 @@ Flat-field normalization removes detector and illumination nonuniformity:
 
 I_norm = (I_raw / I_flat) * mean(I_flat)
 
-Controls:
-
-| Button | Description |
-|---------|-------------|
+| Button | Function |
+|---------|-----------|
 | Capture Flat | Capture current image as flat |
-| Apply Flat | Enable or disable flat-field correction |
+| Apply Flat | Enable/disable flat-field correction |
 | Load Flat | Load `.npy` flat file |
 | Save Flat | Save flat to `.npy` |
 | Clear Flat | Remove current flat |
 
-Flat-field correction is applied in real time if enabled.
+## Plugin System
 
-## Plugin system
+The viewer supports modular image processing through external Python scripts.  
+Each plugin defines a function:
 
-The viewer can apply a sequence of custom processing functions to each frame before display.
-Plugins are defined as Python modules under a `processors/` directory. Each module must define a
-function `process(img, meta=None, **params)` returning either `img` or `(img, meta)`.
+```python
+def process(img, meta=None, **params):
+    return img, meta
+```
 
-Example processor `processors/invert.py`:
+Plugins are defined in a JSON pipeline file. Example processor `processors/invert.py`:
 
 ```python
 import numpy as np
 
 def process(img, meta=None):
-    img_f = img.astype(np.float32, copy=False)
-    lo, hi = np.nanmin(img_f), np.nanmax(img_f)
-    if hi <= lo:
-        return img
-    out = hi - (img_f - lo)
-    return out.astype(img.dtype, copy=False), meta
+    img = img.astype(np.float32)
+    lo, hi = np.nanmin(img), np.nanmax(img)
+    if hi > lo:
+        img = hi - (img - lo)
+    return img.astype(np.float32), meta
 ```
 
-The pipeline configuration file defines the order, parameters, and enable flags for each processor.
-
-Example `processors_invert.json`:
+Example configuration `processors_invert.json`:
 
 ```json
 {
@@ -99,29 +104,51 @@ Example `processors_invert.json`:
 }
 ```
 
-Running with this configuration inverts the contrast of incoming frames.
+## Example Plugin — Integrated Intensity vs Rotation
 
-## Directory layout
+A plugin `processors/intensity_vs_rotation.py` allows monitoring integrated intensity as a motor scans.
+
+- Opens a small control window.  
+- Parameters: PV name, start angle, end angle.  
+- Provides Start, Stop, and Save controls.  
+- Plots integrated intensity for each frame during the motion.  
+
+Example JSON entry:
+
+```json
+{
+  "name": "intensity_vs_rotation",
+  "module": "intensity_vs_rotation",
+  "enabled": true,
+  "params": {
+    "motor_pv": "32idb:motor1",
+    "start": 0,
+    "end": 360
+  }
+}
+```
+
+## Directory Layout
 
 ```
-pv_ntnda_viewer.py
-procplug.py
-processors.json
-processors/
-    normalize.py
-    median.py
-    invert.py
+pystream/
+    __init__.py
+    pystream.py
+    procplug.py
+    processors.json
+    processors/
+        normalize.py
+        median.py
+        invert.py
+        intensity_vs_rotation.py
+README.md
+pyproject.toml
 ```
 
 ## Notes
 
-- Pipelines are hot-reloaded when files change (if `hot_reload` is true).
-- Processors are applied sequentially, top-to-bottom in the JSON file.
-- Flat-field correction can be combined with plugins (order depends on configuration).
-- Saving frames preserves the current contrast settings.
-
-## Author
-
-APS Imaging Group, Argonne National Laboratory
-Version: 2025-10
-License: Internal research use only
+- Pipelines are hot-reloaded when files change (if `hot_reload` = true).  
+- Processors execute in JSON order (top-to-bottom).  
+- Flat-field correction can combine with plugins.  
+- Saving frames preserves current contrast and scaling.  
+- All plugins are independent of the viewer core.
