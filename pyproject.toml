@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pystream"
+version = "1.0.0"
+description = "Real-time NTNDArray viewer with plugin pipeline."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Alberto Mittone", email = "amittone@anl.gov" }]
+
+dependencies = [
+  "numpy>=1.21",
+  "matplotlib>=3.5",
+  "pvapy>=5.6.0",
+  "tkinterdnd2; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = ["black", "flake8"]
+
+[project.scripts]
+# console-script name -> module:function
+pystream = "pystream:main"
+pvviewer = "pystream:main"
+
+[tool.setuptools]
+# SINGLE MODULE, not a package:
+py-modules = ["pystream"]
+include-package-data = true

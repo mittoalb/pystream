@@ -1,0 +1,3 @@
+[console_scripts]
+pvviewer = pystream:main
+pystream = pystream:main
