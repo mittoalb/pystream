@@ -3,6 +3,8 @@
 Real-time viewer for EPICS PVAccess `NTNDArray` data with dark-themed UI, flat-field correction, and plugin-based image-processing pipelines.  
 Part of the APS Imaging Group real-time stream utilities.
 
+![GUI Interface](https://github.com/mittoalb/pystream/blob/main/GUI.png)
+
 ## Features
 
 - Real-time 2D image display from `NTNDArray` PVs  
