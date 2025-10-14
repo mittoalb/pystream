@@ -6,13 +6,13 @@ NTNDArray Real-time Viewer (Dark UI + Grayscale + Flat-field + Plugins)
 -----------------------------------------------------------------------
 
 Usage:
-    python pv_ntnda_viewer.py --pv 32idbSP1:Pva1:Image
+    python pv_ntnda_viewer.py
 Options:
-    --pv <name>               NTNDArray PV (required)
-    --max-fps 30              UI redraw throttle (0 = unthrottled)
-    --no-toolbar              Hide Matplotlib toolbar
-    --proc-config processors.json   JSON pipeline config for plugins
-    --no-plugins              Disable plugin processing
+    --max-fps 30                  UI redraw throttle (0 = unthrottled)
+    --no-toolbar                  Hide Matplotlib toolbar
+    --proc-config processors.json JSON pipeline config for plugins
+    --no-plugins                  Disable plugin processing
+    --pv <name>                   (Optional) pre-fill PV field in GUI
 
 Features:
   - Black/dark UI (Tk + Matplotlib)
@@ -22,6 +22,7 @@ Features:
   - Flat-field normalization: Capture/Load/Save/Clear + Apply Flat toggle
   - Pause/Resume, Save frame (.png/.npy), FPS/UID readout
   - **Plugin pipeline**: load processing steps from JSON (hot-reload via procplug.py)
+  - **PV field in GUI**: connect/disconnect and switch PVs at runtime
 """
 
 import argparse
@@ -50,7 +51,6 @@ except Exception:
     _HAS_ADU = False
 
 # ----------------------- Plugin pipeline (optional) -----------------------
-# We try to import procplug.py (sibling file) and construct a pipeline
 PIPE = None
 def _init_pipeline(proc_config_path: Optional[str]):
     global PIPE
@@ -210,16 +210,16 @@ class NtndaSubscriber:
 
 # ----------------------- Tk viewer app (dark) -----------------------
 class PvViewerApp:
-    def __init__(self, root, pv_name: str, max_fps: int = 30, show_toolbar: bool = True):
+    def __init__(self, root, pv_name: Optional[str], max_fps: int = 30, show_toolbar: bool = True):
         self.root = root
-        self.root.title(f"NTNDArray Viewer - {pv_name}")
+        self.root.title("NTNDArray Viewer")
         self.root.geometry("1280x880")
 
         self.max_fps = int(max_fps)
         self.frame_interval = (1.0 / self.max_fps) if self.max_fps > 0 else 0.0
 
         self.queue = queue.Queue(maxsize=10)
-        self.sub = NtndaSubscriber(pv_name, self.queue)
+        self.sub = None  # type: Optional[NtndaSubscriber]
         self.last_draw = 0.0
         self.paused = False
 
@@ -241,8 +241,15 @@ class PvViewerApp:
 
         self.show_toolbar = show_toolbar
 
+        # PV field
+        self.pv_var = tk.StringVar(value=pv_name or "")
+
         self._build_ui()
-        self.sub.start()
+
+        # If a PV was provided, auto-connect
+        if pv_name:
+            self._connect_pv()
+
         self._pump_queue()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -251,6 +258,15 @@ class PvViewerApp:
         # Top controls
         top = ttk.Frame(self.root)
         top.pack(side="top", fill="x", padx=8, pady=6)
+
+        # PV selector
+        ttk.Label(top, text="PV:").pack(side="left", padx=(0, 4))
+        self.pv_entry = ttk.Entry(top, textvariable=self.pv_var, width=40)
+        self.pv_entry.configure(foreground="black", background="white")
+
+        self.pv_entry.pack(side="left")
+        ttk.Button(top, text="Connect", command=self._connect_pv).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Disconnect", command=self._disconnect_pv).pack(side="left", padx=(4, 12))
 
         ttk.Button(top, text="Pause", command=self._toggle_pause).pack(side="left")
 
@@ -345,6 +361,42 @@ class PvViewerApp:
             style.configure("TPanedwindow", background="black")
         except Exception:
             pass
+
+    # ------------- PV connect/disconnect -------------
+    def _connect_pv(self):
+        pv = self.pv_var.get().strip()
+        if not pv:
+            messagebox.showwarning("Connect PV", "Please enter a PV name.")
+            return
+        # Stop any existing subscription
+        self._disconnect_pv(silent=True)
+        # Clear queue and UI state for fresh stream
+        try:
+            while not self.queue.empty():
+                self.queue.get_nowait()
+        except Exception:
+            pass
+        self.im_artist = None
+        self.current_uid = -1
+        self.lbl_uid.config(text="UID: —")
+        try:
+            self.sub = NtndaSubscriber(pv, self.queue)
+            self.sub.start()
+            self.root.title(f"NTNDArray Viewer - {pv}")
+        except Exception as e:
+            self.sub = None
+            messagebox.showerror("Connect PV", f"Failed to connect to PV:\n{e}")
+
+    def _disconnect_pv(self, silent: bool = False):
+        if self.sub is not None:
+            try:
+                self.sub.stop()
+            except Exception:
+                pass
+            self.sub = None
+            self.root.title("NTNDArray Viewer")
+            if not silent:
+                messagebox.showinfo("Disconnect PV", "Disconnected.")
 
     # ------------- Queue pump -------------
     def _pump_queue(self):
@@ -501,6 +553,7 @@ class PvViewerApp:
                 self.im_artist.set_clim(vmin=self.vmin, vmax=self.vmax)
                 self.canvas.draw_idle()
 
+
     # ------------- Flat-field helpers -------------
     def _apply_flat_field(self, img: np.ndarray) -> np.ndarray:
         flat = self.flat
@@ -604,7 +657,7 @@ class PvViewerApp:
 
     def _on_close(self):
         try:
-            self.sub.stop()
+            self._disconnect_pv(silent=True)
         except Exception:
             pass
         self.root.destroy()
@@ -613,7 +666,7 @@ class PvViewerApp:
 # ----------------------- Main -----------------------
 def main():
     ap = argparse.ArgumentParser(description="Real-time NTNDArray Viewer (dark UI + grayscale + flat-field + plugins)")
-    ap.add_argument("--pv", required=True, help="PVAccess NTNDArray PV name")
+    ap.add_argument("--pv", help="(Optional) PVAccess NTNDArray PV name to pre-fill the GUI field")
     ap.add_argument("--max-fps", type=int, default=30, help="Max redraw FPS (0 = unthrottled)")
     ap.add_argument("--no-toolbar", action="store_true", help="Hide Matplotlib zoom/pan toolbar")
     ap.add_argument("--proc-config", default="processors.json", help="Plugin pipeline JSON config (set to non-existent or use --no-plugins to disable)")
@@ -638,11 +691,12 @@ def main():
         style.configure("TCheckbutton", background="black", foreground="white")
         style.configure("TButton", background="#222222", foreground="white")
         style.configure("TPanedwindow", background="black")
+        style.configure("White.TEntry", fieldbackground="white", foreground="black")
     except Exception:
         pass
 
     app = PvViewerApp(root,
-                      pv_name=args.pv,
+                      pv_name=args.pv,           # pre-fill only; can change in GUI
                       max_fps=args.max_fps,
                       show_toolbar=not args.no_toolbar)
     root.mainloop()
