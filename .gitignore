@@ -1,0 +1,101 @@
+# -----------------------------
+# Python build / packaging
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+
+# -----------------------------
+# Environment / IDE / cache
+# -----------------------------
+.env
+.venv
+venv/
+env/
+ENV/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+*.swp
+*.swo
+*.bak
+.DS_Store
+.idea/
+.vscode/
+*.code-workspace
+
+# -----------------------------
+# Logs and temp files
+# -----------------------------
+*.log
+*.tmp
+*.temp
+*.pid
+
+# -----------------------------
+# Local configuration & test data
+# -----------------------------
+*.npy
+*.npz
+*.png
+*.jpg
+*.tif
+*.tiff
+*.h5
+*.hdf5
+*.json
+*.yaml
+*.yml
+*.cfg
+*.ini
+
+# Exclude runtime state or calibration
+*.flat.npy
+*.dark.npy
+*.flat
+*.dark
+*.config
+*.state
+
+# -----------------------------
+# Compiled extensions
+# -----------------------------
+*.so
+*.pyd
+*.dll
+*.dylib
+*.a
+*.o
+
+# -----------------------------
+# Project-specific
+# -----------------------------
+# Temporary viewer outputs
+output/
+cache/
+tmp/
+__temp__/
+testdata/
+
+# -----------------------------
+# Jupyter / docs
+# -----------------------------
+*.ipynb
+docs/_build/
+site/
+
+# -----------------------------
+# OS-specific
+# -----------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
