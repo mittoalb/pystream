@@ -13,6 +13,8 @@ Options:
     --proc-config processors.json JSON pipeline config for plugins
     --no-plugins                  Disable plugin processing
     --pv <name>                   (Optional) pre-fill PV field in GUI
+    --log-file <path>             Optional log file path
+    --log-level <LEVEL>           DEBUG|INFO|WARNING|ERROR|CRITICAL (default: INFO)
 
 Features:
   - Black/dark UI (Tk + Matplotlib)
@@ -37,6 +39,7 @@ import threading
 import os
 import json
 import tempfile
+import logging
 from typing import Optional, Tuple, Dict
 
 import numpy as np
@@ -47,6 +50,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+
+# ---- Custom logger (logger.py) ----
+from logger import setup_custom_logger, log_exception
+
+LOGGER: Optional[logging.Logger] = None  # set in main()
 
 # Optional AdImageUtility for reshape
 try:
@@ -69,11 +77,12 @@ def _load_config(defaults: Optional[Dict] = None, filename: str = "viewer_config
     try:
         with open(path, "r") as f:
             data = json.load(f)
-        # fill missing keys from defaults
         for k, v in defaults.items():
             data.setdefault(k, v)
         return data
-    except Exception:
+    except Exception as e:
+        if LOGGER:
+            LOGGER.warning("Config load failed (%s). Using defaults.", e)
         return dict(defaults)
 
 def _save_config(data: dict, filename: str = "viewer_config.json") -> None:
@@ -84,11 +93,16 @@ def _save_config(data: dict, filename: str = "viewer_config.json") -> None:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2, sort_keys=True)
         os.replace(tmp, path)  # atomic on POSIX
-    except Exception:
+        if LOGGER:
+            LOGGER.info("Config saved to %s", path)
+    except Exception as e:
         try:
             os.remove(tmp)
         except Exception:
             pass
+        if LOGGER:
+            LOGGER.error("Failed to save config to %s", path)
+            log_exception(LOGGER, e)
         raise
 
 # ----------------------- Plugin pipeline (optional) -----------------------
@@ -96,13 +110,14 @@ PIPE = None
 def _init_pipeline(proc_config_path: Optional[str]):
     global PIPE
     if not proc_config_path:
+        if LOGGER: LOGGER.info("[Plugins] No proc_config path provided; pipeline disabled.")
         return
     try:
         import importlib.util
         here = os.path.dirname(os.path.abspath(__file__))
         procplug_path = os.path.join(here, "procplug.py")
         if not os.path.exists(procplug_path):
-            sys.stderr.write("[Plugins] procplug.py not found next to script\n")
+            if LOGGER: LOGGER.warning("[Plugins] procplug.py not found next to script")
             PIPE = None
             return
 
@@ -112,9 +127,13 @@ def _init_pipeline(proc_config_path: Optional[str]):
         spec.loader.exec_module(mod)  # type: ignore
 
         cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
+        if LOGGER: LOGGER.info("[Plugins] Loading pipeline config: %s", cfg_path)
         PIPE = mod.ProcessorPipeline.from_config(cfg_path)
+        if LOGGER: LOGGER.info("[Plugins] Pipeline initialized with %d processor(s)", len(getattr(PIPE, "processors", [])))
     except Exception as e:
-        sys.stderr.write(f"[Plugins] Failed to initialize pipeline: {e}\n")
+        if LOGGER:
+            LOGGER.error("[Plugins] Failed to initialize pipeline")
+            log_exception(LOGGER, e)
         PIPE = None
 
 # ----------------------- NTNDArray reshape -----------------------
@@ -130,7 +149,6 @@ def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int,
     dims = ntnda['dimension']
     nDims = len(dims)
 
-    # Default MONO
     color_mode = 0
     if 'attribute' in ntnda:
         for a in ntnda['attribute']:
@@ -141,7 +159,6 @@ def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int,
                     pass
                 break
 
-    # Get union field and raw data
     try:
         field_key = ntnda.getSelectedUnionFieldName()
         raw = ntnda['value'][0][field_key]
@@ -153,37 +170,32 @@ def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int,
         return (image_id, None, None, None, None, color_mode, field_key)
 
     if nDims == 2 and color_mode == 0:  # MONO
-        nx = dims[0]['size']
-        ny = dims[1]['size']
+        nx = dims[0]['size']; ny = dims[1]['size']
         img = np.asarray(raw).reshape(ny, nx)
         return (image_id, img, nx, ny, None, color_mode, field_key)
 
     if nDims == 3:
         d0, d1, d2 = dims[0]['size'], dims[1]['size'], dims[2]['size']
         arr = np.asarray(raw)
-        if color_mode == 2:  # RGB1: [3, NX, NY] -> (ny, nx, 3)
+        if color_mode == 2:      # RGB1: [3, NX, NY] -> (ny, nx, 3)
             nz, nx, ny = d0, d1, d2
             img = arr.reshape(nz, nx, ny).transpose(2, 1, 0)
-        elif color_mode == 3:  # RGB2: [NX, 3, NY] -> (ny, nx, 3)
+        elif color_mode == 3:    # RGB2: [NX, 3, NY] -> (ny, nx, 3)
             nx, nz, ny = d0, d1, d2
             img = arr.reshape(nx, nz, ny).transpose(2, 0, 1)
-        elif color_mode == 4:  # RGB3: [NX, NY, 3] -> (ny, nx, 3)
+        elif color_mode == 4:    # RGB3: [NX, NY, 3] -> (ny, nx, 3)
             nx, ny, nz = d0, d1, d2
             img = arr.reshape(nx, ny, nz).transpose(1, 0, 2)
         else:
-            # If effectively mono with one dim == 1, flatten to 2D
-            if 1 in (d0, d1, d2):
-                dims_sorted = sorted([d0, d1, d2], reverse=True)
-                ny, nx = dims_sorted[:2]
-                img = arr.reshape(ny, nx)
-                color_mode = 0
+            if 1 in (d0, d1, d2):  # effectively mono
+                ny, nx = sorted([d0, d1, d2], reverse=True)[:2]
+                img = arr.reshape(ny, nx); color_mode = 0
             else:
                 raise pva.InvalidArgument(f'Unsupported dims/colorMode: {dims}, cm={color_mode}')
         return (image_id, img, img.shape[1], img.shape[0], img.shape[2] if img.ndim == 3 else None,
                 color_mode, field_key)
 
     raise pva.InvalidArgument(f'Invalid NTNDArray dims: {dims}')
-
 
 # ----------------------- PVA subscriber -----------------------
 class NtndaSubscriber:
@@ -199,27 +211,30 @@ class NtndaSubscriber:
             uid, img, nx, ny, nz, cm, key = reshape_ntnda(pv)
             if img is None:
                 return
-            # Force grayscale: convert RGB(A) -> luminance Y
-            if img.ndim == 3 and img.shape[2] in (3, 4):
+            if img.ndim == 3 and img.shape[2] in (3, 4):  # enforce grayscale
                 img = (0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2])
                 if not np.issubdtype(img.dtype, np.floating):
                     img = img.astype(np.float32, copy=False)
 
-            # ---------------- apply plugin pipeline (if configured) ----------------
             if PIPE is not None:
                 try:
                     img = PIPE.apply(img, {"uid": uid, "timestamp": time.time()})
                 except Exception as e:
-                    sys.stderr.write(f"[Plugins] pipeline error: {e}\n")
+                    if LOGGER:
+                        LOGGER.error("[Plugins] pipeline error")
+                        log_exception(LOGGER, e)
 
             self.out_q.put((time.time(), uid, img))
         except Exception as exc:
-            sys.stderr.write(f"[NtndaSubscriber] callback error: {exc}\n")
+            if LOGGER:
+                LOGGER.error("[NtndaSubscriber] callback error")
+                log_exception(LOGGER, exc)
 
     def start(self):
         with self._lock:
             if self.subscribed:
                 return
+            if LOGGER: LOGGER.info("Subscribing to PV %s", self.pv_name)
             self.chan.subscribe("viewer", self._callback)
             self.chan.startMonitor()
             self.subscribed = True
@@ -228,16 +243,20 @@ class NtndaSubscriber:
         with self._lock:
             if not self.subscribed:
                 return
+            if LOGGER: LOGGER.info("Stopping monitor for PV %s", self.pv_name)
             try:
                 self.chan.stopMonitor()
-            except Exception:
-                pass
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.warning("stopMonitor raised:")
+                    log_exception(LOGGER, e)
             try:
                 self.chan.unsubscribe("viewer")
-            except Exception:
-                pass
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.warning("unsubscribe raised:")
+                    log_exception(LOGGER, e)
             self.subscribed = False
-
 
 # ----------------------- Tk viewer app (dark) -----------------------
 class PvViewerApp:
@@ -246,7 +265,6 @@ class PvViewerApp:
         self.root.title("NTNDArray DSV")  # Data stream viewer
         self.root.geometry("1280x880")
 
-        # ---- Load persisted config; CLI --pv overrides the default on first run
         self.cfg = _load_config(defaults={"pv_name": pv_name or ""}, filename="viewer_config.json")
 
         self.max_fps = int(max_fps)
@@ -258,8 +276,7 @@ class PvViewerApp:
         self.paused = False
 
         # View/contrast state
-        self.vmin = None
-        self.vmax = None
+        self.vmin = None; self.vmax = None
         self.autoscale = tk.BooleanVar(value=True)
         self.flip_h = tk.BooleanVar(value=False)
         self.flip_v = tk.BooleanVar(value=False)
@@ -271,7 +288,7 @@ class PvViewerApp:
         # Flat-field state
         self.flat = None
         self.apply_flat = tk.BooleanVar(value=False)
-        self._last_display_img = None  # keeps last shown (for Capture Flat)
+        self._last_display_img = None
 
         self.show_toolbar = show_toolbar
 
@@ -280,7 +297,7 @@ class PvViewerApp:
 
         self._build_ui()
 
-        # If a PV was provided (via CLI or persisted), auto-connect
+        # Auto-connect if PV present
         if self.pv_var.get().strip():
             self._connect_pv()
 
@@ -289,15 +306,11 @@ class PvViewerApp:
 
     # ------------- UI construction (dark) -------------
     def _build_ui(self):
-        # Top controls
-        top = ttk.Frame(self.root)
-        top.pack(side="top", fill="x", padx=8, pady=6)
+        top = ttk.Frame(self.root); top.pack(side="top", fill="x", padx=8, pady=6)
 
-        # PV selector
         ttk.Label(top, text="PV:").pack(side="left", padx=(0, 4))
         self.pv_entry = ttk.Entry(top, textvariable=self.pv_var, width=40)
         self.pv_entry.configure(foreground="black", background="white")
-
         self.pv_entry.pack(side="left")
         ttk.Button(top, text="Connect", command=self._connect_pv).pack(side="left", padx=(6, 0))
         ttk.Button(top, text="Disconnect", command=self._disconnect_pv).pack(side="left", padx=(4, 12))
@@ -313,7 +326,6 @@ class PvViewerApp:
         ttk.Checkbutton(top, text="Transpose", variable=self.transpose, command=self._redraw)\
             .pack(side="left", padx=(6, 0))
 
-        # Flat-field controls
         ttk.Checkbutton(top, text="Apply Flat", variable=self.apply_flat, command=self._redraw)\
             .pack(side="left", padx=(14, 0))
         ttk.Button(top, text="Capture Flat", command=self._capture_flat)\
@@ -328,25 +340,15 @@ class PvViewerApp:
         ttk.Button(top, text="Save Frame…", command=self._save_frame)\
             .pack(side="left", padx=(14, 0))
 
-        # Status (right side)
-        self.lbl_uid = ttk.Label(top, text="UID: —")
-        self.lbl_uid.pack(side="right")
-        self.lbl_fps = ttk.Label(top, text="FPS: —")
-        self.lbl_fps.pack(side="right", padx=(0, 14))
+        self.lbl_uid = ttk.Label(top, text="UID: —"); self.lbl_uid.pack(side="right")
+        self.lbl_fps = ttk.Label(top, text="FPS: —"); self.lbl_fps.pack(side="right", padx=(0, 14))
 
-        # Main split: left (contrast + histogram) / right (image)
         main = ttk.PanedWindow(self.root, orient="horizontal")
         main.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
 
-        # Left panel
-        left = ttk.Frame(main, width=320)
-        left.pack_propagate(False)
-        main.add(left, weight=0)
+        left = ttk.Frame(main, width=320); left.pack_propagate(False); main.add(left, weight=0)
 
-        # Contrast group
-        cf = ttk.Labelframe(left, text="Contrast")
-        cf.pack(side="top", fill="x", padx=6, pady=6)
-
+        cf = ttk.Labelframe(left, text="Contrast"); cf.pack(side="top", fill="x", padx=6, pady=6)
         self.sld_min = tk.Scale(cf, from_=0, to=65535, orient="horizontal",
                                 label="Min (vmin)", command=lambda e: self._slider_changed(),
                                 bg="black", fg="white", highlightthickness=0)
@@ -356,32 +358,23 @@ class PvViewerApp:
         self.sld_min.pack(fill="x", padx=6, pady=(6, 6))
         self.sld_max.pack(fill="x", padx=6, pady=(0, 8))
 
-        # Histogram group (default ON) - dark faces
-        hf = ttk.Labelframe(left, text="Histogram")
-        hf.pack(side="top", fill="both", expand=True, padx=6, pady=6)
+        hf = ttk.Labelframe(left, text="Histogram"); hf.pack(side="top", fill="both", expand=True, padx=6, pady=6)
         self.hist_fig = Figure(figsize=(3, 2), dpi=100, facecolor="black")
         self.hist_ax = self.hist_fig.add_subplot(111, facecolor="black")
         self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=hf)
         self.hist_canvas.get_tk_widget().pack(fill="both", expand=True)
 
-        # Right panel: image (dark)
-        right = ttk.Frame(main)
-        main.add(right, weight=1)
-
+        right = ttk.Frame(main); main.add(right, weight=1)
         self.fig = Figure(figsize=(6, 5), dpi=100, facecolor="black")
-        self.ax = self.fig.add_subplot(111, facecolor="black")
-        self.ax.set_axis_off()
+        self.ax = self.fig.add_subplot(111, facecolor="black"); self.ax.set_axis_off()
         self.im_artist = None
-
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(side="top", fill="both", expand=True)
 
         if self.show_toolbar:
-            toolbar = NavigationToolbar2Tk(self.canvas, right)
-            toolbar.update()
+            toolbar = NavigationToolbar2Tk(self.canvas, right); toolbar.update()
 
-        # Try a dark-ish ttk theme
         try:
             style = ttk.Style()
             style.theme_use("clam")
@@ -402,9 +395,7 @@ class PvViewerApp:
         if not pv:
             messagebox.showwarning("Connect PV", "Please enter a PV name.")
             return
-        # Stop any existing subscription
         self._disconnect_pv(silent=True)
-        # Clear queue and UI state for fresh stream
         try:
             while not self.queue.empty():
                 self.queue.get_nowait()
@@ -417,34 +408,37 @@ class PvViewerApp:
             self.sub = NtndaSubscriber(pv, self.queue)
             self.sub.start()
             self.root.title(f"NTNDArray Viewer - {pv}")
+            if LOGGER: LOGGER.info("Connected to PV %s", pv)
         except Exception as e:
             self.sub = None
+            if LOGGER:
+                LOGGER.error("Failed to connect to PV: %s", pv)
+                log_exception(LOGGER, e)
             messagebox.showerror("Connect PV", f"Failed to connect to PV:\n{e}")
 
     def _disconnect_pv(self, silent: bool = False):
         if self.sub is not None:
             try:
                 self.sub.stop()
-            except Exception:
-                pass
-            try:
-                self.sub = None
-            finally:
-                self.root.title("NTNDArray Viewer")
-                if not silent:
-                    messagebox.showinfo("Disconnect PV", "Disconnected.")
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.warning("Error stopping subscription:")
+                    log_exception(LOGGER, e)
+            self.sub = None
+            self.root.title("NTNDArray Viewer")
+            if not silent:
+                messagebox.showinfo("Disconnect PV", "Disconnected.")
+            if LOGGER: LOGGER.info("Disconnected from PV")
 
     # ------------- Queue pump -------------
     def _pump_queue(self):
         if self.paused:
-            self.root.after(5, self._pump_queue)
-            return
+            self.root.after(5, self._pump_queue); return
 
         if self.max_fps > 0:
             now = time.time()
             if now - self.last_draw < self.frame_interval:
-                self.root.after(2, self._pump_queue)
-                return
+                self.root.after(2, self._pump_queue); return
             latest = None
             while not self.queue.empty():
                 latest = self.queue.get_nowait()
@@ -454,7 +448,6 @@ class PvViewerApp:
                 self.last_draw = now
             self.root.after(2, self._pump_queue)
         else:
-            # Unthrottled: draw ASAP, coalesce to latest
             latest = None
             while not self.queue.empty():
                 latest = self.queue.get_nowait()
@@ -465,34 +458,24 @@ class PvViewerApp:
 
     # ------------- Image update/draw -------------
     def _update_image(self, uid: int, img: np.ndarray, ts: float):
-        # View transforms
-        if self.transpose.get():
-            img = img.T
-        if self.flip_h.get():
-            img = np.flip(img, axis=1)
-        if self.flip_v.get():
-            img = np.flip(img, axis=0)
+        if self.transpose.get(): img = img.T
+        if self.flip_h.get():    img = np.flip(img, axis=1)
+        if self.flip_v.get():    img = np.flip(img, axis=0)
 
-        # Flat-field (if enabled)
         if self.apply_flat.get() and self.flat is not None:
             img = self._apply_flat_field(img)
 
-        # Remember displayed copy for Capture Flat
         self._last_display_img = img
-
         self.current_uid = uid
 
-        # Slider ranges by dtype
         self._ensure_slider_range(img)
 
-        # Contrast
         if self.autoscale.get() or self.vmin is None or self.vmax is None:
             vmin, vmax = self._autoscale_values(img)
             self._set_sliders(vmin, vmax, from_img=True)
         else:
             vmin, vmax = self.vmin, self.vmax
 
-        # Draw (force grayscale cmap on black)
         if self.im_artist is None:
             self.im_artist = self.ax.imshow(img, origin='upper', vmin=vmin, vmax=vmax,
                                             aspect='equal', cmap='gray')
@@ -503,10 +486,8 @@ class PvViewerApp:
         self.ax.set_axis_off()
         self.canvas.draw_idle()
 
-        # Histogram
         self._draw_hist(img, vmin, vmax)
 
-        # Status: FPS EMA
         now = time.time()
         dt = max(1e-6, now - getattr(self, "_last_ts", now))
         inst_fps = 1.0 / dt
@@ -536,8 +517,7 @@ class PvViewerApp:
     def _ensure_slider_range(self, img: np.ndarray):
         dtype = img.dtype
         if np.issubdtype(dtype, np.integer):
-            info = np.iinfo(dtype)
-            lo, hi = int(info.min), int(info.max)
+            info = np.iinfo(dtype); lo, hi = int(info.min), int(info.max)
             res = max(1, (hi - lo) // 1024)
         else:
             lo = float(np.nanpercentile(img, 0.1))
@@ -546,7 +526,6 @@ class PvViewerApp:
                 lo, hi = float(np.nanmin(img)), float(np.nanmax(img))
             res = max((hi - lo) / 1024.0, 1e-6)
 
-        # Update slider bounds if changed
         if (float(self.sld_min.cget("to")) != float(hi)) or (float(self.sld_min.cget("from")) != float(lo)):
             self.sld_min.config(from_=lo, to=hi, resolution=res)
             self.sld_max.config(from_=lo, to=hi, resolution=res)
@@ -561,8 +540,7 @@ class PvViewerApp:
     def _set_sliders(self, vmin, vmax, from_img=False):
         self._updating_sliders = True
         try:
-            self.sld_min.set(vmin)
-            self.sld_max.set(vmax)
+            self.sld_min.set(vmin); self.sld_max.set(vmax)
         finally:
             self._updating_sliders = False
         if not from_img:
@@ -572,10 +550,8 @@ class PvViewerApp:
         if getattr(self, "_updating_sliders", False):
             return
         self.autoscale.set(False)
-        vmin = float(self.sld_min.get())
-        vmax = float(self.sld_max.get())
-        if vmax <= vmin:
-            vmax = vmin + 1e-6
+        vmin = float(self.sld_min.get()); vmax = float(self.sld_max.get())
+        if vmax <= vmin: vmax = vmin + 1e-6
         self.vmin, self.vmax = vmin, vmax
         self._apply_contrast()
 
@@ -619,8 +595,7 @@ class PvViewerApp:
 
     def _capture_flat(self):
         if self._last_display_img is None:
-            messagebox.showinfo("Capture Flat", "No image to capture yet.")
-            return
+            messagebox.showinfo("Capture Flat", "No image to capture yet."); return
         self.flat = np.array(self._last_display_img, copy=True)
         messagebox.showinfo("Capture Flat", "Flat captured from current view.")
 
@@ -629,8 +604,7 @@ class PvViewerApp:
             title="Load Flat (.npy)",
             filetypes=[("NumPy array", "*.npy"), ("All files", "*.*")]
         )
-        if not path:
-            return
+        if not path: return
         try:
             arr = np.load(path)
             self.flat = arr
@@ -638,23 +612,27 @@ class PvViewerApp:
             self._redraw()
         except Exception as e:
             messagebox.showerror("Load Flat", f"Failed to load flat:\n{e}")
+            if LOGGER:
+                LOGGER.error("Failed to load flat from %s", path)
+                log_exception(LOGGER, e)
 
     def _save_flat(self):
         if self.flat is None:
-            messagebox.showinfo("Save Flat", "No flat to save.")
-            return
+            messagebox.showinfo("Save Flat", "No flat to save."); return
         path = filedialog.asksaveasfilename(
             title="Save Flat as .npy",
             defaultextension=".npy",
             filetypes=[("NumPy array", "*.npy"), ("All files", "*.*")]
         )
-        if not path:
-            return
+        if not path: return
         try:
             np.save(path, self.flat)
             messagebox.showinfo("Save Flat", f"Saved flat to:\n{path}")
         except Exception as e:
             messagebox.showerror("Save Flat", f"Failed to save flat:\n{e}")
+            if LOGGER:
+                LOGGER.error("Failed to save flat to %s", path)
+                log_exception(LOGGER, e)
 
     def _clear_flat(self):
         self.flat = None
@@ -664,6 +642,7 @@ class PvViewerApp:
     # ------------- Commands -------------
     def _toggle_pause(self):
         self.paused = not self.paused
+        if LOGGER: LOGGER.info("Paused = %s", self.paused)
 
     def _redraw(self):
         try:
@@ -671,56 +650,85 @@ class PvViewerApp:
                 return
             arr = np.array(self.im_artist.get_array())
             self._update_image(self.current_uid, arr, time.time())
-        except Exception:
-            pass
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning("Redraw failed:")
+                log_exception(LOGGER, e)
 
     def _save_frame(self):
         if self.im_artist is None:
-            messagebox.showinfo("Save Frame", "No image to save yet.")
-            return
+            messagebox.showinfo("Save Frame", "No image to save yet."); return
         arr = np.array(self.im_artist.get_array())
         path = filedialog.asksaveasfilename(
             defaultextension=".npy",
             filetypes=[("NumPy array", "*.npy"), ("PNG image", "*.png"), ("All files", "*.*")]
         )
-        if not path:
-            return
-        if path.lower().endswith(".png"):
-            self.fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="black")
-        else:
-            np.save(path, arr)
+        if not path: return
+        try:
+            if path.lower().endswith(".png"):
+                self.fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="black")
+            else:
+                np.save(path, arr)
+            if LOGGER: LOGGER.info("Saved frame to %s", path)
+        except Exception as e:
+            messagebox.showerror("Save Frame", f"Failed to save frame:\n{e}")
+            if LOGGER:
+                LOGGER.error("Failed saving frame to %s", path)
+                log_exception(LOGGER, e)
 
     def _on_close(self):
-        # Persist current PV for next launch
         try:
             self.cfg["pv_name"] = self.pv_var.get().strip()
             _save_config(self.cfg, filename="viewer_config.json")
         except Exception as e:
-            sys.stderr.write(f"[Config] Failed to save viewer_config.json: {e}\n")
+            if LOGGER:
+                LOGGER.error("[Config] Failed to persist PV on close")
+                log_exception(LOGGER, e)
 
         try:
             self._disconnect_pv(silent=True)
-        except Exception:
-            pass
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning("Error during disconnect on close:")
+                log_exception(LOGGER, e)
         self.root.destroy()
-
+        if LOGGER: LOGGER.info("Viewer closed")
 
 # ----------------------- Main -----------------------
+def _parse_loglevel(s: Optional[str]) -> int:
+    if not s: return logging.INFO
+    s = s.upper().strip()
+    return getattr(logging, s, logging.INFO)
+
 def main():
+    global LOGGER
     ap = argparse.ArgumentParser(description="Real-time NTNDArray Viewer (dark UI + grayscale + flat-field + plugins)")
     ap.add_argument("--pv", help="(Optional) PVAccess NTNDArray PV name to pre-fill the GUI field")
     ap.add_argument("--max-fps", type=int, default=30, help="Max redraw FPS (0 = unthrottled)")
     ap.add_argument("--no-toolbar", action="store_true", help="Hide Matplotlib zoom/pan toolbar")
     ap.add_argument("--proc-config", default="pipelines/processors.json", help="Plugin pipeline JSON config (set to non-existent or use --no-plugins to disable)")
     ap.add_argument("--no-plugins", action="store_true", help="Disable plugin processing")
+    ap.add_argument("--log-file", default=None, help="Optional log file path")
+    ap.add_argument("--log-level", default="INFO", help="Logging level: DEBUG|INFO|WARNING|ERROR|CRITICAL")
     args = ap.parse_args()
+
+    # ---- Logger ----
+    LOGGER = setup_custom_logger(
+        name="pystream",
+        lfname=args.log_file,
+        stream_to_console=True,
+        level=_parse_loglevel(args.log_level),
+    )
+    LOGGER.info("Starting NTNDArray viewer")
+    LOGGER.info("Args: %s", vars(args))
 
     # Initialize plugin pipeline (optional)
     if not args.no_plugins:
         _init_pipeline(args.proc_config)
+    else:
+        LOGGER.info("[Plugins] Disabled via --no-plugins")
 
     root = tk.Tk()
-    # Dark window background and ttk styles
     root.configure(bg='black')
     try:
         style = ttk.Style()
@@ -734,15 +742,20 @@ def main():
         style.configure("TButton", background="#222222", foreground="white")
         style.configure("TPanedwindow", background="black")
         style.configure("White.TEntry", fieldbackground="white", foreground="black")
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning("Failed to apply ttk styles:")
+        log_exception(LOGGER, e)
 
     app = PvViewerApp(root,
                       pv_name=args.pv,           # pre-fill only; persisted thereafter
                       max_fps=args.max_fps,
                       show_toolbar=not args.no_toolbar)
-    root.mainloop()
-
+    try:
+        root.mainloop()
+    except Exception as e:
+        LOGGER.critical("Unhandled exception in mainloop:")
+        log_exception(LOGGER, e)
+        raise
 
 if __name__ == "__main__":
     main()
