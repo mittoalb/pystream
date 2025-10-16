@@ -10,7 +10,7 @@ def log_exception(logger, err, fmt="%s"):
         logger.error(fmt, tb_line)
 
 
-def setup_custom_logger(name: str = "laminography", lfname: str = None, stream_to_console: bool = True, level=logging.DEBUG):
+def setup_custom_logger(name: str = "NTNDAViewer", lfname: str = None, stream_to_console: bool = True, level=logging.DEBUG):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 
