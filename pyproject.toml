@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pystream"
 version = "2.0.0"
-description = "Real-time NTNDArray viewer with plugin pipeline - PyQtGraph & VisPy support"
+description = "Real-time NTNDArray viewer - PyQtGraph & VisPy support"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -15,49 +15,21 @@ dependencies = [
   "pvapy>=5.6.0",
   "PyQt5>=5.15",
   "pyqtgraph>=0.13.0",
+  "Pillow>=9.0",
 ]
 
 [project.optional-dependencies]
-# VisPy backend for local high-performance OpenGL rendering
-vispy = [
-  "vispy>=0.14.0",
-]
-# Legacy Tkinter/Matplotlib backend
-legacy = [
-  "matplotlib>=3.5",
-  "tkinterdnd2; platform_system == 'Windows'",
-]
-# Image export support
-export = [
-  "Pillow>=9.0",
-]
-# All optional features
-all = [
-  "vispy>=0.14.0",
-  "matplotlib>=3.5",
-  "Pillow>=9.0",
-  "tkinterdnd2; platform_system == 'Windows'",
-]
-# Development tools
-dev = [
-  "black",
-  "flake8",
-  "pytest",
-]
+vispy = ["vispy>=0.14.0"]
+all = ["vispy>=0.14.0"]
+dev = ["black", "flake8", "pytest"]
 
 [project.scripts]
-# PyQtGraph viewer (default - SSH compatible)
-pystream = "pyqtgraph_viewer:main"
-pvviewer = "pyqtgraph_viewer:main"
-# VisPy viewer (high performance, requires OpenGL)
-pystream-vispy = "pyqtstream:main"
-# Legacy Tkinter viewer
-pystream-legacy = "pystream:main"
+pystream = "pystream.pystream:main"
+
 
 [tool.setuptools]
-# Multiple viewer modules
-py-modules = ["pystream", "pyqtstream", "pyqtgraph_viewer", "logger", "procplug"]
-include-package-data = true
+package-dir = {"" = "src"}
+packages = ["pystream"]
 
 [tool.setuptools.package-data]
-"*" = ["*.json", "pipelines/*.json"]
+pystream = ["pipelines/*.json"]

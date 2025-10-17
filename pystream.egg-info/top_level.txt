@@ -1,5 +1,0 @@
-logger
-procplug
-pyqtgraph_viewer
-pyqtstream
-pystream

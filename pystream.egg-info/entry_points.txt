@@ -1,5 +1,0 @@
-[console_scripts]
-pvviewer = pyqtgraph_viewer:main
-pystream = pyqtgraph_viewer:main
-pystream-legacy = pystream:main
-pystream-vispy = pyqtstream:main
