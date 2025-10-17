@@ -2,12 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-NTNDArray Real-time Viewer (PyQt5/PyQtGraph - SSH Compatible & FAST)
+NTNDArray Real-time Viewer (PyQt5/PyQtGraph)
 ---------------------------------------------------------------------
-- PyQtGraph for high-performance rendering without OpenGL requirement
-- Works perfectly over SSH -Y
-- Interactive crosshair with position and value readout
-- Maintains high frame rates even remotely
 
 Usage:
   python pyqtgraph_viewer.py --pv <PVNAME>
