@@ -1,10 +1,29 @@
 numpy>=1.21
-matplotlib>=3.5
 pvapy>=5.6.0
+PyQt5>=5.15
+pyqtgraph>=0.13.0
 
-[:platform_system == "Windows"]
+[all]
+vispy>=0.14.0
+matplotlib>=3.5
+Pillow>=9.0
+
+[all:platform_system == "Windows"]
 tkinterdnd2
 
 [dev]
 black
 flake8
+pytest
+
+[export]
+Pillow>=9.0
+
+[legacy]
+matplotlib>=3.5
+
+[legacy:platform_system == "Windows"]
+tkinterdnd2
+
+[vispy]
+vispy>=0.14.0

@@ -1,4 +1,6 @@
 README.md
+logger.py
+procplug.py
 pyproject.toml
 pystream.py
 pystream.egg-info/PKG-INFO

@@ -4,6 +4,11 @@
 """
 NTNDArray Real-time Viewer (PyQt5/PyQtGraph - SSH Compatible & FAST)
 ---------------------------------------------------------------------
+- PyQtGraph for high-performance rendering without OpenGL requirement
+- Works perfectly over SSH -Y
+- Interactive crosshair with position and value readout
+- Maintains high frame rates even remotely
+
 Usage:
   python pyqtgraph_viewer.py --pv <PVNAME>
      [--max-fps 0] [--hist-fps 4] [--display-bin 0]
@@ -297,6 +302,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.crosshair_x = None
         self.crosshair_y = None
         
+        # Recording
+        self.recording = False
+        self.recorded_frame_count = 0
+        self.record_path = ""
+        self.record_dir = ""
+        
         self._build_ui()
         
         # Connect signal
@@ -437,6 +448,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_clear.clicked.connect(self._clear_flat)
         top_layout.addWidget(btn_clear)
         
+        sep4 = QtWidgets.QFrame()
+        sep4.setFrameShape(QtWidgets.QFrame.VLine)
+        top_layout.addWidget(sep4)
+        
+        # Recording controls
+        self.btn_record = QtWidgets.QPushButton("Start Recording")
+        self.btn_record.setCheckable(True)
+        self.btn_record.clicked.connect(self._toggle_recording)
+        top_layout.addWidget(self.btn_record)
+        
         top_layout.addStretch()
         
         self.lbl_fps = QtWidgets.QLabel("FPS: —")
@@ -505,6 +526,39 @@ class PvViewerApp(QtWidgets.QMainWindow):
         crosshair_layout.addWidget(self.lbl_crosshair)
         crosshair_group.setLayout(crosshair_layout)
         left_layout.addWidget(crosshair_group)
+        
+        # Recording group
+        record_group = QtWidgets.QGroupBox("Recording (TIFF Stack)")
+        record_layout = QtWidgets.QVBoxLayout()
+        record_layout.setSpacing(6)
+        
+        # Path selection with label
+        record_layout.addWidget(QtWidgets.QLabel("Output File:"))
+        path_layout = QtWidgets.QHBoxLayout()
+        path_layout.setSpacing(4)
+        self.record_path_entry = QtWidgets.QLineEdit()
+        self.record_path_entry.setPlaceholderText("recording.tiff")
+        self.record_path_entry.setToolTip("Path where multi-frame TIFF stack will be saved")
+        path_layout.addWidget(self.record_path_entry)
+        btn_browse = QtWidgets.QPushButton("Browse...")
+        btn_browse.clicked.connect(self._browse_record_path)
+        btn_browse.setMaximumWidth(80)
+        path_layout.addWidget(btn_browse)
+        record_layout.addLayout(path_layout)
+        
+        # Status label with instructions
+        self.lbl_record_status = QtWidgets.QLabel(
+            "Not recording\n\n"
+            "Click 'Start Recording' to begin\n"
+            "capturing all frames.\n"
+            "Click 'Stop Recording' to save."
+        )
+        self.lbl_record_status.setWordWrap(True)
+        self.lbl_record_status.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; }")
+        record_layout.addWidget(self.lbl_record_status)
+        
+        record_group.setLayout(record_layout)
+        left_layout.addWidget(record_group)
         
         # Save button
         btn_save_frame = QtWidgets.QPushButton("Save Current Frame...")
@@ -752,6 +806,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
             f"Mean: {img.mean():.2f}"
         )
         
+        # Recording - capture frame
+        if self.recording:
+            self.recorded_frames.append(np.copy(img))
+            num_frames = len(self.recorded_frames)
+            self.lbl_record_status.setText(
+                f"🔴 RECORDING\n\n"
+                f"Frames: {num_frames}\n\n"
+                f"Click 'Stop Recording' to save\n"
+                f"all {num_frames} frames as TIFF stack"
+            )
+        
         # Histogram update (throttled)
         if (now - self._last_hist_t) >= self.hist_interval:
             self._update_histogram(img, vmin, vmax)
@@ -973,6 +1038,129 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.flat = None
         QtWidgets.QMessageBox.information(self, "Clear Flat", "Flat cleared.")
     
+    # ------------- Recording -------------
+    def _browse_record_path(self):
+        """Browse for output TIFF file path"""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Recording As", "", "TIFF Stack (*.tiff *.tif);;All Files (*)"
+        )
+        if path:
+            self.record_path_entry.setText(path)
+    
+    def _toggle_recording(self):
+        """Start or stop recording frames"""
+        if not self.recording:
+            # Start recording
+            path = self.record_path_entry.text().strip()
+            if not path:
+                QtWidgets.QMessageBox.warning(
+                    self, "Start Recording", 
+                    "Please specify an output file path first."
+                )
+                self.btn_record.setChecked(False)
+                return
+            
+            self.recording = True
+            self.recorded_frames = []
+            self.record_path = path
+            self.btn_record.setText("Stop Recording")
+            self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
+            self.lbl_record_status.setText(
+                "🔴 RECORDING\n\n"
+                "Frames: 0\n\n"
+                "Click 'Stop Recording' to save\n"
+                "all captured frames as TIFF stack"
+            )
+            if LOGGER:
+                LOGGER.info("Started recording to %s", path)
+        else:
+            # Stop recording and save
+            self.recording = False
+            self.btn_record.setText("Start Recording")
+            self.btn_record.setStyleSheet("")
+            
+            if not self.recorded_frames:
+                self.lbl_record_status.setText(
+                    "Not recording\n\n"
+                    "Click 'Start Recording' to begin\n"
+                    "capturing all frames.\n"
+                    "Click 'Stop Recording' to save."
+                )
+                QtWidgets.QMessageBox.information(
+                    self, "Stop Recording", 
+                    "No frames were recorded."
+                )
+                return
+            
+            # Save frames as TIFF stack
+            try:
+                from PIL import Image
+                
+                num_frames = len(self.recorded_frames)
+                self.lbl_record_status.setText(
+                    f"Saving {num_frames} frames\n"
+                    f"to TIFF stack...\n\n"
+                    f"Please wait..."
+                )
+                QtWidgets.QApplication.processEvents()  # Update UI
+                
+                # Convert frames to appropriate format for TIFF
+                # Stack as list of PIL Images
+                pil_images = []
+                for frame in self.recorded_frames:
+                    # Convert to uint16 if needed (TIFF supports uint16)
+                    if frame.dtype != np.uint16:
+                        # Normalize and scale to uint16 range
+                        frame_min = frame.min()
+                        frame_max = frame.max()
+                        if frame_max > frame_min:
+                            normalized = (frame - frame_min) / (frame_max - frame_min)
+                            frame_u16 = (normalized * 65535).astype(np.uint16)
+                        else:
+                            frame_u16 = np.zeros_like(frame, dtype=np.uint16)
+                    else:
+                        frame_u16 = frame
+                    
+                    pil_images.append(Image.fromarray(frame_u16))
+                
+                # Save as multi-page TIFF
+                pil_images[0].save(
+                    self.record_path,
+                    save_all=True,
+                    append_images=pil_images[1:],
+                    compression="tiff_deflate"
+                )
+                
+                self.lbl_record_status.setText(
+                    f"✓ Saved successfully!\n\n"
+                    f"{num_frames} frames saved to:\n"
+                    f"{os.path.basename(self.record_path)}\n\n"
+                    f"Ready to record again"
+                )
+                if LOGGER:
+                    LOGGER.info("Saved %d frames to %s", num_frames, self.record_path)
+                
+                QtWidgets.QMessageBox.information(
+                    self, "Recording Saved", 
+                    f"Successfully saved {num_frames} frames\n"
+                    f"as multi-page TIFF stack to:\n\n{self.record_path}"
+                )
+            except Exception as e:
+                self.lbl_record_status.setText(
+                    "✗ Save failed!\n\n"
+                    "See error message.\n\n"
+                    "Ready to record again"
+                )
+                if LOGGER:
+                    LOGGER.error("Failed to save recording:")
+                    log_exception(LOGGER, e)
+                QtWidgets.QMessageBox.critical(
+                    self, "Save Recording", 
+                    f"Failed to save recording:\n{e}"
+                )
+            finally:
+                self.recorded_frames = []
+    
     # ------------- Other commands -------------
     def _toggle_pause(self):
         self.paused = not self.paused
@@ -1018,6 +1206,21 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 log_exception(LOGGER, e)
     
     def closeEvent(self, event):
+        # Stop recording if active
+        if self.recording:
+            reply = QtWidgets.QMessageBox.question(
+                self, "Recording Active",
+                f"Recording is active with {len(self.recorded_frames)} frames. Save before closing?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel
+            )
+            
+            if reply == QtWidgets.QMessageBox.Cancel:
+                event.ignore()
+                return
+            elif reply == QtWidgets.QMessageBox.Yes:
+                self.btn_record.setChecked(False)
+                self._toggle_recording()
+        
         try:
             self.cfg["pv_name"] = self.pv_entry.text().strip()
             _save_config(self.cfg)
