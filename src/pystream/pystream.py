@@ -36,6 +36,7 @@ pg.setConfigOptions(imageAxisOrder='row-major')
 
 # Custom logger
 from .logger import setup_custom_logger, log_exception
+from .roi_plugin import ROIManager
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -306,8 +307,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_path = ""
         self.record_dir = ""
         
+
+        self.roi_manager = None 
         self._build_ui()
         
+        # Initialize ROI manager
+        self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
+
+        self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
+        self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
+
         # Connect signal
         self.image_ready.connect(self._update_image_slot)
         
@@ -347,6 +356,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
         
+        self.image_view.view.setMouseMode(pg.ViewBox.RectMode)
+        # Enable mouse wheel zoom
+        self.image_view.view.setMouseEnabled(x=True, y=True)
+
+        # Disable panning but keep zoom
+        self.image_view.view.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
+
+        # Avoid draggable image
+        #self.image_view.view.setMouseEnabled(x=False, y=False)
+
         # Add crosshair lines
         self.crosshair_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=2))
         self.crosshair_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('y', width=2))
@@ -393,6 +412,13 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.btn_pause.clicked.connect(self._toggle_pause)
         top_layout.addWidget(self.btn_pause)
         
+        # Home button to reset view
+        btn_home = QtWidgets.QPushButton("Home")
+        btn_home.clicked.connect(self._reset_view)
+        btn_home.setToolTip("Reset zoom and pan to show full image")
+        top_layout.addWidget(btn_home)
+
+
         sep1 = QtWidgets.QFrame()
         sep1.setFrameShape(QtWidgets.QFrame.VLine)
         top_layout.addWidget(sep1)
@@ -400,6 +426,13 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
         self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
         top_layout.addWidget(self.chk_crosshair)
+
+        # ROI Controls
+        self.chk_roi = QtWidgets.QCheckBox("ROI")
+        top_layout.addWidget(self.chk_roi)
+
+        self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
+        top_layout.addWidget(self.btn_reset_roi)  
         
         sep2 = QtWidgets.QFrame()
         sep2.setFrameShape(QtWidgets.QFrame.VLine)
@@ -514,6 +547,21 @@ class PvViewerApp(QtWidgets.QMainWindow):
         info_layout.addWidget(self.lbl_info)
         info_group.setLayout(info_layout)
         left_layout.addWidget(info_group)
+
+
+        # ROI Statistics group - ADD THESE 11 LINES
+        roi_group = QtWidgets.QGroupBox("ROI Statistics")
+        roi_layout = QtWidgets.QVBoxLayout()
+        self.lbl_roi_info = QtWidgets.QLabel("No ROI selected")
+        self.lbl_roi_info.setWordWrap(True)
+        self.lbl_roi_info.setStyleSheet(
+                "QLabel { background-color: #1a1a1a; padding: 8px; "
+                "border: 1px solid #333; font-family: monospace; }"
+        )
+        roi_layout.addWidget(self.lbl_roi_info)
+        roi_group.setLayout(roi_layout)
+        left_layout.addWidget(roi_group)
+
         
         # Crosshair info group
         crosshair_group = QtWidgets.QGroupBox("Crosshair")
@@ -785,6 +833,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.crosshair_y = img.shape[0] // 2
             self._update_crosshair_display()
         
+        # Update ROI Statistic
+        self.roi_manager.update_stats(img)
+
+
         # FPS calculation
         now = time.time()
         dt = max(1e-6, now - self._last_ts)
@@ -1168,7 +1220,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.btn_pause.setText("Pause")
         if LOGGER:
             LOGGER.info("Paused = %s", self.paused)
-    
+
+    def _reset_view(self):
+        """Reset view to show entire image"""
+        if self._last_display_img is not None:
+            self.image_view.view.autoRange()
+        else:
+            QtWidgets.QMessageBox.information(self, "Reset View", "No image loaded yet.")
+
     def _save_frame(self):
         if self._last_display_img is None:
             QtWidgets.QMessageBox.information(self, "Save Frame", "No image to save yet.")
@@ -1234,6 +1293,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 LOGGER.warning("Error during disconnect on close:")
                 log_exception(LOGGER, e)
         
+        # Cleanup ROI
+        self.roi_manager.cleanup()
+
         self.pump_timer.stop()
         
         if LOGGER:
