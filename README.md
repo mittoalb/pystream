@@ -28,6 +28,11 @@ pystream --pv YOUR:NTNDARRAY:PV
 
 # With options
 pystream --pv 2bmSP2:Pva1:Image --max-fps 0 --log-level DEBUG
+
+
+![PYSTREAM GUI](https://github.com/mittoalb/pystream/blob/main/GUI.png)
+
+
 ```
 
 ### Command-Line Options
