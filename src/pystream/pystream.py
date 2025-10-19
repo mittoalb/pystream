@@ -36,7 +36,7 @@ pg.setConfigOptions(imageAxisOrder='row-major')
 
 # Custom logger
 from .logger import setup_custom_logger, log_exception
-from .roi_plugin import ROIManager
+from .plugins.roi import ROIManager
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -487,8 +487,13 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.btn_record = QtWidgets.QPushButton("Start Recording")
         self.btn_record.setCheckable(True)
         self.btn_record.clicked.connect(self._toggle_recording)
-        top_layout.addWidget(self.btn_record)
-        
+        top_layout.addWidget(self.btn_record)   
+
+        # MOSAIC button
+        #btn_stitch = QtWidgets.QPushButton("Camera Stitch")
+        #btn_stitch.clicked.connect(self._open_camera_stitch)
+        #top_layout.addWidget(btn_stitch)
+             
         top_layout.addStretch()
         
         self.lbl_fps = QtWidgets.QLabel("FPS: —")
