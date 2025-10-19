@@ -21,7 +21,7 @@ import numpy as np
 import pvaccess as pva
 
 
-# ==================== AdImageUtility (embedded) ====================
+# ==================== AdImageUtility ====================
 class AdImageUtility:
     """Utility class for creating NTNDArray structures"""
     

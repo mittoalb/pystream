@@ -34,13 +34,14 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
 
-# Custom logger
+# Logger
 from .logger import setup_custom_logger, log_exception
+
+# Plugins
 from .plugins.roi import ROIManager
 
 LOGGER: Optional[logging.Logger] = None
 
-# Optional AdImageUtility
 try:
     from AdImageUtility import AdImageUtility as _ADU
     _HAS_ADU = True
