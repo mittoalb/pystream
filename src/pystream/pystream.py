@@ -40,6 +40,7 @@ from .logger import setup_custom_logger, log_exception
 # Plugins
 from .plugins.roi import ROIManager
 from .plugins.mosalign import MotorScanDialog
+from .plugins.line import LineProfileManager
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -310,7 +311,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_dir = ""
         
         self.motor_scan_dialog = None
-        self.roi_manager = None 
+        self.roi_manager = None
+        self.line_manager = None
         self._build_ui()
         
         # Initialize ROI manager
@@ -318,6 +320,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
         self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
+
+        self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
+        self.chk_line.stateChanged.connect(self.line_manager.toggle)
+        self.btn_reset_line.clicked.connect(self.line_manager.reset)
 
         # Connect signal
         self.image_ready.connect(self._update_image_slot)
@@ -435,6 +441,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
         top_layout.addWidget(self.btn_reset_roi)  
+
+        self.chk_line = QtWidgets.QCheckBox("Line")
+        top_layout.addWidget(self.chk_line)
+
+        self.btn_reset_line = QtWidgets.QPushButton("Reset Line")
+        top_layout.addWidget(self.btn_reset_line)
 
         sep3 = QtWidgets.QFrame()
         sep3.setFrameShape(QtWidgets.QFrame.VLine)
@@ -578,6 +590,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         roi_group.setLayout(roi_layout)
         left_layout.addWidget(roi_group)
 
+        # Line Profile group
+        line_group = QtWidgets.QGroupBox("Line Profile")
+        line_layout = QtWidgets.QVBoxLayout()
+        self.lbl_line_info = QtWidgets.QLabel("No line selected")
+        self.lbl_line_info.setWordWrap(True)
+        line_layout.addWidget(self.lbl_line_info)
+        line_group.setLayout(line_layout)
+        left_layout.addWidget(line_group)
         
         # Crosshair info group
         crosshair_group = QtWidgets.QGroupBox("Crosshair")
@@ -851,7 +871,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Update ROI Statistic
         self.roi_manager.update_stats(img)
-
+        self.line_manager.update_stats(img)
 
         # FPS calculation
         now = time.time()
@@ -1319,6 +1339,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Cleanup ROI
         self.roi_manager.cleanup()
+        self.line_manager.cleanup()
 
 	# Clean mosalign
         self.pump_timer.stop()
