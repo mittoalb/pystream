@@ -39,6 +39,7 @@ from .logger import setup_custom_logger, log_exception
 
 # Plugins
 from .plugins.roi import ROIManager
+from .plugins.mosalign import MotorScanDialog
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -308,7 +309,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_path = ""
         self.record_dir = ""
         
-
+        self.motor_scan_dialog = None
         self.roi_manager = None 
         self._build_ui()
         
@@ -434,7 +435,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
         top_layout.addWidget(self.btn_reset_roi)  
-        
+
+        sep3 = QtWidgets.QFrame()
+        sep3.setFrameShape(QtWidgets.QFrame.VLine)
+        top_layout.addWidget(sep3)
+
+        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
+        btn_motor_scan.clicked.connect(self._open_motor_scan)
+        btn_motor_scan.setToolTip("Open Mosalign GUI")
+        top_layout.addWidget(btn_motor_scan)
+
         sep2 = QtWidgets.QFrame()
         sep2.setFrameShape(QtWidgets.QFrame.VLine)
         top_layout.addWidget(sep2)
@@ -1267,7 +1277,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.error("Failed saving frame to %s", path)
                 log_exception(LOGGER, e)
-    
+
+    def _open_motor_scan(self):
+        """Open the motor scan dialog"""
+        if self.motor_scan_dialog is None:
+                self.motor_scan_dialog = MotorScanDialog(parent=self, logger=LOGGER)
+        self.motor_scan_dialog.show()
+        self.motor_scan_dialog.raise_()
+        self.motor_scan_dialog.activateWindow()
+  
     def closeEvent(self, event):
         # Stop recording if active
         if self.recording:
@@ -1302,12 +1320,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Cleanup ROI
         self.roi_manager.cleanup()
 
+	# Clean mosalign
         self.pump_timer.stop()
-        
+        if self.motor_scan_dialog:
+            self.motor_scan_dialog.close()  # ADD THIS        
+
         if LOGGER:
             LOGGER.info("Viewer closed")
         event.accept()
-
 
 # ----------------------- Main -----------------------
 def _parse_loglevel(s: Optional[str]) -> int:

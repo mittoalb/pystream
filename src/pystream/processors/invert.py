@@ -1,7 +1,6 @@
 import numpy as np
 
 def process(img, meta=None):
-    """Invert contrast of a grayscale image (white↔black)."""
     if meta is None:
         meta = {}
 
@@ -19,4 +18,4 @@ def process(img, meta=None):
         out = out.astype(img.dtype, copy=False)
 
     meta["inverted"] = True
-    return out, meta
+    return out*0.0, meta
