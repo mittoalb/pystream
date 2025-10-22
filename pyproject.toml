@@ -26,10 +26,12 @@ dev = ["black", "flake8", "pytest"]
 [project.scripts]
 pystream = "pystream.pystream:main"
 
-
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["pystream"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pystream*"]
 
 [tool.setuptools.package-data]
 pystream = ["pipelines/*.json"]

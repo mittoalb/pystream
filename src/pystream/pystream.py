@@ -34,13 +34,15 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
 
-# Custom logger
+# Logger
 from .logger import setup_custom_logger, log_exception
-from .roi_plugin import ROIManager
+
+# Plugins
+from .plugins.roi import ROIManager
+from .plugins.mosalign import MotorScanDialog
 
 LOGGER: Optional[logging.Logger] = None
 
-# Optional AdImageUtility
 try:
     from AdImageUtility import AdImageUtility as _ADU
     _HAS_ADU = True
@@ -307,7 +309,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_path = ""
         self.record_dir = ""
         
-
+        self.motor_scan_dialog = None
         self.roi_manager = None 
         self._build_ui()
         
@@ -433,7 +435,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
         top_layout.addWidget(self.btn_reset_roi)  
-        
+
+        sep3 = QtWidgets.QFrame()
+        sep3.setFrameShape(QtWidgets.QFrame.VLine)
+        top_layout.addWidget(sep3)
+
+        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
+        btn_motor_scan.clicked.connect(self._open_motor_scan)
+        btn_motor_scan.setToolTip("Open Mosalign GUI")
+        top_layout.addWidget(btn_motor_scan)
+
         sep2 = QtWidgets.QFrame()
         sep2.setFrameShape(QtWidgets.QFrame.VLine)
         top_layout.addWidget(sep2)
@@ -487,8 +498,13 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.btn_record = QtWidgets.QPushButton("Start Recording")
         self.btn_record.setCheckable(True)
         self.btn_record.clicked.connect(self._toggle_recording)
-        top_layout.addWidget(self.btn_record)
-        
+        top_layout.addWidget(self.btn_record)   
+
+        # MOSAIC button
+        #btn_stitch = QtWidgets.QPushButton("Camera Stitch")
+        #btn_stitch.clicked.connect(self._open_camera_stitch)
+        #top_layout.addWidget(btn_stitch)
+             
         top_layout.addStretch()
         
         self.lbl_fps = QtWidgets.QLabel("FPS: —")
@@ -1261,7 +1277,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.error("Failed saving frame to %s", path)
                 log_exception(LOGGER, e)
-    
+
+    def _open_motor_scan(self):
+        """Open the motor scan dialog"""
+        if self.motor_scan_dialog is None:
+                self.motor_scan_dialog = MotorScanDialog(parent=self, logger=LOGGER)
+        self.motor_scan_dialog.show()
+        self.motor_scan_dialog.raise_()
+        self.motor_scan_dialog.activateWindow()
+  
     def closeEvent(self, event):
         # Stop recording if active
         if self.recording:
@@ -1296,12 +1320,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Cleanup ROI
         self.roi_manager.cleanup()
 
+	# Clean mosalign
         self.pump_timer.stop()
-        
+        if self.motor_scan_dialog:
+            self.motor_scan_dialog.close()  # ADD THIS        
+
         if LOGGER:
             LOGGER.info("Viewer closed")
         event.accept()
-
 
 # ----------------------- Main -----------------------
 def _parse_loglevel(s: Optional[str]) -> int:
