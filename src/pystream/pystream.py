@@ -404,136 +404,167 @@ class PvViewerApp(QtWidgets.QMainWindow):
     def _create_top_bar(self):
         top_bar = QtWidgets.QWidget()
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setContentsMargins(5, 5, 5, 5)
         top_layout.setSpacing(8)
         
-        top_layout.addWidget(QtWidgets.QLabel("PV:"))
+        # === CONNECTION GROUP ===
+        conn_group = QtWidgets.QGroupBox("Connection")
+        conn_layout = QtWidgets.QHBoxLayout()
+        conn_layout.setSpacing(5)
+        conn_layout.setContentsMargins(5, 5, 5, 5)
+        
+        conn_layout.addWidget(QtWidgets.QLabel("PV:"))
         self.pv_entry = QtWidgets.QLineEdit(self.cfg.get("pv_name", ""))
-        self.pv_entry.setMinimumWidth(250)
-        top_layout.addWidget(self.pv_entry)
+        self.pv_entry.setMinimumWidth(200)
+        self.pv_entry.returnPressed.connect(self._connect_pv)
+        conn_layout.addWidget(self.pv_entry)
         
         btn_connect = QtWidgets.QPushButton("Connect")
         btn_connect.clicked.connect(self._connect_pv)
-        top_layout.addWidget(btn_connect)
+        conn_layout.addWidget(btn_connect)
         
         btn_disconnect = QtWidgets.QPushButton("Disconnect")
         btn_disconnect.clicked.connect(self._disconnect_pv)
-        top_layout.addWidget(btn_disconnect)
+        conn_layout.addWidget(btn_disconnect)
+        
+        conn_group.setLayout(conn_layout)
+        top_layout.addWidget(conn_group)
+        
+        # === PLAYBACK GROUP ===
+        playback_group = QtWidgets.QGroupBox("Playback")
+        playback_layout = QtWidgets.QHBoxLayout()
+        playback_layout.setSpacing(5)
+        playback_layout.setContentsMargins(5, 5, 5, 5)
         
         self.btn_pause = QtWidgets.QPushButton("Pause")
         self.btn_pause.setCheckable(True)
         self.btn_pause.clicked.connect(self._toggle_pause)
-        top_layout.addWidget(self.btn_pause)
+        playback_layout.addWidget(self.btn_pause)
         
-        # Home button to reset view
-        btn_home = QtWidgets.QPushButton("Home")
-        btn_home.clicked.connect(self._reset_view)
-        btn_home.setToolTip("Reset zoom and pan to show full image")
-        top_layout.addWidget(btn_home)
-
         self.btn_accumulate = QtWidgets.QPushButton("Accumulate: OFF")
         self.btn_accumulate.setCheckable(True)
         self.btn_accumulate.clicked.connect(self._toggle_accumulation)
-        top_layout.addWidget(self.btn_accumulate)
-
-        sep1 = QtWidgets.QFrame()
-        sep1.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep1)
+        playback_layout.addWidget(self.btn_accumulate)
         
-        self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
-        self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
-        top_layout.addWidget(self.chk_crosshair)
-
-        # ROI Controls
-        self.chk_roi = QtWidgets.QCheckBox("ROI")
-        top_layout.addWidget(self.chk_roi)
-
-        self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
-        top_layout.addWidget(self.btn_reset_roi)  
-
-        self.chk_line = QtWidgets.QCheckBox("Line")
-        top_layout.addWidget(self.chk_line)
-
-        self.btn_reset_line = QtWidgets.QPushButton("Reset Line")
-        top_layout.addWidget(self.btn_reset_line)
-
-        sep3 = QtWidgets.QFrame()
-        sep3.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep3)
-
-        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
-        btn_motor_scan.clicked.connect(self._open_motor_scan)
-        btn_motor_scan.setToolTip("Open Mosalign GUI")
-        top_layout.addWidget(btn_motor_scan)
-
-        sep2 = QtWidgets.QFrame()
-        sep2.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep2)
+        self.btn_record = QtWidgets.QPushButton("Record")
+        self.btn_record.setCheckable(True)
+        self.btn_record.clicked.connect(self._toggle_recording)
+        playback_layout.addWidget(self.btn_record)
+        
+        playback_group.setLayout(playback_layout)
+        top_layout.addWidget(playback_group)
+        
+        # === VIEW CONTROLS GROUP ===
+        view_group = QtWidgets.QGroupBox("View")
+        view_layout = QtWidgets.QHBoxLayout()
+        view_layout.setSpacing(5)
+        view_layout.setContentsMargins(5, 5, 5, 5)
+        
+        btn_home = QtWidgets.QPushButton("Home")
+        btn_home.clicked.connect(self._reset_view)
+        btn_home.setToolTip("Reset zoom and pan to show full image")
+        view_layout.addWidget(btn_home)
         
         self.chk_autoscale = QtWidgets.QCheckBox("Autoscale")
         self.chk_autoscale.setChecked(True)
         self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
-        top_layout.addWidget(self.chk_autoscale)
+        view_layout.addWidget(self.chk_autoscale)
+        
+        self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
+        self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
+        view_layout.addWidget(self.chk_crosshair)
+        
+        view_group.setLayout(view_layout)
+        top_layout.addWidget(view_group)
+        
+        # === ANALYSIS TOOLS GROUP ===
+        analysis_group = QtWidgets.QGroupBox("Analysis")
+        analysis_layout = QtWidgets.QHBoxLayout()
+        analysis_layout.setSpacing(5)
+        analysis_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.chk_roi = QtWidgets.QCheckBox("ROI")
+        analysis_layout.addWidget(self.chk_roi)
+        
+        self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
+        analysis_layout.addWidget(self.btn_reset_roi)
+        
+        self.chk_line = QtWidgets.QCheckBox("Line")
+        analysis_layout.addWidget(self.chk_line)
+        
+        self.btn_reset_line = QtWidgets.QPushButton("Reset Line")
+        analysis_layout.addWidget(self.btn_reset_line)
+        
+        analysis_group.setLayout(analysis_layout)
+        top_layout.addWidget(analysis_group)
+        
+        # === TRANSFORM GROUP ===
+        transform_group = QtWidgets.QGroupBox("Transform")
+        transform_layout = QtWidgets.QHBoxLayout()
+        transform_layout.setSpacing(5)
+        transform_layout.setContentsMargins(5, 5, 5, 5)
         
         self.chk_flip_h = QtWidgets.QCheckBox("Flip H")
         self.chk_flip_h.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_flip_h)
+        transform_layout.addWidget(self.chk_flip_h)
         
         self.chk_flip_v = QtWidgets.QCheckBox("Flip V")
         self.chk_flip_v.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_flip_v)
+        transform_layout.addWidget(self.chk_flip_v)
         
         self.chk_transpose = QtWidgets.QCheckBox("Transpose")
         self.chk_transpose.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_transpose)
+        transform_layout.addWidget(self.chk_transpose)
         
-        sep3 = QtWidgets.QFrame()
-        sep3.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep3)
+        transform_group.setLayout(transform_layout)
+        top_layout.addWidget(transform_group)
+        
+        # === PROCESSING GROUP ===
+        processing_group = QtWidgets.QGroupBox("Processing")
+        processing_layout = QtWidgets.QHBoxLayout()
+        processing_layout.setSpacing(5)
+        processing_layout.setContentsMargins(5, 5, 5, 5)
         
         self.chk_apply_flat = QtWidgets.QCheckBox("Apply Flat")
         self.chk_apply_flat.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_apply_flat)
+        processing_layout.addWidget(self.chk_apply_flat)
         
         btn_capture = QtWidgets.QPushButton("Capture")
         btn_capture.clicked.connect(self._capture_flat)
-        top_layout.addWidget(btn_capture)
+        processing_layout.addWidget(btn_capture)
         
         btn_load = QtWidgets.QPushButton("Load...")
         btn_load.clicked.connect(self._load_flat)
-        top_layout.addWidget(btn_load)
+        processing_layout.addWidget(btn_load)
         
         btn_save = QtWidgets.QPushButton("Save...")
         btn_save.clicked.connect(self._save_flat)
-        top_layout.addWidget(btn_save)
+        processing_layout.addWidget(btn_save)
         
         btn_clear = QtWidgets.QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_flat)
-        top_layout.addWidget(btn_clear)
+        processing_layout.addWidget(btn_clear)
         
-        sep4 = QtWidgets.QFrame()
-        sep4.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep4)
+        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
+        btn_motor_scan.clicked.connect(self._open_motor_scan)
+        btn_motor_scan.setToolTip("Open Mosalign GUI")
+        processing_layout.addWidget(btn_motor_scan)
         
-        # Recording controls
-        self.btn_record = QtWidgets.QPushButton("Start Recording")
-        self.btn_record.setCheckable(True)
-        self.btn_record.clicked.connect(self._toggle_recording)
-        top_layout.addWidget(self.btn_record)   
-
-        # MOSAIC button
-        #btn_stitch = QtWidgets.QPushButton("Camera Stitch")
-        #btn_stitch.clicked.connect(self._open_camera_stitch)
-        #top_layout.addWidget(btn_stitch)
-             
+        processing_group.setLayout(processing_layout)
+        top_layout.addWidget(processing_group)
+        
+        # Add stretch to push status labels to the right
         top_layout.addStretch()
         
+        # === STATUS LABELS ===
         self.lbl_fps = QtWidgets.QLabel("FPS: —")
         self.lbl_fps.setMinimumWidth(80)
+        self.lbl_fps.setStyleSheet("font-weight: bold;")
         top_layout.addWidget(self.lbl_fps)
         
         self.lbl_uid = QtWidgets.QLabel("UID: —")
         self.lbl_uid.setMinimumWidth(100)
+        self.lbl_uid.setStyleSheet("font-weight: bold;")
         top_layout.addWidget(self.lbl_uid)
         
         return top_bar
