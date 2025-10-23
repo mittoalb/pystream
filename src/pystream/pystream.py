@@ -196,6 +196,11 @@ class NtndaSubscriber:
         self.chan = pva.Channel(pv_name)
         self.subscribed = False
         self._lock = threading.Lock()
+        
+        #accumulate
+        self.accumulating = False
+        self.accumulated_sum = None
+        self.accum_frame_count = 0
 
     def _callback(self, pv: pva.PvObject):
         try:
@@ -426,6 +431,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_home.setToolTip("Reset zoom and pan to show full image")
         top_layout.addWidget(btn_home)
 
+        self.btn_accumulate = QtWidgets.QPushButton("Accumulate: OFF")
+        self.btn_accumulate.setCheckable(True)
+        self.btn_accumulate.clicked.connect(self._toggle_accumulation)
+        top_layout.addWidget(self.btn_accumulate)
 
         sep1 = QtWidgets.QFrame()
         sep1.setFrameShape(QtWidgets.QFrame.VLine)
@@ -624,7 +633,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         path_layout.addWidget(self.record_path_entry)
         btn_browse = QtWidgets.QPushButton("Browse...")
         btn_browse.clicked.connect(self._browse_record_path)
-        btn_browse.setMaximumWidth(80)
+        btn_browse.setMaximumWidth(100)
         path_layout.addWidget(btn_browse)
         record_layout.addLayout(path_layout)
         
@@ -847,7 +856,25 @@ class PvViewerApp(QtWidgets.QMainWindow):
         img = self._apply_view_ops(img)
         self._last_display_img = img
         self.current_uid = uid
-        
+
+        # ACCUMULATION LOGIC - ADD THIS AT THE START
+        if self.sub and self.sub.accumulating:
+            # Accumulate frames
+            if self.sub.accumulated_sum is None:
+                # First frame
+                self.sub.accumulated_sum = img.astype(np.float64)
+                self.sub.accum_frame_count = 1
+            else:
+                # Add to accumulation
+                self.sub.accumulated_sum += img.astype(np.float64)
+                self.sub.accum_frame_count += 1
+            
+            # Use accumulated sum for display
+            img = self.sub.accumulated_sum
+            
+            # Update status (optional - show in window title or status bar)
+            # self.setWindowTitle(f"PyStream - Accumulated: {self.subscriber.accum_frame_count} frames")
+
         # Compute contrast
         self._ensure_slider_range(img)
         if self.autoscale_enabled:
@@ -990,6 +1017,29 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self._last_display_img is not None:
             self.image_view.setImage(self._last_display_img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
     
+    def _toggle_accumulation(self):
+        """Toggle frame accumulation on/off"""
+        if self.sub is None:
+            QtWidgets.QMessageBox.warning(self, "Accumulate", "Not connected to a PV.")
+            self.btn_accumulate.setChecked(False)
+            return
+    
+        self.sub.accumulating = self.btn_accumulate.isChecked()
+    
+        if self.sub.accumulating:
+            # Starting accumulation
+            self.btn_accumulate.setText("Accumulate: ON")
+            self.sub.accumulated_sum = None  # Reset
+            self.sub.accum_frame_count = 0
+            if LOGGER:
+                LOGGER.info("Frame accumulation started")
+        else:
+            # Stopping accumulation
+            self.btn_accumulate.setText("Accumulate: OFF")
+            if LOGGER:
+                LOGGER.info(f"Frame accumulation stopped at {self.sub.accum_frame_count} frames")
+
+
     def _autoscale_toggled(self):
         self.autoscale_enabled = self.chk_autoscale.isChecked()
         if self.autoscale_enabled and self._last_display_img is not None:
