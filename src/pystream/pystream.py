@@ -29,6 +29,8 @@ import pvaccess as pva
 
 # PyQt5
 from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5.Qsci import QsciScintilla, QsciLexerPython, QsciLexerJSON
+
 
 # PyQtGraph
 import pyqtgraph as pg
@@ -196,6 +198,11 @@ class NtndaSubscriber:
         self.chan = pva.Channel(pv_name)
         self.subscribed = False
         self._lock = threading.Lock()
+        
+        #accumulate
+        self.accumulating = False
+        self.accumulated_sum = None
+        self.accum_frame_count = 0
 
     def _callback(self, pv: pva.PvObject):
         try:
@@ -252,13 +259,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
     image_ready = QtCore.pyqtSignal(int, np.ndarray, float)
     
     def __init__(self, pv_name: Optional[str], max_fps: int = 0,
-                 display_bin: int = 0, hist_fps: float = 4.0,
-                 auto_every: int = 10):
+                display_bin: int = 0, hist_fps: float = 4.0,
+                auto_every: int = 10):
         super().__init__()
         
         self.setWindowTitle("NTNDArray PyQtGraph Viewer")
         self.setGeometry(100, 100, 1400, 900)
         
+        # ===== INITIALIZE ALL ATTRIBUTES FIRST =====
         self.cfg = _load_config(defaults={"pv_name": pv_name or ""})
         
         self.max_fps = int(max_fps)
@@ -310,21 +318,37 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_path = ""
         self.record_dir = ""
         
+        # Initialize manager placeholders
         self.motor_scan_dialog = None
         self.roi_manager = None
         self.line_manager = None
-        self._build_ui()
         
+        # Editor state (for code editor tab)
+        self.current_editor_file = None
+        
+        # ===== NOW BUILD UI WITH TABS =====
+        # Create central widget with tabs
+        self.tabs = QtWidgets.QTabWidget()
+        self.setCentralWidget(self.tabs)
+        
+        # === TAB 1: VIEWER ===
+        viewer_widget = self._create_viewer_tab()
+        self.tabs.addTab(viewer_widget, "📹 Viewer")
+        
+        # === TAB 2: CODE EDITOR ===
+        editor_widget = self._create_editor_tab()
+        self.tabs.addTab(editor_widget, "📝 Editor")
+        
+        # ===== POST-UI INITIALIZATION =====
         # Initialize ROI manager
         self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
-
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
         self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
-
+        
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
         self.btn_reset_line.clicked.connect(self.line_manager.reset)
-
+        
         # Connect signal
         self.image_ready.connect(self._update_image_slot)
         
@@ -338,10 +362,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self._connect_pv()
     
     def _build_ui(self):
-        # Central widget
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        main_layout = QtWidgets.QVBoxLayout(central)
+        """Build the main viewer UI and return as widget"""
+        # Create container widget instead of setting as central widget
+        viewer_container = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(viewer_container)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
         
@@ -363,17 +387,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view = pg.ImageView()
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
-        
         self.image_view.view.setMouseMode(pg.ViewBox.RectMode)
+        
         # Enable mouse wheel zoom
         self.image_view.view.setMouseEnabled(x=True, y=True)
-
+        
         # Disable panning but keep zoom
         self.image_view.view.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
-
-        # Avoid draggable image
-        #self.image_view.view.setMouseEnabled(x=False, y=False)
-
+        
         # Add crosshair lines
         self.crosshair_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=2))
         self.crosshair_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('y', width=2))
@@ -387,7 +408,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
         
         splitter.addWidget(self.image_view)
-        
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([350, 1050])
@@ -395,136 +415,480 @@ class PvViewerApp(QtWidgets.QMainWindow):
         main_layout.addWidget(splitter, stretch=1)
         
         self._apply_dark_theme()
+        
+        # Return the container widget instead of setting as central
+        return viewer_container
     
+
+    def _create_viewer_tab(self):
+        """Create the main viewer interface"""
+        return self._build_ui()
+
+    def _create_editor_tab(self):
+        """Create code editor interface"""
+        editor_container = QtWidgets.QWidget()
+        editor_layout = QtWidgets.QVBoxLayout(editor_container)
+        
+        # Editor toolbar
+        editor_toolbar = QtWidgets.QHBoxLayout()
+        
+        self.cmb_file_type = QtWidgets.QComboBox()
+        self.cmb_file_type.addItems([
+            "Pipeline Config (JSON)",
+            "Python Processor",
+            "Custom Script"
+        ])
+        self.cmb_file_type.currentIndexChanged.connect(self._on_editor_type_changed)
+        editor_toolbar.addWidget(QtWidgets.QLabel("Edit:"))
+        editor_toolbar.addWidget(self.cmb_file_type)
+        
+        btn_open = QtWidgets.QPushButton("Open...")
+        btn_open.clicked.connect(self._editor_open_file)
+        editor_toolbar.addWidget(btn_open)
+        
+        btn_save = QtWidgets.QPushButton("Save")
+        btn_save.clicked.connect(self._editor_save_file)
+        editor_toolbar.addWidget(btn_save)
+        
+        btn_save_as = QtWidgets.QPushButton("Save As...")
+        btn_save_as.clicked.connect(self._editor_save_file_as)
+        editor_toolbar.addWidget(btn_save_as)
+        
+        btn_run = QtWidgets.QPushButton("▶ Run/Reload")
+        btn_run.clicked.connect(self._editor_run_code)
+        btn_run.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        editor_toolbar.addWidget(btn_run)
+        
+        editor_toolbar.addStretch()
+        
+        self.lbl_editor_file = QtWidgets.QLabel("No file loaded")
+        self.lbl_editor_file.setStyleSheet("color: #666;")
+        editor_toolbar.addWidget(self.lbl_editor_file)
+        
+        editor_layout.addLayout(editor_toolbar)
+        
+        # === QScintilla Code Editor with Syntax Highlighting ===
+        self.code_editor = QsciScintilla()
+        
+        # Set font
+        font = QtGui.QFont("Courier New", 10)
+        self.code_editor.setFont(font)
+        
+        # Line numbers margin
+        self.code_editor.setMarginType(0, QsciScintilla.NumberMargin)
+        self.code_editor.setMarginWidth(0, "00000")  # Width for up to 5 digits
+        self.code_editor.setMarginsForegroundColor(QtGui.QColor("#888888"))
+        self.code_editor.setMarginsBackgroundColor(QtGui.QColor("#2b2b2b"))
+        
+        # Current line highlighting
+        self.code_editor.setCaretLineVisible(True)
+        self.code_editor.setCaretLineBackgroundColor(QtGui.QColor("#2d2d2d"))
+        
+        # Indentation
+        self.code_editor.setIndentationsUseTabs(False)
+        self.code_editor.setTabWidth(4)
+        self.code_editor.setAutoIndent(True)
+        
+        # Brace matching
+        self.code_editor.setBraceMatching(QsciScintilla.SloppyBraceMatch)
+        self.code_editor.setMatchedBraceBackgroundColor(QtGui.QColor("#4d4d4d"))
+        
+        # Auto-completion
+        self.code_editor.setAutoCompletionSource(QsciScintilla.AcsAll)
+        self.code_editor.setAutoCompletionThreshold(2)
+        self.code_editor.setAutoCompletionCaseSensitivity(False)
+        
+        # Edge mode (80 character line)
+        self.code_editor.setEdgeMode(QsciScintilla.EdgeLine)
+        self.code_editor.setEdgeColumn(80)
+        self.code_editor.setEdgeColor(QtGui.QColor("#444444"))
+        
+        # Python lexer (syntax highlighting)
+        self.python_lexer = QsciLexerPython()
+        self.python_lexer.setDefaultFont(font)
+        
+        # Set Python lexer colors (dark theme)
+        self.python_lexer.setDefaultPaper(QtGui.QColor("#1e1e1e"))
+        self.python_lexer.setDefaultColor(QtGui.QColor("#d4d4d4"))
+        self.python_lexer.setColor(QtGui.QColor("#569cd6"), QsciLexerPython.Keyword)  # Keywords (blue)
+        self.python_lexer.setColor(QtGui.QColor("#4ec9b0"), QsciLexerPython.ClassName)  # Classes (teal)
+        self.python_lexer.setColor(QtGui.QColor("#dcdcaa"), QsciLexerPython.FunctionMethodName)  # Functions (yellow)
+        self.python_lexer.setColor(QtGui.QColor("#ce9178"), QsciLexerPython.DoubleQuotedString)  # Strings (orange)
+        self.python_lexer.setColor(QtGui.QColor("#ce9178"), QsciLexerPython.SingleQuotedString)
+        self.python_lexer.setColor(QtGui.QColor("#6a9955"), QsciLexerPython.Comment)  # Comments (green)
+        self.python_lexer.setColor(QtGui.QColor("#b5cea8"), QsciLexerPython.Number)  # Numbers (light green)
+        self.python_lexer.setColor(QtGui.QColor("#c586c0"), QsciLexerPython.Decorator)  # Decorators (purple)
+        
+        # JSON lexer
+        self.json_lexer = QsciLexerJSON()
+        self.json_lexer.setDefaultFont(font)
+        self.json_lexer.setDefaultPaper(QtGui.QColor("#1e1e1e"))
+        
+        # Set initial lexer based on selection
+        self._set_editor_lexer()
+        
+        editor_layout.addWidget(self.code_editor)
+        
+        # Output/console area
+        output_label = QtWidgets.QLabel("Output / Console:")
+        editor_layout.addWidget(output_label)
+        
+        self.code_output = QtWidgets.QPlainTextEdit()
+        self.code_output.setFont(QtGui.QFont("Courier New", 9))
+        self.code_output.setReadOnly(True)
+        self.code_output.setMaximumHeight(150)
+        self.code_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        editor_layout.addWidget(self.code_output)
+        
+        # Set initial content
+        self.current_editor_file = None
+        self._load_default_template()
+        
+        return editor_container
+
+
+
+    def _set_editor_lexer(self):
+        """Set the appropriate lexer based on file type"""
+        file_type = self.cmb_file_type.currentText()
+        
+        if "JSON" in file_type:
+            self.code_editor.setLexer(self.json_lexer)
+        else:
+            self.code_editor.setLexer(self.python_lexer)
+
+    def _on_editor_type_changed(self, index):
+        """Load template when editor type changes"""
+        self._set_editor_lexer()
+        if self.current_editor_file is None:
+            self._load_default_template()
+
+
+    def _on_editor_type_changed(self, index):
+        """Load template when editor type changes"""
+        if self.current_editor_file is None:
+            self._load_default_template()
+
+    def _editor_open_file(self):
+        """Open file in editor"""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open File", "",
+            "All Files (*);;Python (*.py);;JSON (*.json);;Text (*.txt)"
+        )
+        if path:
+            try:
+                with open(path, 'r') as f:
+                    content = f.read()
+                self.code_editor.setText(content)  # Use setText instead of setPlainText
+                self.current_editor_file = path
+                self.lbl_editor_file.setText(f"File: {os.path.basename(path)}")
+                self.code_output.appendPlainText(f"Opened: {path}")
+                
+                # Set lexer based on file extension
+                if path.endswith('.json'):
+                    self.code_editor.setLexer(self.json_lexer)
+                elif path.endswith('.py'):
+                    self.code_editor.setLexer(self.python_lexer)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Open File", f"Failed to open:\n{e}")
+
+    def _editor_save_file(self):
+        """Save current file"""
+        if self.current_editor_file is None:
+            self._editor_save_file_as()
+            return
+        
+        try:
+            content = self.code_editor.text()  # Use text() instead of toPlainText()
+            with open(self.current_editor_file, 'w') as f:
+                f.write(content)
+            self.code_output.appendPlainText(f"Saved: {self.current_editor_file}")
+            QtWidgets.QMessageBox.information(self, "Save", "File saved successfully!")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save File", f"Failed to save:\n{e}")
+
+    def _load_default_template(self):
+        """Load default template based on selected type"""
+        file_type = self.cmb_file_type.currentText()
+        
+        if "Pipeline Config" in file_type:
+            template = '''{
+    "processors": [
+        {
+        "name": "example_processor",
+        "type": "custom",
+        "enabled": true,
+        "params": {
+            "threshold": 100
+        }
+        }
+    ]
+    }'''
+            self.code_editor.setText(template)  # Use setText
+            
+        elif "Python Processor" in file_type:
+            template = '''import numpy as np
+
+    class CustomProcessor:
+        """Custom image processor"""
+        
+        def __init__(self, params=None):
+            self.params = params or {}
+        
+        def process(self, image: np.ndarray) -> np.ndarray:
+            """
+            Process an image frame
+            
+            Args:
+                image: Input image as numpy array
+                
+            Returns:
+                Processed image
+            """
+            # Your processing code here
+            processed = image.copy()
+            
+            # Example: apply threshold
+            threshold = self.params.get('threshold', 100)
+            processed[processed < threshold] = 0
+            
+            return processed
+    '''
+            self.code_editor.setText(template)
+            
+        else:  # Custom Script
+            template = '''import numpy as np
+
+    # Your custom script here
+    # Access the viewer instance via: viewer
+
+    def process_frame(frame):
+        """Process a single frame"""
+        # Your code here
+        return frame
+    '''
+            self.code_editor.setText(template)
+
+    def _editor_save_file_as(self):
+        """Save file with new name"""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save File As", "",
+            "Python (*.py);;JSON (*.json);;Text (*.txt);;All Files (*)"
+        )
+        if path:
+            self.current_editor_file = path
+            self._editor_save_file()
+            self.lbl_editor_file.setText(f"File: {os.path.basename(path)}")
+
+    def _editor_run_code(self):
+        """Execute or reload the code"""
+        file_type = self.cmb_file_type.currentText()
+        
+        try:
+            if "Pipeline Config" in file_type:
+                # Reload pipeline config
+                self._editor_log("Reloading pipeline configuration...")
+                if self.current_editor_file:
+                    _init_pipeline(self.current_editor_file)
+                    self._editor_log("✓ Pipeline reloaded successfully!")
+                else:
+                    self._editor_log("⚠ Save the config file first, then reload.")
+                    
+            elif "Python Processor" in file_type:
+                # Execute Python processor
+                self._editor_log("Loading Python processor...")
+                code = self.code_editor.toPlainText()
+                exec_globals = {'np': np}
+                exec(code, exec_globals)
+                self._editor_log("✓ Python code executed successfully!")
+                
+            else:  # Custom Script
+                # Execute custom script with viewer access
+                self._editor_log("Executing custom script...")
+                code = self.code_editor.toPlainText()
+                exec_globals = {
+                    'np': np,
+                    'viewer': self,
+                    'Image': Image if 'Image' in dir() else None
+                }
+                exec(code, exec_globals)
+                self._editor_log("✓ Script executed successfully!")
+                
+        except Exception as e:
+            self._editor_log(f"✗ Error: {e}")
+            if LOGGER:
+                log_exception(LOGGER, e)
+
+    def _editor_log(self, message: str):
+        """Add message to editor output"""
+        self.code_output.appendPlainText(message)
+
+
+
     def _create_top_bar(self):
         top_bar = QtWidgets.QWidget()
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setContentsMargins(5, 5, 5, 5)
         top_layout.setSpacing(8)
         
-        top_layout.addWidget(QtWidgets.QLabel("PV:"))
+        # === CONNECTION GROUP ===
+        conn_group = QtWidgets.QGroupBox("Connection")
+        conn_layout = QtWidgets.QHBoxLayout()
+        conn_layout.setSpacing(5)
+        conn_layout.setContentsMargins(5, 5, 5, 5)
+        
+        conn_layout.addWidget(QtWidgets.QLabel("PV:"))
         self.pv_entry = QtWidgets.QLineEdit(self.cfg.get("pv_name", ""))
-        self.pv_entry.setMinimumWidth(250)
-        top_layout.addWidget(self.pv_entry)
+        self.pv_entry.setMinimumWidth(200)
+        self.pv_entry.returnPressed.connect(self._connect_pv)
+        conn_layout.addWidget(self.pv_entry)
         
         btn_connect = QtWidgets.QPushButton("Connect")
         btn_connect.clicked.connect(self._connect_pv)
-        top_layout.addWidget(btn_connect)
+        conn_layout.addWidget(btn_connect)
         
         btn_disconnect = QtWidgets.QPushButton("Disconnect")
         btn_disconnect.clicked.connect(self._disconnect_pv)
-        top_layout.addWidget(btn_disconnect)
+        conn_layout.addWidget(btn_disconnect)
+        
+        conn_group.setLayout(conn_layout)
+        top_layout.addWidget(conn_group)
+        
+        # === PLAYBACK GROUP ===
+        playback_group = QtWidgets.QGroupBox("Playback")
+        playback_layout = QtWidgets.QHBoxLayout()
+        playback_layout.setSpacing(5)
+        playback_layout.setContentsMargins(5, 5, 5, 5)
         
         self.btn_pause = QtWidgets.QPushButton("Pause")
         self.btn_pause.setCheckable(True)
         self.btn_pause.clicked.connect(self._toggle_pause)
-        top_layout.addWidget(self.btn_pause)
+        playback_layout.addWidget(self.btn_pause)
         
-        # Home button to reset view
+        self.btn_accumulate = QtWidgets.QPushButton("Accumulate: OFF")
+        self.btn_accumulate.setCheckable(True)
+        self.btn_accumulate.clicked.connect(self._toggle_accumulation)
+        playback_layout.addWidget(self.btn_accumulate)
+        
+        self.btn_record = QtWidgets.QPushButton("Record")
+        self.btn_record.setCheckable(True)
+        self.btn_record.clicked.connect(self._toggle_recording)
+        playback_layout.addWidget(self.btn_record)
+        
+        playback_group.setLayout(playback_layout)
+        top_layout.addWidget(playback_group)
+        
+        # === VIEW CONTROLS GROUP ===
+        view_group = QtWidgets.QGroupBox("View")
+        view_layout = QtWidgets.QHBoxLayout()
+        view_layout.setSpacing(5)
+        view_layout.setContentsMargins(5, 5, 5, 5)
+        
         btn_home = QtWidgets.QPushButton("Home")
         btn_home.clicked.connect(self._reset_view)
         btn_home.setToolTip("Reset zoom and pan to show full image")
-        top_layout.addWidget(btn_home)
-
-
-        sep1 = QtWidgets.QFrame()
-        sep1.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep1)
-        
-        self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
-        self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
-        top_layout.addWidget(self.chk_crosshair)
-
-        # ROI Controls
-        self.chk_roi = QtWidgets.QCheckBox("ROI")
-        top_layout.addWidget(self.chk_roi)
-
-        self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
-        top_layout.addWidget(self.btn_reset_roi)  
-
-        self.chk_line = QtWidgets.QCheckBox("Line")
-        top_layout.addWidget(self.chk_line)
-
-        self.btn_reset_line = QtWidgets.QPushButton("Reset Line")
-        top_layout.addWidget(self.btn_reset_line)
-
-        sep3 = QtWidgets.QFrame()
-        sep3.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep3)
-
-        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
-        btn_motor_scan.clicked.connect(self._open_motor_scan)
-        btn_motor_scan.setToolTip("Open Mosalign GUI")
-        top_layout.addWidget(btn_motor_scan)
-
-        sep2 = QtWidgets.QFrame()
-        sep2.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep2)
+        view_layout.addWidget(btn_home)
         
         self.chk_autoscale = QtWidgets.QCheckBox("Autoscale")
         self.chk_autoscale.setChecked(True)
         self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
-        top_layout.addWidget(self.chk_autoscale)
+        view_layout.addWidget(self.chk_autoscale)
+        
+        self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
+        self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
+        view_layout.addWidget(self.chk_crosshair)
+        
+        view_group.setLayout(view_layout)
+        top_layout.addWidget(view_group)
+        
+        # === ANALYSIS TOOLS GROUP ===
+        analysis_group = QtWidgets.QGroupBox("Analysis")
+        analysis_layout = QtWidgets.QHBoxLayout()
+        analysis_layout.setSpacing(5)
+        analysis_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.chk_roi = QtWidgets.QCheckBox("ROI")
+        analysis_layout.addWidget(self.chk_roi)
+        
+        self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
+        analysis_layout.addWidget(self.btn_reset_roi)
+        
+        self.chk_line = QtWidgets.QCheckBox("Line")
+        analysis_layout.addWidget(self.chk_line)
+        
+        self.btn_reset_line = QtWidgets.QPushButton("Reset Line")
+        analysis_layout.addWidget(self.btn_reset_line)
+        
+        analysis_group.setLayout(analysis_layout)
+        top_layout.addWidget(analysis_group)
+        
+        # === TRANSFORM GROUP ===
+        transform_group = QtWidgets.QGroupBox("Transform")
+        transform_layout = QtWidgets.QHBoxLayout()
+        transform_layout.setSpacing(5)
+        transform_layout.setContentsMargins(5, 5, 5, 5)
         
         self.chk_flip_h = QtWidgets.QCheckBox("Flip H")
         self.chk_flip_h.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_flip_h)
+        transform_layout.addWidget(self.chk_flip_h)
         
         self.chk_flip_v = QtWidgets.QCheckBox("Flip V")
         self.chk_flip_v.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_flip_v)
+        transform_layout.addWidget(self.chk_flip_v)
         
         self.chk_transpose = QtWidgets.QCheckBox("Transpose")
         self.chk_transpose.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_transpose)
+        transform_layout.addWidget(self.chk_transpose)
         
-        sep3 = QtWidgets.QFrame()
-        sep3.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep3)
+        transform_group.setLayout(transform_layout)
+        top_layout.addWidget(transform_group)
+        
+        # === PROCESSING GROUP ===
+        processing_group = QtWidgets.QGroupBox("Processing")
+        processing_layout = QtWidgets.QHBoxLayout()
+        processing_layout.setSpacing(5)
+        processing_layout.setContentsMargins(5, 5, 5, 5)
         
         self.chk_apply_flat = QtWidgets.QCheckBox("Apply Flat")
         self.chk_apply_flat.stateChanged.connect(self._view_changed)
-        top_layout.addWidget(self.chk_apply_flat)
+        processing_layout.addWidget(self.chk_apply_flat)
         
         btn_capture = QtWidgets.QPushButton("Capture")
         btn_capture.clicked.connect(self._capture_flat)
-        top_layout.addWidget(btn_capture)
+        processing_layout.addWidget(btn_capture)
         
         btn_load = QtWidgets.QPushButton("Load...")
         btn_load.clicked.connect(self._load_flat)
-        top_layout.addWidget(btn_load)
+        processing_layout.addWidget(btn_load)
         
         btn_save = QtWidgets.QPushButton("Save...")
         btn_save.clicked.connect(self._save_flat)
-        top_layout.addWidget(btn_save)
+        processing_layout.addWidget(btn_save)
         
         btn_clear = QtWidgets.QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_flat)
-        top_layout.addWidget(btn_clear)
+        processing_layout.addWidget(btn_clear)
         
-        sep4 = QtWidgets.QFrame()
-        sep4.setFrameShape(QtWidgets.QFrame.VLine)
-        top_layout.addWidget(sep4)
+        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
+        btn_motor_scan.clicked.connect(self._open_motor_scan)
+        btn_motor_scan.setToolTip("Open Mosalign GUI")
+        processing_layout.addWidget(btn_motor_scan)
         
-        # Recording controls
-        self.btn_record = QtWidgets.QPushButton("Start Recording")
-        self.btn_record.setCheckable(True)
-        self.btn_record.clicked.connect(self._toggle_recording)
-        top_layout.addWidget(self.btn_record)   
-
-        # MOSAIC button
-        #btn_stitch = QtWidgets.QPushButton("Camera Stitch")
-        #btn_stitch.clicked.connect(self._open_camera_stitch)
-        #top_layout.addWidget(btn_stitch)
-             
+        processing_group.setLayout(processing_layout)
+        top_layout.addWidget(processing_group)
+        
+        # Add stretch to push status labels to the right
         top_layout.addStretch()
         
+        # === STATUS LABELS ===
         self.lbl_fps = QtWidgets.QLabel("FPS: —")
         self.lbl_fps.setMinimumWidth(80)
+        self.lbl_fps.setStyleSheet("font-weight: bold;")
         top_layout.addWidget(self.lbl_fps)
         
         self.lbl_uid = QtWidgets.QLabel("UID: —")
         self.lbl_uid.setMinimumWidth(100)
+        self.lbl_uid.setStyleSheet("font-weight: bold;")
         top_layout.addWidget(self.lbl_uid)
         
         return top_bar
@@ -624,7 +988,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         path_layout.addWidget(self.record_path_entry)
         btn_browse = QtWidgets.QPushButton("Browse...")
         btn_browse.clicked.connect(self._browse_record_path)
-        btn_browse.setMaximumWidth(80)
+        btn_browse.setMaximumWidth(100)
         path_layout.addWidget(btn_browse)
         record_layout.addLayout(path_layout)
         
@@ -847,7 +1211,25 @@ class PvViewerApp(QtWidgets.QMainWindow):
         img = self._apply_view_ops(img)
         self._last_display_img = img
         self.current_uid = uid
-        
+
+        # ACCUMULATION LOGIC - ADD THIS AT THE START
+        if self.sub and self.sub.accumulating:
+            # Accumulate frames
+            if self.sub.accumulated_sum is None:
+                # First frame
+                self.sub.accumulated_sum = img.astype(np.float64)
+                self.sub.accum_frame_count = 1
+            else:
+                # Add to accumulation
+                self.sub.accumulated_sum += img.astype(np.float64)
+                self.sub.accum_frame_count += 1
+            
+            # Use accumulated sum for display
+            img = self.sub.accumulated_sum
+            
+            # Update status (optional - show in window title or status bar)
+            # self.setWindowTitle(f"PyStream - Accumulated: {self.subscriber.accum_frame_count} frames")
+
         # Compute contrast
         self._ensure_slider_range(img)
         if self.autoscale_enabled:
@@ -990,6 +1372,29 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self._last_display_img is not None:
             self.image_view.setImage(self._last_display_img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
     
+    def _toggle_accumulation(self):
+        """Toggle frame accumulation on/off"""
+        if self.sub is None:
+            QtWidgets.QMessageBox.warning(self, "Accumulate", "Not connected to a PV.")
+            self.btn_accumulate.setChecked(False)
+            return
+    
+        self.sub.accumulating = self.btn_accumulate.isChecked()
+    
+        if self.sub.accumulating:
+            # Starting accumulation
+            self.btn_accumulate.setText("Accumulate: ON")
+            self.sub.accumulated_sum = None  # Reset
+            self.sub.accum_frame_count = 0
+            if LOGGER:
+                LOGGER.info("Frame accumulation started")
+        else:
+            # Stopping accumulation
+            self.btn_accumulate.setText("Accumulate: OFF")
+            if LOGGER:
+                LOGGER.info(f"Frame accumulation stopped at {self.sub.accum_frame_count} frames")
+
+
     def _autoscale_toggled(self):
         self.autoscale_enabled = self.chk_autoscale.isChecked()
         if self.autoscale_enabled and self._last_display_img is not None:
