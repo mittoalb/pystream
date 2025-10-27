@@ -60,7 +60,7 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         layout.setSpacing(10)
         
         # Title
-        title = QtWidgets.QLabel("IMG Data Viewer")
+        title = QtWidgets.QLabel("HDF5 Image Division Tool")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(title)
         
@@ -136,6 +136,59 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         
         norm_group.setLayout(norm_layout)
         layout.addWidget(norm_group)
+        
+        # Contrast/Histogram control group
+        contrast_group = QtWidgets.QGroupBox("Contrast Control")
+        contrast_layout = QtWidgets.QVBoxLayout()
+        
+        # Auto-level options
+        auto_layout = QtWidgets.QHBoxLayout()
+        auto_layout.addWidget(QtWidgets.QLabel("Auto Level:"))
+        
+        self.auto_level_combo = QtWidgets.QComboBox()
+        self.auto_level_combo.addItems([
+            "Per Image (default)",
+            "Min/Max", 
+            "Percentile 1-99%",
+            "Percentile 2-98%",
+            "Percentile 5-95%",
+            "Manual"
+        ])
+        self.auto_level_combo.currentIndexChanged.connect(self._on_contrast_changed)
+        auto_layout.addWidget(self.auto_level_combo)
+        contrast_layout.addLayout(auto_layout)
+        
+        # Manual controls (initially hidden)
+        manual_widget = QtWidgets.QWidget()
+        manual_layout = QtWidgets.QFormLayout()
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.min_spin = QtWidgets.QDoubleSpinBox()
+        self.min_spin.setRange(-1e10, 1e10)
+        self.min_spin.setDecimals(4)
+        self.min_spin.setValue(0.0)
+        self.min_spin.valueChanged.connect(self._on_manual_levels_changed)
+        manual_layout.addRow("Min:", self.min_spin)
+        
+        self.max_spin = QtWidgets.QDoubleSpinBox()
+        self.max_spin.setRange(-1e10, 1e10)
+        self.max_spin.setDecimals(4)
+        self.max_spin.setValue(1.0)
+        self.max_spin.valueChanged.connect(self._on_manual_levels_changed)
+        manual_layout.addRow("Max:", self.max_spin)
+        
+        manual_widget.setLayout(manual_layout)
+        manual_widget.setVisible(False)
+        self.manual_controls = manual_widget
+        contrast_layout.addWidget(manual_widget)
+        
+        # Reset button
+        reset_contrast_btn = QtWidgets.QPushButton("Auto Adjust Now")
+        reset_contrast_btn.clicked.connect(self._auto_adjust_contrast)
+        contrast_layout.addWidget(reset_contrast_btn)
+        
+        contrast_group.setLayout(contrast_layout)
+        layout.addWidget(contrast_group)
         
         # Shift control group
         shift_group = QtWidgets.QGroupBox("Shift Control")
@@ -324,8 +377,32 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
                 result = self.current_data
                 self.result_image = result
             
-            # Update display
-            self.image_view.setImage(result, autoRange=False, autoLevels=False, autoHistogramRange=True)
+            # Determine contrast levels based on mode
+            contrast_mode = self.auto_level_combo.currentIndex()
+            
+            if contrast_mode == 0:  # Per Image (default - use pyqtgraph auto)
+                self.image_view.setImage(result, autoRange=False, autoLevels=True, autoHistogramRange=True)
+            elif contrast_mode == 1:  # Min/Max
+                vmin, vmax = np.min(result), np.max(result)
+                self.image_view.setImage(result, autoRange=False, autoLevels=False)
+                self.image_view.setLevels(vmin, vmax)
+            elif contrast_mode == 2:  # Percentile 1-99%
+                vmin, vmax = np.percentile(result, [1, 99])
+                self.image_view.setImage(result, autoRange=False, autoLevels=False)
+                self.image_view.setLevels(vmin, vmax)
+            elif contrast_mode == 3:  # Percentile 2-98%
+                vmin, vmax = np.percentile(result, [2, 98])
+                self.image_view.setImage(result, autoRange=False, autoLevels=False)
+                self.image_view.setLevels(vmin, vmax)
+            elif contrast_mode == 4:  # Percentile 5-95%
+                vmin, vmax = np.percentile(result, [5, 95])
+                self.image_view.setImage(result, autoRange=False, autoLevels=False)
+                self.image_view.setLevels(vmin, vmax)
+            elif contrast_mode == 5:  # Manual
+                vmin = self.min_spin.value()
+                vmax = self.max_spin.value()
+                self.image_view.setImage(result, autoRange=False, autoLevels=False)
+                self.image_view.setLevels(vmin, vmax)
             
             # Update statistics
             self.min_val_label.setText(f"{np.min(result):.4f}")
@@ -384,6 +461,29 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             self.mode_label.setText("Mode: <b>Raw Data Only</b>")
         
         # Update display
+        self._update_display()
+    
+    def _on_contrast_changed(self, index):
+        """Handle contrast mode change"""
+        # Show/hide manual controls
+        is_manual = (index == 5)
+        self.manual_controls.setVisible(is_manual)
+        
+        # If switching to manual, set initial values from current image
+        if is_manual and self.result_image is not None:
+            self.min_spin.setValue(float(np.min(self.result_image)))
+            self.max_spin.setValue(float(np.max(self.result_image)))
+        
+        # Update display
+        self._update_display()
+    
+    def _on_manual_levels_changed(self):
+        """Handle manual level spinbox changes"""
+        if self.auto_level_combo.currentIndex() == 5:  # Only if in manual mode
+            self._update_display()
+    
+    def _auto_adjust_contrast(self):
+        """Auto-adjust contrast based on current mode"""
         self._update_display()
     
     def _reset_shift(self):
@@ -447,7 +547,10 @@ def main():
     """Run the HDF5 image divider as a standalone application"""
     import sys
     
-    app = QtWidgets.QApplication(sys.argv)
+    # Check if QApplication already exists (for script entry points)
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("HDF5 Image Divider")
     
     # Apply dark theme (similar to reference)
