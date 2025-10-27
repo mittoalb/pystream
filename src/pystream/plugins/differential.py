@@ -35,6 +35,7 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         self.current_index = 0
         self.shift_x = 0
         self.shift_y = 0
+        self.normalization_enabled = True
         
         # Cached images
         self.current_data = None
@@ -59,7 +60,7 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         layout.setSpacing(10)
         
         # Title
-        title = QtWidgets.QLabel("HDF5 Image Division Tool")
+        title = QtWidgets.QLabel("IMG Data Viewer")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(title)
         
@@ -120,6 +121,22 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         selection_group.setLayout(selection_layout)
         layout.addWidget(selection_group)
         
+        # Normalization control group
+        norm_group = QtWidgets.QGroupBox("Normalization")
+        norm_layout = QtWidgets.QVBoxLayout()
+        
+        self.normalization_checkbox = QtWidgets.QCheckBox("Enable Normalization (data / data_white)")
+        self.normalization_checkbox.setChecked(True)
+        self.normalization_checkbox.stateChanged.connect(self._on_normalization_changed)
+        norm_layout.addWidget(self.normalization_checkbox)
+        
+        self.mode_label = QtWidgets.QLabel("Mode: <b>Division</b>")
+        self.mode_label.setStyleSheet("padding: 5px; background-color: #2a2a2a; border-radius: 3px;")
+        norm_layout.addWidget(self.mode_label)
+        
+        norm_group.setLayout(norm_layout)
+        layout.addWidget(norm_group)
+        
         # Shift control group
         shift_group = QtWidgets.QGroupBox("Shift Control")
         shift_layout = QtWidgets.QFormLayout()
@@ -138,15 +155,15 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         shift_layout.addRow("", reset_btn)
         
         # Instructions
-        instructions = QtWidgets.QLabel(
+        self.shift_instructions = QtWidgets.QLabel(
             "<b>Keyboard Controls:</b><br>"
             "← → ↑ ↓: Shift image by 1 pixel<br>"
             "Shift + arrows: Shift by 10 pixels<br>"
             "Ctrl + arrows: Shift by 50 pixels"
         )
-        instructions.setWordWrap(True)
-        instructions.setStyleSheet("padding: 10px; background-color: #2a2a2a; border-radius: 5px;")
-        shift_layout.addRow(instructions)
+        self.shift_instructions.setWordWrap(True)
+        self.shift_instructions.setStyleSheet("padding: 10px; background-color: #2a2a2a; border-radius: 5px;")
+        shift_layout.addRow(self.shift_instructions)
         
         shift_group.setLayout(shift_layout)
         layout.addWidget(shift_group)
@@ -292,15 +309,20 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             return
         
         try:
-            # Apply shift to white image
-            shifted_white = self._apply_shift(self.current_white, self.shift_x, self.shift_y)
-            
-            # Perform division (avoid division by zero)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                result = np.divide(self.current_data, shifted_white)
-                result[~np.isfinite(result)] = 0  # Replace inf/nan with 0
-            
-            self.result_image = result
+            if self.normalization_enabled:
+                # Apply shift to white image
+                shifted_white = self._apply_shift(self.current_white, self.shift_x, self.shift_y)
+                
+                # Perform division (avoid division by zero)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    result = np.divide(self.current_data, shifted_white)
+                    result[~np.isfinite(result)] = 0  # Replace inf/nan with 0
+                
+                self.result_image = result
+            else:
+                # Just show the raw data image (no normalization)
+                result = self.current_data
+                self.result_image = result
             
             # Update display
             self.image_view.setImage(result, autoRange=False, autoLevels=False, autoHistogramRange=True)
@@ -310,9 +332,14 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             self.max_val_label.setText(f"{np.max(result):.4f}")
             self.mean_val_label.setText(f"{np.mean(result):.4f}")
             
-            self.status_label.setText(
-                f"Image {self.current_index} | Shift: ({self.shift_x}, {self.shift_y})"
-            )
+            if self.normalization_enabled:
+                self.status_label.setText(
+                    f"Image {self.current_index} | Shift: ({self.shift_x}, {self.shift_y}) | Mode: Division"
+                )
+            else:
+                self.status_label.setText(
+                    f"Image {self.current_index} | Mode: Raw Data (no normalization)"
+                )
             
         except Exception as e:
             self.status_label.setText(f"Error updating display: {str(e)}")
@@ -346,6 +373,19 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         """Handle slider value change"""
         self._load_and_display_image(value)
     
+    def _on_normalization_changed(self, state):
+        """Handle normalization checkbox change"""
+        self.normalization_enabled = (state == QtCore.Qt.Checked)
+        
+        # Update mode label
+        if self.normalization_enabled:
+            self.mode_label.setText("Mode: <b>Division (data / data_white)</b>")
+        else:
+            self.mode_label.setText("Mode: <b>Raw Data Only</b>")
+        
+        # Update display
+        self._update_display()
+    
     def _reset_shift(self):
         """Reset shift to zero"""
         self.shift_x = 0
@@ -361,6 +401,11 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     def keyPressEvent(self, event):
         """Handle keyboard events for shifting"""
         if self.current_data is None:
+            return
+        
+        # Only allow shifting when normalization is enabled
+        if not self.normalization_enabled:
+            super().keyPressEvent(event)
             return
         
         # Determine step size based on modifiers
