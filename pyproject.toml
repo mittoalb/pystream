@@ -26,6 +26,9 @@ dev = ["black", "flake8", "pytest"]
 
 [project.scripts]
 pystream = "pystream.pystream:main"
+differential = "pystream.plugins.differential:main"
+mosalign = "pystream.plugins.mosalign:main"
+
 
 [tool.setuptools]
 package-dir = {"" = "src"}
