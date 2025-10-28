@@ -1,8 +1,5 @@
-# pystream
+# pystream - High-performance viewer for EPICS PVAccess NTNDArray data**
 
-**High-performance viewer for EPICS PVAccess NTNDArray data**
-
-![PYSTREAM GUI](https://raw.githubusercontent.com/mittoalb/pystream/main/docs/Images/pystream.png)
 
 ## Documentation
 
