@@ -15,7 +15,6 @@ PyStream is a Python package for real-time image streaming, processing, and anal
 ```{toctree}
 :maxdepth: 2
 
-installation
 quickstart
 plugins/index
 api
