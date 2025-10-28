@@ -1,4 +1,9 @@
 # Sphinx configuration
+# Sphinx configuration
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join("..", "src")))
 
 project = 'PyStream'
 copyright = '2025'
@@ -28,22 +33,28 @@ myst_enable_extensions = ["colon_fence", "deflist"]
 
 autodoc_mock_imports = [
     'argparse',
-    'dataclasses',
+    'cv2',
+    'h5py',
     'importlib',
     'json',
     'logging',
     'math',
     'numpy',
+    'os',
     'pvaccess',
+    'pvapy',
     'pyqtgraph',
-    'PyQt5',
     'queue',
-    'scipy',
     'subprocess',
+    'sys',
     'tempfile',
     'threading',
     'time',
     'tkinter',
     'traceback',
+    'types',
+    'dataclasses',
+    'PyQt5',
+    'tkinter',
     'typing',
 ]
