@@ -11,7 +11,3 @@
 pip install pystream
 pystream --pv YOUR:NTNDARRAY:PV
 ```
-
-## License
-
-MIT
