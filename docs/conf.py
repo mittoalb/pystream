@@ -20,3 +20,28 @@ html_static_path = ['_static']
 html_css_files = ['custom.css']
 
 myst_enable_extensions = ["colon_fence", "deflist"]
+
+# -- Options for Texinfo output -------------------------------------------
+# http://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html#confval-autodoc_mock_imports
+
+autodoc_mock_imports = [
+    'importlib',
+    'dataclasses',
+    'typing',
+    'queue',
+    'tempfile',
+    'pvaccess',
+    'numpy',
+    'PyQt5',
+    'pyqtgraph',
+    'threading',
+    'time',
+    'logging',
+    'scipy',
+    'subprocess',
+    'tkinter',
+    'traceback',
+    'json',
+    'argparse',
+    'math',
+]
