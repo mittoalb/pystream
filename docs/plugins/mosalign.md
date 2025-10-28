@@ -2,6 +2,10 @@
 
 Automated 2D motor scanning with live stitched preview for sample alignment and mosaic imaging.
 
+
+![Viewer plugin](./../Images/mosalign.png)
+
+
 ## Overview
 
 Mosalign controls X-Y motors to scan a grid pattern while capturing images and stitching them together in real-time. Useful for:

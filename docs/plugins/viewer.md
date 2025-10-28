@@ -8,6 +8,10 @@ Interactive viewer for HDF5 image data with flat-field correction.
 viewer
 ```
 
+![Viewer plugin](./../Images/viewer.png)
+
+
+
 ## Usage
 
 ### Load File
@@ -34,6 +38,10 @@ Click "Load HDF5 File" and select a file with:
 - Arrow keys: Shift by 1 pixel
 - Shift + arrows: Shift by 10 pixels
 - Ctrl + arrows: Shift by 50 pixels
+
+## Metadata
+
+In the second data the meta data extracted from the HDF5 can be accessed.
 
 ### Example Workflow
 
