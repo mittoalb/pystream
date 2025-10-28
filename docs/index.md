@@ -1,5 +1,7 @@
 # PyStream Documentation
 
+![logo](./Images/logo.png)
+
 PyStream is a Python package for real-time image streaming, processing, and analysis from EPICS area detectors.
 
 ## Features
