@@ -6,7 +6,7 @@ sphinx:
   configuration: docs/conf.py
 python:
   install:
-    - requirements: docs/requirements.txt
+    - requirements: envs/requirements-doc.txt
 submodules:
   recursive: false
 build:

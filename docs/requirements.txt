@@ -1,9 +1,0 @@
-sphinx
-sphinx-rtd-theme
-myst-parser
-PyQt5
-pyqtgraph
-h5py
-numpy
-scipy
-pvaccess
