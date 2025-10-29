@@ -119,7 +119,12 @@ def _init_pipeline(proc_config_path: Optional[str]):
         assert spec and spec.loader
         spec.loader.exec_module(mod)
 
-        cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
+        #cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
+        
+        cfg_path = (
+                proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, "pipelines", os.path.basename(proc_config_path))
+        )
+
         if LOGGER: LOGGER.info("[Plugins] Loading pipeline config: %s", cfg_path)
         PIPE = mod.ProcessorPipeline.from_config(cfg_path)
         if LOGGER: LOGGER.info("[Plugins] Pipeline initialized with %d processor(s)", len(getattr(PIPE, "processors", [])))
