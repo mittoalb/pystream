@@ -9,6 +9,6 @@ PyStream includes several plugins for image analysis and control.
 :maxdepth: 1
 
 viewer
-imageinfo
 mosalign
+metrics
 ```
