@@ -12,6 +12,7 @@ Includes interactive crosshair, recording to TIFF sequences, flat-field correcti
 conda create -n pystream python=3.10 numpy pyqt -c conda-forge
 conda activate pystream
 pip install pvapy pyqtgraph Pillow
+conda install h5py
 ```
 
 
