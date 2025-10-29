@@ -1,0 +1,12 @@
+{
+  "processors_dir": "processors",
+  "hot_reload": false,
+  "pipeline": [
+    {
+      "name": "noop",
+      "module": "noop",
+      "enabled": false,
+      "params": {}
+    }
+  ]
+}
