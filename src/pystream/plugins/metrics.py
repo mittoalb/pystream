@@ -1464,13 +1464,13 @@ class ImageInfoDialog(QtWidgets.QDialog):
         event.accept()
 
 
-# -------------------------
-# Standalone Launch
-# -------------------------
-
-if __name__ == "__main__":
+def main():
     import sys
     app = QtWidgets.QApplication(sys.argv)
     dialog = ImageInfoDialog()
     dialog.show()
     sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
