@@ -30,6 +30,20 @@ pip install -e .
 
 If your viewer uses the syntax editor (`PyQt5.Qsci`), install **QScintilla** that matches your PyQt version:
 
+### 4.
+
+In case you get the following error:
+
+```bash
+qt.qpa.plugin: Could not find the Qt platform plugin "xcb" in ""
+This application failed to start because no Qt platform plugin could be initialized. Reinstalling the application may fix this problem.
+```
+Ensure your QT_QPA_PLATFORM_PLUGIN_PATH is properly set. As an example:
+
+```bash
+export QT_QPA_PLATFORM_PLUGIN_PATH=/home/beams/USERTXM/conda/anaconda/envs/pystream/plugins/platforms
+```
+
 #### Recommended (Conda)
 ```bash
 conda install -c conda-forge "pyqt<6" qscintilla2
