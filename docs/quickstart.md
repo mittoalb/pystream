@@ -15,9 +15,6 @@ pip install pvapy pyqtgraph Pillow
 ```
 
 
-
-
-
 ### 2. Install Package
 
 
@@ -48,6 +45,23 @@ If you see
 follow the conda-forge method above — pip wheels often miss the binary bindings on macOS and Linux.
 
 ---
+
+
+### 4. Display troubleshooting
+
+In case you get the following error:
+
+```bash
+qt.qpa.plugin: Could not find the Qt platform plugin "xcb" in ""
+This application failed to start because no Qt platform plugin could be initialized. Reinstalling the application may fix this problem.
+```
+Ensure your QT_QPA_PLATFORM_PLUGIN_PATH is properly set. As an example:
+
+```bash
+export QT_QPA_PLATFORM_PLUGIN_PATH=/home/beams/USERTXM/conda/anaconda/envs/pystream/plugins/platforms
+```
+
+
 
 ## Usage
 
