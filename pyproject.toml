@@ -28,6 +28,7 @@ dev = ["black", "flake8", "pytest"]
 pystream = "pystream.pystream:main"
 viewer = "pystream.plugins.viewer:main"
 mosalign = "pystream.plugins.mosalign:main"
+metrics = "pystream.plugins.metrics:main"
 
 
 [tool.setuptools]
