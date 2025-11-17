@@ -43,6 +43,7 @@ from .logger import setup_custom_logger, log_exception
 from .plugins.roi import ROIManager
 from .plugins.mosalign import MotorScanDialog
 from .plugins.line import LineProfileManager
+from .plugins.ellipse import EllipseROIManager
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -349,7 +350,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
         self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
-        
+
+        # Initialize Ellipse ROI manager
+        self.ellipse_roi_manager = EllipseROIManager(
+            self.image_view, 
+            self.lbl_ellipse_info, 
+            logger=LOGGER
+        )
+        self.chk_ellipse.stateChanged.connect(self.ellipse_roi_manager.toggle)
+        self.btn_reset_ellipse.clicked.connect(self.ellipse_roi_manager.reset)
+
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
         self.btn_reset_line.clicked.connect(self.line_manager.reset)
@@ -826,6 +836,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         analysis_group.setLayout(analysis_layout)
         top_layout.addWidget(analysis_group)
+
+        #ELLIPSE ADDED
+        self.chk_ellipse = QtWidgets.QCheckBox("Ellipse")
+        analysis_layout.addWidget(self.chk_ellipse)
+
+        self.btn_reset_ellipse = QtWidgets.QPushButton("Reset Ellipse")
+        analysis_layout.addWidget(self.btn_reset_ellipse)
+
+        # Keep existing line profile controls...
+        self.chk_line = QtWidgets.QCheckBox("Line")
+        analysis_layout.addWidget(self.chk_line)
         
         # === TRANSFORM GROUP ===
         transform_group = QtWidgets.QGroupBox("Transform")
@@ -946,7 +967,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         left_layout.addWidget(info_group)
 
 
-        # ROI Statistics group - ADD THESE 11 LINES
         roi_group = QtWidgets.QGroupBox("ROI Statistics")
         roi_layout = QtWidgets.QVBoxLayout()
         self.lbl_roi_info = QtWidgets.QLabel("No ROI selected")
@@ -958,6 +978,20 @@ class PvViewerApp(QtWidgets.QMainWindow):
         roi_layout.addWidget(self.lbl_roi_info)
         roi_group.setLayout(roi_layout)
         left_layout.addWidget(roi_group)
+
+
+        ellipse_group = QtWidgets.QGroupBox("Ellipse ROI Statistics")
+        ellipse_layout = QtWidgets.QVBoxLayout()
+        self.lbl_ellipse_info = QtWidgets.QLabel("No ellipse ROI selected")
+        self.lbl_ellipse_info.setWordWrap(True)
+        self.lbl_ellipse_info.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; padding: 8px; "
+            "border: 1px solid #333; font-family: monospace; }"
+        )
+        ellipse_layout.addWidget(self.lbl_ellipse_info)
+        ellipse_group.setLayout(ellipse_layout)
+        left_layout.addWidget(ellipse_group)
+
 
         # Line Profile group
         line_group = QtWidgets.QGroupBox("Line Profile")
@@ -1256,6 +1290,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Update ROI Statistic
         self.roi_manager.update_stats(img)
+        self.ellipse_roi_manager.update_stats(img)
         self.line_manager.update_stats(img)
 
         # FPS calculation
@@ -1747,11 +1782,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Cleanup ROI
         self.roi_manager.cleanup()
         self.line_manager.cleanup()
+        self.ellipse_roi_manager.cleanup()
 
 	# Clean mosalign
         self.pump_timer.stop()
         if self.motor_scan_dialog:
-            self.motor_scan_dialog.close()  # ADD THIS        
+            self.motor_scan_dialog.close()    
 
         if LOGGER:
             LOGGER.info("Viewer closed")
