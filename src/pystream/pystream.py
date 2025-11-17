@@ -1217,9 +1217,22 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self._last_display_img = img
         self.current_uid = uid
 
-        # ACCUMULATION LOGIC - ADD THIS AT THE START
         if self.sub and self.sub.accumulating:
-            # ... (existing accumulation code) ...
+            # Accumulate frames
+            if self.sub.accumulated_sum is None:
+                # First frame
+                self.sub.accumulated_sum = img.astype(np.float64)
+                self.sub.accum_frame_count = 1
+            else:
+                # Add to accumulation
+                self.sub.accumulated_sum += img.astype(np.float64)
+                self.sub.accum_frame_count += 1
+            
+            # Use accumulated sum for display
+            img = self.sub.accumulated_sum
+            
+            # Update status (optional - show in window title or status bar)
+            # self.setWindowTitle(f"PyStream - Accumulated: {self.subscriber.accum_frame_count} frames")
 
         # Compute contrast
         self._ensure_slider_range(img)
