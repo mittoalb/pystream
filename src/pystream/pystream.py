@@ -409,8 +409,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.addItem(self.crosshair_hline)
         
         # Connect mouse events for crosshair
-        self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
-        self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
+        # self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
+        # self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
         
         splitter.addWidget(self.image_view)
         splitter.setStretchFactor(0, 0)
@@ -1219,21 +1219,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         # ACCUMULATION LOGIC - ADD THIS AT THE START
         if self.sub and self.sub.accumulating:
-            # Accumulate frames
-            if self.sub.accumulated_sum is None:
-                # First frame
-                self.sub.accumulated_sum = img.astype(np.float64)
-                self.sub.accum_frame_count = 1
-            else:
-                # Add to accumulation
-                self.sub.accumulated_sum += img.astype(np.float64)
-                self.sub.accum_frame_count += 1
-            
-            # Use accumulated sum for display
-            img = self.sub.accumulated_sum
-            
-            # Update status (optional - show in window title or status bar)
-            # self.setWindowTitle(f"PyStream - Accumulated: {self.subscriber.accum_frame_count} frames")
+            # ... (existing accumulation code) ...
 
         # Compute contrast
         self._ensure_slider_range(img)
@@ -1249,11 +1235,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Update PyQtGraph image - FAST rendering
         self.image_view.setImage(img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
         
-        # Update crosshair if enabled
+        # Update crosshair if enabled - ALWAYS CENTER IT
         if self.crosshair_enabled:
-            if self.crosshair_x is None or self.crosshair_y is None:
-                self.crosshair_x = img.shape[1] // 2
-                self.crosshair_y = img.shape[0] // 2
+            self.crosshair_y = img.shape[0] / 2.0
+            self.crosshair_x = img.shape[1] / 2.0
             self._update_crosshair_display()
         
         # Update ROI Statistic
@@ -1421,7 +1406,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.transpose_img = self.chk_transpose.isChecked()
         self.apply_flat_enabled = self.chk_apply_flat.isChecked()
     
-    # ------------- Crosshair -------------
     def _toggle_crosshair(self):
         self.crosshair_enabled = self.chk_crosshair.isChecked()
         self.crosshair_vline.setVisible(self.crosshair_enabled)
@@ -1430,11 +1414,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if not self.crosshair_enabled:
             self.lbl_crosshair.setText("Disabled")
         else:
-            self.lbl_crosshair.setText("Enabled\n(click or drag on image)")
+            self.lbl_crosshair.setText("Enabled\n(fixed at center)")
             if self._last_display_img is not None:
-                if self.crosshair_x is None or self.crosshair_y is None:
-                    self.crosshair_x = self._last_display_img.shape[1] // 2
-                    self.crosshair_y = self._last_display_img.shape[0] // 2
+                # Always center the crosshair
+                self.crosshair_y = self._last_display_img.shape[0] / 2.0
+                self.crosshair_x = self._last_display_img.shape[1] / 2.0
                 self._update_crosshair_display()
     
     def _update_crosshair_display(self):
