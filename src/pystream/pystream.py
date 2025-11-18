@@ -43,6 +43,7 @@ from .logger import setup_custom_logger, log_exception
 from .plugins.roi import ROIManager
 from .plugins.mosalign import MotorScanDialog
 from .plugins.line import LineProfileManager
+from .plugins.ellipse import EllipseROIManager
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -119,7 +120,12 @@ def _init_pipeline(proc_config_path: Optional[str]):
         assert spec and spec.loader
         spec.loader.exec_module(mod)
 
-        cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
+        #cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
+        
+        cfg_path = (
+                proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, "pipelines", os.path.basename(proc_config_path))
+        )
+
         if LOGGER: LOGGER.info("[Plugins] Loading pipeline config: %s", cfg_path)
         PIPE = mod.ProcessorPipeline.from_config(cfg_path)
         if LOGGER: LOGGER.info("[Plugins] Pipeline initialized with %d processor(s)", len(getattr(PIPE, "processors", [])))
@@ -344,7 +350,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
         self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
-        
+
+        # Initialize Ellipse ROI manager
+        self.ellipse_roi_manager = EllipseROIManager(
+            self.image_view, 
+            self.lbl_ellipse_info, 
+            logger=LOGGER
+        )
+        self.chk_ellipse.stateChanged.connect(self.ellipse_roi_manager.toggle)
+        self.btn_reset_ellipse.clicked.connect(self.ellipse_roi_manager.reset)
+
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
         self.btn_reset_line.clicked.connect(self.line_manager.reset)
@@ -404,8 +419,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.addItem(self.crosshair_hline)
         
         # Connect mouse events for crosshair
-        self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
-        self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
+        # self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
+        # self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
         
         splitter.addWidget(self.image_view)
         splitter.setStretchFactor(0, 0)
@@ -821,6 +836,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         analysis_group.setLayout(analysis_layout)
         top_layout.addWidget(analysis_group)
+
+        #ELLIPSE ADDED
+        self.chk_ellipse = QtWidgets.QCheckBox("Ellipse")
+        analysis_layout.addWidget(self.chk_ellipse)
+
+        self.btn_reset_ellipse = QtWidgets.QPushButton("Reset Ellipse")
+        analysis_layout.addWidget(self.btn_reset_ellipse)
+
+        # Keep existing line profile controls...
+        self.chk_line = QtWidgets.QCheckBox("Line")
+        analysis_layout.addWidget(self.chk_line)
         
         # === TRANSFORM GROUP ===
         transform_group = QtWidgets.QGroupBox("Transform")
@@ -941,7 +967,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         left_layout.addWidget(info_group)
 
 
-        # ROI Statistics group - ADD THESE 11 LINES
         roi_group = QtWidgets.QGroupBox("ROI Statistics")
         roi_layout = QtWidgets.QVBoxLayout()
         self.lbl_roi_info = QtWidgets.QLabel("No ROI selected")
@@ -953,6 +978,20 @@ class PvViewerApp(QtWidgets.QMainWindow):
         roi_layout.addWidget(self.lbl_roi_info)
         roi_group.setLayout(roi_layout)
         left_layout.addWidget(roi_group)
+
+
+        ellipse_group = QtWidgets.QGroupBox("Ellipse ROI Statistics")
+        ellipse_layout = QtWidgets.QVBoxLayout()
+        self.lbl_ellipse_info = QtWidgets.QLabel("No ellipse ROI selected")
+        self.lbl_ellipse_info.setWordWrap(True)
+        self.lbl_ellipse_info.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; padding: 8px; "
+            "border: 1px solid #333; font-family: monospace; }"
+        )
+        ellipse_layout.addWidget(self.lbl_ellipse_info)
+        ellipse_group.setLayout(ellipse_layout)
+        left_layout.addWidget(ellipse_group)
+
 
         # Line Profile group
         line_group = QtWidgets.QGroupBox("Line Profile")
@@ -1212,7 +1251,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self._last_display_img = img
         self.current_uid = uid
 
-        # ACCUMULATION LOGIC - ADD THIS AT THE START
         if self.sub and self.sub.accumulating:
             # Accumulate frames
             if self.sub.accumulated_sum is None:
@@ -1244,15 +1282,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Update PyQtGraph image - FAST rendering
         self.image_view.setImage(img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
         
-        # Update crosshair if enabled
+        # Update crosshair if enabled - ALWAYS CENTER IT
         if self.crosshair_enabled:
-            if self.crosshair_x is None or self.crosshair_y is None:
-                self.crosshair_x = img.shape[1] // 2
-                self.crosshair_y = img.shape[0] // 2
+            self.crosshair_y = img.shape[0] / 2.0
+            self.crosshair_x = img.shape[1] / 2.0
             self._update_crosshair_display()
         
         # Update ROI Statistic
         self.roi_manager.update_stats(img)
+        self.ellipse_roi_manager.update_stats(img)
         self.line_manager.update_stats(img)
 
         # FPS calculation
@@ -1416,7 +1454,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.transpose_img = self.chk_transpose.isChecked()
         self.apply_flat_enabled = self.chk_apply_flat.isChecked()
     
-    # ------------- Crosshair -------------
     def _toggle_crosshair(self):
         self.crosshair_enabled = self.chk_crosshair.isChecked()
         self.crosshair_vline.setVisible(self.crosshair_enabled)
@@ -1425,11 +1462,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if not self.crosshair_enabled:
             self.lbl_crosshair.setText("Disabled")
         else:
-            self.lbl_crosshair.setText("Enabled\n(click or drag on image)")
+            self.lbl_crosshair.setText("Enabled\n(fixed at center)")
             if self._last_display_img is not None:
-                if self.crosshair_x is None or self.crosshair_y is None:
-                    self.crosshair_x = self._last_display_img.shape[1] // 2
-                    self.crosshair_y = self._last_display_img.shape[0] // 2
+                # Always center the crosshair
+                self.crosshair_y = self._last_display_img.shape[0] / 2.0
+                self.crosshair_x = self._last_display_img.shape[1] / 2.0
                 self._update_crosshair_display()
     
     def _update_crosshair_display(self):
@@ -1745,11 +1782,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Cleanup ROI
         self.roi_manager.cleanup()
         self.line_manager.cleanup()
+        self.ellipse_roi_manager.cleanup()
 
 	# Clean mosalign
         self.pump_timer.stop()
         if self.motor_scan_dialog:
-            self.motor_scan_dialog.close()  # ADD THIS        
+            self.motor_scan_dialog.close()    
 
         if LOGGER:
             LOGGER.info("Viewer closed")
