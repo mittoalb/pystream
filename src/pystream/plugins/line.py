@@ -13,7 +13,8 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 
 class LineProfileManager:
     """
-    Line drawing tool with Shift-constrain for vertical/horizontal lines (ImageJ-style).
+    Line drawing tool with Ctrl-constrain for vertical/horizontal lines (ImageJ-style).
+    Includes a center handle for dragging the entire line.
     """
 
     def __init__(
@@ -36,7 +37,7 @@ class LineProfileManager:
         self.enabled = False
         self._last_image: Optional[np.ndarray] = None
         
-        # For Shift-key constraint
+        # For Ctrl-key constraint
         self._shift_pressed = False
         self._original_pos = None
         self._dragging_handle = None
@@ -56,7 +57,7 @@ class LineProfileManager:
             self.line.setVisible(True)
             self.line.show()
             self._update_stats()
-            self.stats_label.setText("Line enabled\n(drag endpoints; hold Ctrl for H/V constraint)")
+            self.stats_label.setText("Line enabled\n(drag endpoints or center; hold Ctrl for H/V constraint)")
         else:
             if self.line is not None:
                 self.line.setVisible(False)
@@ -205,10 +206,10 @@ class LineProfileManager:
         self._build_line(50, 50, 200, 50)
 
     def _build_line(self, x1, y1, x2, y2):
-        """Create LineSegmentROI with Ctrl-constraint capability."""
+        """Create LineSegmentROI with Ctrl-constraint capability and center handle."""
         img_item = self.image_view.getImageItem()
-        pen = pg.mkPen('c', width=self.line_pen_width)  # Cyan line
-        hover_pen = pg.mkPen((0, 255, 255, 220), width=self.line_pen_width + 2)
+        pen = pg.mkPen('y', width=self.line_pen_width)  # Yellow line
+        hover_pen = pg.mkPen((255, 255, 0, 220), width=self.line_pen_width + 2)
 
         # Create line from (x1,y1) to (x2,y2)
         positions = [[x1, y1], [x2, y2]]
@@ -220,6 +221,9 @@ class LineProfileManager:
             self.line.setParentItem(img_item)
         else:
             self.image_view.getView().addItem(self.line)
+
+        # Add center handle for dragging the entire line
+        self._add_center_handle()
 
         # Style handles
         self._style_handles()
@@ -238,25 +242,51 @@ class LineProfileManager:
         if self.logger:
             self.logger.info("Line created at (%d, %d) - (%d, %d)", x1, y1, x2, y2)
 
-    def _style_handles(self):
-        """Style the line endpoint handles."""
-        brush = pg.mkBrush(0, 255, 255, 255)  # cyan
-        pen = pg.mkPen(0, 0, 0, 255, width=1)  # black outline
+    def _add_center_handle(self):
+        """Add a center handle that allows dragging the entire line."""
+        if self.line is None:
+            return
+        
+        # Calculate center position (in local line coordinates)
+        # The line goes from (0, 0) to endpoints, so center is at midpoint
+        handles = self.line.getHandles()
+        if len(handles) >= 2:
+            p1 = handles[0].pos()
+            p2 = handles[1].pos()
+            center_x = (p1.x() + p2.x()) / 2
+            center_y = (p1.y() + p2.y()) / 2
+            
+            # Add translatable center handle
+            self.line.addTranslateHandle([center_x, center_y])
 
-        for h in self.line.getHandles():
+    def _style_handles(self):
+        """Style the line endpoint handles and center handle."""
+        yellow_brush = pg.mkBrush(255, 255, 0, 255)  # Yellow fill
+        black_pen = pg.mkPen(0, 0, 0, 255, width=1)  # Black outline
+        
+        # For center handle, use a slightly different style
+        center_brush = pg.mkBrush(255, 200, 0, 200)  # Darker yellow, semi-transparent
+
+        for idx, h in enumerate(self.line.getHandles()):
             # Handle is an object with 'item' attribute, not a dict
             item = h['item'] if isinstance(h, dict) else getattr(h, 'item', None)
             if item is None:
                 continue
             
+            # Determine if this is the center handle (3rd handle)
+            is_center = idx >= 2
+            
             # Set size
             if hasattr(item, "setSize"):
                 try:
-                    item.setSize(self.handle_size)
+                    # Make center handle slightly larger
+                    size = self.handle_size + 4 if is_center else self.handle_size
+                    item.setSize(size)
                 except Exception:
                     pass
             
             # Set colors
+            brush = center_brush if is_center else yellow_brush
             try:
                 if hasattr(item, "setBrush"):
                     item.setBrush(brush)
@@ -266,9 +296,9 @@ class LineProfileManager:
                 pass
             try:
                 if hasattr(item, "setPen"):
-                    item.setPen(pen)
+                    item.setPen(black_pen)
                 else:
-                    item.pen = pen
+                    item.pen = black_pen
             except Exception:
                 pass
 
@@ -311,7 +341,7 @@ class LineProfileManager:
         self._dragging_handle = None
 
     def constrain_to_axis(self):
-        """Constrain line to horizontal or vertical when Shift is pressed."""
+        """Constrain line to horizontal or vertical when Ctrl is pressed."""
         if self.line is None or self._original_pos is None:
             return
         

@@ -44,6 +44,8 @@ from .plugins.roi import ROIManager
 from .plugins.mosalign import MotorScanDialog
 from .plugins.line import LineProfileManager
 from .plugins.ellipse import EllipseROIManager
+from .plugins.scalebar import ScaleBarManager, ScaleBarDialog
+
 
 LOGGER: Optional[logging.Logger] = None
 
@@ -331,7 +333,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Editor state (for code editor tab)
         self.current_editor_file = None
-        
+
+        # Scale bar
+        self.scalebar_manager = None  
+        self.scalebar_dialog = None
+
         # ===== NOW BUILD UI WITH TABS =====
         # Create central widget with tabs
         self.tabs = QtWidgets.QTabWidget()
@@ -359,6 +365,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         )
         self.chk_ellipse.stateChanged.connect(self.ellipse_roi_manager.toggle)
         self.btn_reset_ellipse.clicked.connect(self.ellipse_roi_manager.reset)
+
+        # Initialize scale bar manager
+        self.scalebar_manager = ScaleBarManager(
+            self.image_view,
+            logger=LOGGER,
+            pixel_size=1.0,  # Default 1.0 nm/px
+            unit="nm",
+            position="bottom-right",
+            color="white"
+        )
+        self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
 
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
@@ -419,8 +436,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.addItem(self.crosshair_hline)
         
         # Connect mouse events for crosshair
-        # self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
-        # self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
+        #self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
+        #self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
+        self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
+
         
         splitter.addWidget(self.image_view)
         splitter.setStretchFactor(0, 0)
@@ -815,6 +834,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         view_group.setLayout(view_layout)
         top_layout.addWidget(view_group)
+
+        # Scale bar
+        self.chk_scalebar = QtWidgets.QCheckBox("Scale Bar")
+        self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
+        view_layout.addWidget(self.chk_scalebar)
+
+        btn_scalebar_settings = QtWidgets.QPushButton("⚙")
+        btn_scalebar_settings.setMaximumWidth(30)
+        btn_scalebar_settings.setToolTip("Scale bar settings")
+        btn_scalebar_settings.clicked.connect(self._open_scalebar_settings)
+        view_layout.addWidget(btn_scalebar_settings)
         
         # === ANALYSIS TOOLS GROUP ===
         analysis_group = QtWidgets.QGroupBox("Analysis")
@@ -1001,6 +1031,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         line_layout.addWidget(self.lbl_line_info)
         line_group.setLayout(line_layout)
         left_layout.addWidget(line_group)
+
+        # Cursor statistics
+        cursor_group = QtWidgets.QGroupBox("Cursor Info")
+        cursor_layout = QtWidgets.QVBoxLayout()
+        self.lbl_cursor_info = QtWidgets.QLabel("Move mouse over image")
+        self.lbl_cursor_info.setWordWrap(True)
+        self.lbl_cursor_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 8px; border: 1px solid #333; font-family: monospace; }")
+        cursor_layout.addWidget(self.lbl_cursor_info)
+        cursor_group.setLayout(cursor_layout)
+        left_layout.addWidget(cursor_group)
         
         # Crosshair info group
         crosshair_group = QtWidgets.QGroupBox("Crosshair")
@@ -1293,6 +1333,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.ellipse_roi_manager.update_stats(img)
         self.line_manager.update_stats(img)
 
+        # Update scale bar
+        if self.scalebar_manager is not None:
+            self.scalebar_manager.update_image(img)
+
         # FPS calculation
         now = time.time()
         dt = max(1e-6, now - self._last_ts)
@@ -1328,6 +1372,26 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self._update_histogram(img, vmin, vmax)
             self._last_hist_t = now
     
+
+    def _toggle_scalebar(self):
+        """Toggle scale bar visibility."""
+        if self.scalebar_manager is None:
+            return
+        self.scalebar_manager.toggle(self.chk_scalebar.checkState())
+
+    def _open_scalebar_settings(self):
+        """Open scale bar settings dialog."""
+        if self.scalebar_manager is None:
+            QtWidgets.QMessageBox.warning(self, "Scale Bar", "Scale bar not initialized.")
+            return
+        
+        if self.scalebar_dialog is None:
+            self.scalebar_dialog = ScaleBarDialog(self.scalebar_manager, parent=self)
+        
+        self.scalebar_dialog.show()
+        self.scalebar_dialog.raise_()
+        self.scalebar_dialog.activateWindow()
+
     # ------------- Flat-field -------------
     def _apply_flat_field(self, img: np.ndarray) -> np.ndarray:
         flat = self.flat
@@ -1494,17 +1558,30 @@ class PvViewerApp(QtWidgets.QMainWindow):
             pass
     
     def _on_mouse_move(self, pos):
-        if not self.crosshair_enabled or self._last_display_img is None:
+        if self._last_display_img is None:
             return
         
         # Get image coordinates from scene position
         img_pos = self.image_view.getImageItem().mapFromScene(pos)
         x, y = img_pos.x(), img_pos.y()
         
-        # Update crosshair
-        self.crosshair_x = x
-        self.crosshair_y = y
-        self._update_crosshair_display()
+        # Update cursor info (ALWAYS - independent of crosshair)
+        try:
+            h, w = self._last_display_img.shape[:2]
+            ix = int(np.clip(x, 0, w - 1))
+            iy = int(np.clip(y, 0, h - 1))
+            value = float(self._last_display_img[iy, ix])
+            
+            self.lbl_cursor_info.setText(
+                f"Position:\n"
+                f"  X: {ix}\n"
+                f"  Y: {iy}\n"
+                f"\n"
+                f"Value: {value:.4f}"
+            )
+        except (IndexError, ValueError):
+            pass
+
     
     def _on_mouse_click(self, event):
         if not self.crosshair_enabled or self._last_display_img is None:
@@ -1783,6 +1860,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.roi_manager.cleanup()
         self.line_manager.cleanup()
         self.ellipse_roi_manager.cleanup()
+
+        if self.scalebar_manager:
+            self.scalebar_manager.cleanup()
+        if self.scalebar_dialog:
+            self.scalebar_dialog.close()
 
 	# Clean mosalign
         self.pump_timer.stop()
