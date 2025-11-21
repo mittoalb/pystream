@@ -74,12 +74,17 @@ class LineProfileManager:
             self.enabled = True
 
         h, w = self._last_image.shape[:2]
-        # Create diagonal line in center
+        # Create horizontal line in center
         x1, y1 = w // 3, h // 2
         x2, y2 = 2 * w // 3, h // 2
         
-        self.line.setPos([x1, y1])
-        self.line.setEndpoints([0, 0], [x2 - x1, y2 - y1])
+        # Set position and update handles
+        self.line.setPos(x1, y1)
+        handles = self.line.getHandles()
+        if len(handles) >= 2:
+            handles[0].setPos(0, 0)
+            handles[1].setPos(x2 - x1, y2 - y1)
+        
         self.line.setZValue(1000)
         self.line.setVisible(True)
         self.line.show()
@@ -172,8 +177,12 @@ class LineProfileManager:
             else:
                 self._create_line_default()
         
-        self.line.setPos([x1, y1])
-        self.line.setEndpoints([0, 0], [x2 - x1, y2 - y1])
+        self.line.setPos(x1, y1)
+        handles = self.line.getHandles()
+        if len(handles) >= 2:
+            handles[0].setPos(0, 0)
+            handles[1].setPos(x2 - x1, y2 - y1)
+        
         self.line.setZValue(1000)
         self.line.setVisible(True)
         self.line.show()
@@ -367,12 +376,14 @@ class LineProfileManager:
                 
                 if dx > dy:
                     # Horizontal constraint
-                    new_y = y2_orig
-                    self.line.setEndpoints([x2_orig, y2_orig], [p1.x(), new_y])
+                    self.line.setPos(x2_orig, y2_orig)
+                    handles[0].setPos(0, 0)
+                    handles[1].setPos(p1.x() - x2_orig, 0)
                 else:
                     # Vertical constraint
-                    new_x = x2_orig
-                    self.line.setEndpoints([x2_orig, y2_orig], [new_x, p1.y()])
+                    self.line.setPos(x2_orig, y2_orig)
+                    handles[0].setPos(0, 0)
+                    handles[1].setPos(0, p1.y() - y2_orig)
             else:
                 # Handle 2 is moving, constrain it
                 dx = abs(p2.x() - x1_orig)
@@ -380,17 +391,19 @@ class LineProfileManager:
                 
                 if dx > dy:
                     # Horizontal constraint
-                    new_y = y1_orig
-                    self.line.setEndpoints([x1_orig, y1_orig], [p2.x(), new_y])
+                    self.line.setPos(x1_orig, y1_orig)
+                    handles[0].setPos(0, 0)
+                    handles[1].setPos(p2.x() - x1_orig, 0)
                 else:
                     # Vertical constraint
-                    new_x = x1_orig
-                    self.line.setEndpoints([x1_orig, y1_orig], [new_x, p2.y()])
+                    self.line.setPos(x1_orig, y1_orig)
+                    handles[0].setPos(0, 0)
+                    handles[1].setPos(0, p2.y() - y1_orig)
                     
         except Exception as e:
             if self.logger:
                 self.logger.warning("Failed to constrain line: %s", e)
-
+                
     # ---------- Stats ----------
 
     def _update_stats(self):

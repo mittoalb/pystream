@@ -875,8 +875,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         analysis_layout.addWidget(self.btn_reset_ellipse)
 
         # Keep existing line profile controls...
-        self.chk_line = QtWidgets.QCheckBox("Line")
-        analysis_layout.addWidget(self.chk_line)
+        #self.chk_line = QtWidgets.QCheckBox("Line")
+        #analysis_layout.addWidget(self.chk_line)
         
         # === TRANSFORM GROUP ===
         transform_group = QtWidgets.QGroupBox("Transform")
