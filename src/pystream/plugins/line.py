@@ -13,7 +13,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 
 class LineProfileManager:
     """
-    Line drawing tool with Ctrl-constrain for vertical/horizontal lines (ImageJ-style).
+    Line drawing tool with Shift-constrain for vertical/horizontal lines (ImageJ-style).
     Includes a center handle for dragging the entire line.
     """
 
@@ -36,11 +36,13 @@ class LineProfileManager:
         self.line: Optional[pg.LineSegmentROI] = None
         self.enabled = False
         self._last_image: Optional[np.ndarray] = None
-        
-        # For Ctrl-key constraint
+
+        # For Shift-key snapping
         self._shift_pressed = False
-        self._original_pos = None
-        self._dragging_handle = None
+
+        # For detecting which endpoint is moving
+        self._prev_p0 = None  # QPointF in ROI local coords
+        self._prev_p1 = None  # QPointF in ROI local coords
 
     # ---------- Public API ----------
 
@@ -57,7 +59,10 @@ class LineProfileManager:
             self.line.setVisible(True)
             self.line.show()
             self._update_stats()
-            self.stats_label.setText("Line enabled\n(drag endpoints or center; hold Ctrl for H/V constraint)")
+            self.stats_label.setText(
+                "Line enabled\n"
+                "(drag endpoints or center; hold Shift for H/V snap)"
+            )
         else:
             if self.line is not None:
                 self.line.setVisible(False)
@@ -74,17 +79,17 @@ class LineProfileManager:
             self.enabled = True
 
         h, w = self._last_image.shape[:2]
-        # Create horizontal line in center
         x1, y1 = w // 3, h // 2
         x2, y2 = 2 * w // 3, h // 2
-        
-        # Set position and update handles
+
         self.line.setPos(x1, y1)
         handles = self.line.getHandles()
         if len(handles) >= 2:
-            handles[0].setPos(0, 0)
-            handles[1].setPos(x2 - x1, y2 - y1)
-        
+            h0 = self._handle_item(handles[0])
+            h1 = self._handle_item(handles[1])
+            h0.setPos(0, 0)
+            h1.setPos(x2 - x1, y2 - y1)
+
         self.line.setZValue(1000)
         self.line.setVisible(True)
         self.line.show()
@@ -101,7 +106,9 @@ class LineProfileManager:
         if self.enabled and self.line is not None:
             self._update_stats()
 
-    def get_line_profile(self, image: Optional[np.ndarray] = None) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    def get_line_profile(
+        self, image: Optional[np.ndarray] = None
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """
         Return line profile data as (positions, values).
         positions: distance along line in pixels
@@ -109,41 +116,45 @@ class LineProfileManager:
         """
         if not self.enabled or self.line is None:
             return None
+
         img = image if image is not None else self._last_image
         if img is None:
             return None
-        
+
         try:
-            # Get line endpoints
-            pos = self.line.pos()
+            img_item = self.image_view.getImageItem()
+            if img_item is None:
+                return None
+
             handles = self.line.getHandles()
             if len(handles) < 2:
                 return None
-            
-            p1 = self.line.mapToItem(self.image_view.getImageItem(), handles[0].pos())
-            p2 = self.line.mapToItem(self.image_view.getImageItem(), handles[1].pos())
-            
-            x1, y1 = int(p1.x()), int(p1.y())
-            x2, y2 = int(p2.x()), int(p2.y())
-            
-            # Generate points along the line
-            length = int(np.sqrt((x2 - x1)**2 + (y2 - y1)**2))
+
+            p1_local = self._handle_pos(handles[0])
+            p2_local = self._handle_pos(handles[1])
+
+            p1 = self.line.mapToItem(img_item, p1_local)
+            p2 = self.line.mapToItem(img_item, p2_local)
+
+            x1, y1 = float(p1.x()), float(p1.y())
+            x2, y2 = float(p2.x()), float(p2.y())
+
+            length = int(np.hypot(x2 - x1, y2 - y1))
             if length < 1:
                 return None
-            
+
             x = np.linspace(x1, x2, length)
             y = np.linspace(y1, y2, length)
-            
-            # Sample image at line coordinates
+
             h, w = img.shape[:2]
             x_int = np.clip(x.astype(int), 0, w - 1)
             y_int = np.clip(y.astype(int), 0, h - 1)
-            
+
             values = img[y_int, x_int]
             positions = np.arange(length)
-            
+
             return positions, values
-            
+
         except Exception as e:
             if self.logger:
                 self.logger.warning("Failed to extract line profile: %s", e)
@@ -153,43 +164,54 @@ class LineProfileManager:
         """Return dict(x1, y1, x2, y2) in image pixel coordinates."""
         if self.line is None:
             return None
-        
+
         try:
+            img_item = self.image_view.getImageItem()
+            if img_item is None:
+                return None
+
             handles = self.line.getHandles()
             if len(handles) < 2:
                 return None
-            
-            p1 = self.line.mapToItem(self.image_view.getImageItem(), handles[0].pos())
-            p2 = self.line.mapToItem(self.image_view.getImageItem(), handles[1].pos())
-            
+
+            p1_local = self._handle_pos(handles[0])
+            p2_local = self._handle_pos(handles[1])
+
+            p1 = self.line.mapToItem(img_item, p1_local)
+            p2 = self.line.mapToItem(img_item, p2_local)
+
             return {
-                "x1": p1.x(), "y1": p1.y(),
-                "x2": p2.x(), "y2": p2.y()
+                "x1": float(p1.x()), "y1": float(p1.y()),
+                "x2": float(p2.x()), "y2": float(p2.y()),
             }
         except Exception:
             return None
 
     def set_line_coords(self, x1: float, y1: float, x2: float, y2: float):
-        """Programmatically set line coordinates."""
+        """Programmatically set line coordinates (in image pixel coordinates)."""
         if self.line is None:
             if self._last_image is not None:
                 self._create_line_from_image(self._last_image)
             else:
                 self._create_line_default()
-        
+
         self.line.setPos(x1, y1)
         handles = self.line.getHandles()
         if len(handles) >= 2:
-            handles[0].setPos(0, 0)
-            handles[1].setPos(x2 - x1, y2 - y1)
-        
+            h0 = self._handle_item(handles[0])
+            h1 = self._handle_item(handles[1])
+            h0.setPos(0, 0)
+            h1.setPos(x2 - x1, y2 - y1)
+
         self.line.setZValue(1000)
         self.line.setVisible(True)
         self.line.show()
         self._update_stats()
-        
+
         if self.logger:
-            self.logger.info("Line set to (%.1f, %.1f) - (%.1f, %.1f)", x1, y1, x2, y2)
+            self.logger.info(
+                "Line set to (%.1f, %.1f) - (%.1f, %.1f)", x1, y1, x2, y2
+            )
 
     def cleanup(self):
         """Remove line from the view."""
@@ -205,6 +227,20 @@ class LineProfileManager:
 
     # ---------- Internals ----------
 
+    @staticmethod
+    def _handle_pos(h):
+        """Return handle position (QPointF) from dict or object."""
+        if isinstance(h, dict):
+            return h["pos"]
+        return h.pos()
+
+    @staticmethod
+    def _handle_item(h):
+        """Return handle GraphicsObject from dict or object."""
+        if isinstance(h, dict):
+            return h["item"]
+        return h.item
+
     def _create_line_from_image(self, image: np.ndarray):
         h, w = image.shape[:2]
         x1, y1 = w // 3, h // 2
@@ -215,34 +251,29 @@ class LineProfileManager:
         self._build_line(50, 50, 200, 50)
 
     def _build_line(self, x1, y1, x2, y2):
-        """Create LineSegmentROI with Ctrl-constraint capability and center handle."""
+        """Create LineSegmentROI with Shift-snap and center handle."""
         img_item = self.image_view.getImageItem()
-        pen = pg.mkPen('y', width=self.line_pen_width)  # Yellow line
+        pen = pg.mkPen("y", width=self.line_pen_width)  # Yellow line
         hover_pen = pg.mkPen((255, 255, 0, 220), width=self.line_pen_width + 2)
 
-        # Create line from (x1,y1) to (x2,y2)
         positions = [[x1, y1], [x2, y2]]
-        self.line = pg.LineSegmentROI(positions, pen=pen, hoverPen=hover_pen, movable=True)
+        self.line = pg.LineSegmentROI(
+            positions, pen=pen, hoverPen=hover_pen, movable=True
+        )
         self.line.setZValue(1000)
 
-        # Parent to ImageItem
         if img_item is not None:
             self.line.setParentItem(img_item)
         else:
             self.image_view.getView().addItem(self.line)
 
-        # Add center handle for dragging the entire line
         self._add_center_handle()
-
-        # Style handles
         self._style_handles()
 
-        # Connect signals for ctrl-constraint with immediate feedback
-        self.line.sigRegionChanged.connect(self._on_region_changed)
         self.line.sigRegionChangeStarted.connect(self._on_drag_start)
+        self.line.sigRegionChanged.connect(self._on_region_changed)
         self.line.sigRegionChangeFinished.connect(self._on_drag_finish)
 
-        # Install event filter for ctrl key on the main window
         self._install_key_handler()
 
         self.line.setVisible(True)
@@ -255,179 +286,173 @@ class LineProfileManager:
         """Add a center handle that allows dragging the entire line."""
         if self.line is None:
             return
-        
-        # Calculate center position (in local line coordinates)
-        # The line goes from (0, 0) to endpoints, so center is at midpoint
+
         handles = self.line.getHandles()
         if len(handles) >= 2:
-            p1 = handles[0].pos()
-            p2 = handles[1].pos()
-            center_x = (p1.x() + p2.x()) / 2
-            center_y = (p1.y() + p2.y()) / 2
-            
-            # Add translatable center handle
+            p1 = self._handle_pos(handles[0])
+            p2 = self._handle_pos(handles[1])
+            center_x = (p1.x() + p2.x()) / 2.0
+            center_y = (p1.y() + p2.y()) / 2.0
             self.line.addTranslateHandle([center_x, center_y])
 
     def _style_handles(self):
         """Style the line endpoint handles and center handle."""
         yellow_brush = pg.mkBrush(255, 255, 0, 255)  # Yellow fill
         black_pen = pg.mkPen(0, 0, 0, 255, width=1)  # Black outline
-        
-        # For center handle, use a slightly different style
-        center_brush = pg.mkBrush(255, 200, 0, 200)  # Darker yellow, semi-transparent
+        center_brush = pg.mkBrush(255, 200, 0, 200)  # Darker yellow
 
-        for idx, h in enumerate(self.line.getHandles()):
-            # Handle is an object with 'item' attribute, not a dict
-            item = h['item'] if isinstance(h, dict) else getattr(h, 'item', None)
+        handles = self.line.getHandles()
+        for idx, h in enumerate(handles):
+            item = self._handle_item(h)
             if item is None:
                 continue
-            
-            # Determine if this is the center handle (3rd handle)
-            is_center = idx >= 2
-            
-            # Set size
+
+            is_center = (idx >= 2)  # first 2 handles are endpoints
+
             if hasattr(item, "setSize"):
                 try:
-                    # Make center handle slightly larger
                     size = self.handle_size + 4 if is_center else self.handle_size
                     item.setSize(size)
                 except Exception:
                     pass
-            
-            # Set colors
+
             brush = center_brush if is_center else yellow_brush
             try:
                 if hasattr(item, "setBrush"):
                     item.setBrush(brush)
-                else:
-                    item.brush = brush
             except Exception:
                 pass
             try:
                 if hasattr(item, "setPen"):
                     item.setPen(black_pen)
-                else:
-                    item.pen = black_pen
             except Exception:
                 pass
 
     def _install_key_handler(self):
-        """Install event filter to detect Ctrl key on application level."""
-        # Install on the QApplication to catch all keyboard events
-        QtWidgets.QApplication.instance().installEventFilter(CtrlKeyFilter(self))
-        
-        # Also install on the view for redundancy
+        """Install event filter to detect Shift key on application level."""
+        key_filter = ShiftKeyFilter(self)
+
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.installEventFilter(key_filter)
+
         view = self.image_view.getView()
-        if view and view.scene():
-            view.scene().installEventFilter(CtrlKeyFilter(self))
+        if view:
+            view.installEventFilter(key_filter)
+            if view.scene():
+                view.scene().installEventFilter(key_filter)
+
+        self.image_view.installEventFilter(key_filter)
+
+        if self.line:
+            self.line.installEventFilter(key_filter)
+
+    # ---------- Snap logic ----------
+
+    def _on_drag_start(self):
+        """Reset motion tracking at the start of a drag."""
+        handles = self.line.getHandles() if self.line is not None else []
+        if len(handles) >= 2:
+            self._prev_p0 = self._handle_pos(handles[0])
+            self._prev_p1 = self._handle_pos(handles[1])
+        else:
+            self._prev_p0 = None
+            self._prev_p1 = None
+
+    def _on_drag_finish(self):
+        """Clear motion tracking after drag."""
+        self._prev_p0 = None
+        self._prev_p1 = None
 
     def _on_region_changed(self):
         """Called whenever the line region changes (during drag)."""
-        # Apply constraint if Ctrl is pressed
-        if self._shift_pressed:
-            self.constrain_to_axis()
-        else:
-            self._update_stats()
-
-    def _on_drag_start(self):
-        """Called when user starts dragging."""
-        if self.line is None:
+        if not self.enabled or self.line is None:
             return
-        
-        # Store original position
+
         handles = self.line.getHandles()
-        if len(handles) >= 2:
-            try:
-                p1 = self.line.mapToItem(self.image_view.getImageItem(), handles[0].pos())
-                p2 = self.line.mapToItem(self.image_view.getImageItem(), handles[1].pos())
-                self._original_pos = (p1.x(), p1.y(), p2.x(), p2.y())
-            except Exception:
-                pass
-
-    def _on_drag_finish(self):
-        """Called when user finishes dragging."""
-        self._original_pos = None
-        self._dragging_handle = None
-
-    def constrain_to_axis(self):
-        """Constrain line to horizontal or vertical when Ctrl is pressed."""
-        if self.line is None or self._original_pos is None:
+        if len(handles) < 2:
             return
-        
-        try:
-            handles = self.line.getHandles()
-            if len(handles) < 2:
-                return
-            
-            # Get current positions
-            p1 = self.line.mapToItem(self.image_view.getImageItem(), handles[0].pos())
-            p2 = self.line.mapToItem(self.image_view.getImageItem(), handles[1].pos())
-            
-            x1_orig, y1_orig, x2_orig, y2_orig = self._original_pos
-            
-            # Determine which handle is being dragged
-            dist1 = (p1.x() - x1_orig)**2 + (p1.y() - y1_orig)**2
-            dist2 = (p2.x() - x2_orig)**2 + (p2.y() - y2_orig)**2
-            
-            if dist1 > dist2:
-                # Handle 1 is moving, constrain it
-                dx = abs(p1.x() - x2_orig)
-                dy = abs(p1.y() - y2_orig)
-                
-                if dx > dy:
-                    # Horizontal constraint
-                    self.line.setPos(x2_orig, y2_orig)
-                    handles[0].setPos(0, 0)
-                    handles[1].setPos(p1.x() - x2_orig, 0)
-                else:
-                    # Vertical constraint
-                    self.line.setPos(x2_orig, y2_orig)
-                    handles[0].setPos(0, 0)
-                    handles[1].setPos(0, p1.y() - y2_orig)
+
+        # Current positions in ROI local coordinates
+        p0 = self._handle_pos(handles[0])
+        p1 = self._handle_pos(handles[1])
+
+        # If we don't have previous positions yet, just store and exit
+        if self._prev_p0 is None or self._prev_p1 is None:
+            self._prev_p0 = QtCore.QPointF(p0)
+            self._prev_p1 = QtCore.QPointF(p1)
+            self._update_stats()
+            return
+
+        if self._shift_pressed:
+            # Decide which endpoint moved more since last frame -> moving endpoint
+            d0 = (p0.x() - self._prev_p0.x()) ** 2 + (p0.y() - self._prev_p0.y()) ** 2
+            d1 = (p1.x() - self._prev_p1.x()) ** 2 + (p1.y() - self._prev_p1.y()) ** 2
+
+            if d0 >= d1:
+                moving_idx, anchor_idx = 0, 1
+                moving_local, anchor_local = p0, p1
             else:
-                # Handle 2 is moving, constrain it
-                dx = abs(p2.x() - x1_orig)
-                dy = abs(p2.y() - y1_orig)
-                
-                if dx > dy:
-                    # Horizontal constraint
-                    self.line.setPos(x1_orig, y1_orig)
-                    handles[0].setPos(0, 0)
-                    handles[1].setPos(p2.x() - x1_orig, 0)
+                moving_idx, anchor_idx = 1, 0
+                moving_local, anchor_local = p1, p0
+
+            ax, ay = anchor_local.x(), anchor_local.y()
+            mx, my = moving_local.x(), moving_local.y()
+
+            dx = mx - ax
+            dy = my - ay
+
+            if dx == 0 and dy == 0:
+                # Nothing to snap
+                pass
+            else:
+                # Snap to closest axis through anchor
+                if abs(dx) >= abs(dy):
+                    # Horizontal: same y as anchor
+                    new_mx, new_my = ax + dx, ay
                 else:
-                    # Vertical constraint
-                    self.line.setPos(x1_orig, y1_orig)
-                    handles[0].setPos(0, 0)
-                    handles[1].setPos(0, p2.y() - y1_orig)
-                    
-        except Exception as e:
-            if self.logger:
-                self.logger.warning("Failed to constrain line: %s", e)
-                
+                    # Vertical: same x as anchor
+                    new_mx, new_my = ax, ay + dy
+
+                # Apply only to moving endpoint (in local coords)
+                self.line.blockSignals(True)
+                moving_item = self._handle_item(handles[moving_idx])
+                moving_item.setPos(new_mx, new_my)
+                self.line.blockSignals(False)
+
+                # Update local p0/p1 after snapping
+                if moving_idx == 0:
+                    p0 = QtCore.QPointF(new_mx, new_my)
+                else:
+                    p1 = QtCore.QPointF(new_mx, new_my)
+
+        # Update previous positions for next callback
+        self._prev_p0 = QtCore.QPointF(p0)
+        self._prev_p1 = QtCore.QPointF(p1)
+
+        self._update_stats()
+
     # ---------- Stats ----------
 
     def _update_stats(self):
         """Update statistics label with line info and profile stats."""
         if not self.enabled or self.line is None or self._last_image is None:
             return
-        
+
         try:
             coords = self.get_line_coords()
             if coords is None:
                 return
-            
-            x1, y1 = coords['x1'], coords['y1']
-            x2, y2 = coords['x2'], coords['y2']
-            
-            # Calculate length
-            length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-            
-            # Get angle (0-360 degrees, 0=right, 90=down)
-            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+
+            x1, y1 = coords["x1"], coords["y1"]
+            x2, y2 = coords["x2"], coords["y2"]
+
+            length = float(np.hypot(x2 - x1, y2 - y1))
+
+            angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
             if angle < 0:
-                angle += 360
-            
-            # Get profile data
+                angle += 360.0
+
             profile = self.get_line_profile()
             if profile:
                 positions, values = profile
@@ -435,7 +460,7 @@ class LineProfileManager:
                 profile_max = float(np.max(values))
                 profile_mean = float(np.mean(values))
                 profile_std = float(np.std(values))
-                
+
                 self.stats_label.setText(
                     f"Line:\n"
                     f"  Start: ({x1:.1f}, {y1:.1f})\n"
@@ -457,29 +482,31 @@ class LineProfileManager:
                     f"  Length: {length:.1f} px\n"
                     f"  Angle: {angle:.1f}°"
                 )
-                
+
         except Exception as e:
             if self.logger:
                 self.logger.warning("Failed to update line stats: %s", e)
             self.stats_label.setText("Error calculating line stats")
 
 
-class CtrlKeyFilter(QtCore.QObject):
-    """Event filter to detect Left Ctrl key press/release."""
-    
+class ShiftKeyFilter(QtCore.QObject):
+    """Event filter to detect Shift key press/release."""
+
     def __init__(self, line_manager: LineProfileManager):
         super().__init__()
         self.line_manager = line_manager
-    
+
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.KeyPress:
-            # Check for Left Control key specifically
-            if event.key() == QtCore.Qt.Key_Control:
+            if event.key() == QtCore.Qt.Key_Shift:
+                if self.line_manager.logger:
+                    self.line_manager.logger.info("Shift key PRESSED")
                 self.line_manager._shift_pressed = True
-                if self.line_manager.line and self.line_manager._original_pos:
-                    self.line_manager.constrain_to_axis()
+
         elif event.type() == QtCore.QEvent.KeyRelease:
-            if event.key() == QtCore.Qt.Key_Control:
+            if event.key() == QtCore.Qt.Key_Shift:
+                if self.line_manager.logger:
+                    self.line_manager.logger.info("Shift key RELEASED")
                 self.line_manager._shift_pressed = False
-        
+
         return False  # Don't consume the event

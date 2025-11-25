@@ -29,8 +29,6 @@ import pvaccess as pva
 
 # PyQt5
 from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.Qsci import QsciScintilla, QsciLexerPython, QsciLexerJSON
-
 
 # PyQtGraph
 import pyqtgraph as pg
@@ -121,8 +119,6 @@ def _init_pipeline(proc_config_path: Optional[str]):
         mod = importlib.util.module_from_spec(spec)
         assert spec and spec.loader
         spec.loader.exec_module(mod)
-
-        #cfg_path = proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, proc_config_path)
         
         cfg_path = (
                 proc_config_path if os.path.isabs(proc_config_path) else os.path.join(here, "pipelines", os.path.basename(proc_config_path))
@@ -330,26 +326,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.motor_scan_dialog = None
         self.roi_manager = None
         self.line_manager = None
-        
-        # Editor state (for code editor tab)
-        self.current_editor_file = None
 
         # Scale bar
         self.scalebar_manager = None  
         self.scalebar_dialog = None
 
-        # ===== NOW BUILD UI WITH TABS =====
-        # Create central widget with tabs
-        self.tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(self.tabs)
-        
-        # === TAB 1: VIEWER ===
-        viewer_widget = self._create_viewer_tab()
-        self.tabs.addTab(viewer_widget, "📹 Viewer")
-        
-        # === TAB 2: CODE EDITOR ===
-        editor_widget = self._create_editor_tab()
-        self.tabs.addTab(editor_widget, "📝 Editor")
+        # ===== NOW BUILD UI =====
+        viewer_widget = self._build_ui()
+        self.setCentralWidget(viewer_widget)
         
         # ===== POST-UI INITIALIZATION =====
         # Initialize ROI manager
@@ -395,7 +379,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
     
     def _build_ui(self):
         """Build the main viewer UI and return as widget"""
-        # Create container widget instead of setting as central widget
         viewer_container = QtWidgets.QWidget()
         main_layout = QtWidgets.QVBoxLayout(viewer_container)
         main_layout.setContentsMargins(5, 5, 5, 5)
@@ -435,11 +418,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.addItem(self.crosshair_vline)
         self.image_view.addItem(self.crosshair_hline)
         
-        # Connect mouse events for crosshair
-        #self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
-        #self.image_view.scene.sigMouseClicked.connect(self._on_mouse_click)
+        # Connect mouse events
         self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
-
         
         splitter.addWidget(self.image_view)
         splitter.setStretchFactor(0, 0)
@@ -450,314 +430,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         self._apply_dark_theme()
         
-        # Return the container widget instead of setting as central
         return viewer_container
-    
-
-    def _create_viewer_tab(self):
-        """Create the main viewer interface"""
-        return self._build_ui()
-
-    def _create_editor_tab(self):
-        """Create code editor interface"""
-        editor_container = QtWidgets.QWidget()
-        editor_layout = QtWidgets.QVBoxLayout(editor_container)
-        
-        # Editor toolbar
-        editor_toolbar = QtWidgets.QHBoxLayout()
-        
-        self.cmb_file_type = QtWidgets.QComboBox()
-        self.cmb_file_type.addItems([
-            "Pipeline Config (JSON)",
-            "Python Processor",
-            "Custom Script"
-        ])
-        self.cmb_file_type.currentIndexChanged.connect(self._on_editor_type_changed)
-        editor_toolbar.addWidget(QtWidgets.QLabel("Edit:"))
-        editor_toolbar.addWidget(self.cmb_file_type)
-        
-        btn_open = QtWidgets.QPushButton("Open...")
-        btn_open.clicked.connect(self._editor_open_file)
-        editor_toolbar.addWidget(btn_open)
-        
-        btn_save = QtWidgets.QPushButton("Save")
-        btn_save.clicked.connect(self._editor_save_file)
-        editor_toolbar.addWidget(btn_save)
-        
-        btn_save_as = QtWidgets.QPushButton("Save As...")
-        btn_save_as.clicked.connect(self._editor_save_file_as)
-        editor_toolbar.addWidget(btn_save_as)
-        
-        btn_run = QtWidgets.QPushButton("▶ Run/Reload")
-        btn_run.clicked.connect(self._editor_run_code)
-        btn_run.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        editor_toolbar.addWidget(btn_run)
-        
-        editor_toolbar.addStretch()
-        
-        self.lbl_editor_file = QtWidgets.QLabel("No file loaded")
-        self.lbl_editor_file.setStyleSheet("color: #666;")
-        editor_toolbar.addWidget(self.lbl_editor_file)
-        
-        editor_layout.addLayout(editor_toolbar)
-        
-        # === QScintilla Code Editor with Syntax Highlighting ===
-        self.code_editor = QsciScintilla()
-        
-        # Set font
-        font = QtGui.QFont("Courier New", 10)
-        self.code_editor.setFont(font)
-        
-        # Line numbers margin
-        self.code_editor.setMarginType(0, QsciScintilla.NumberMargin)
-        self.code_editor.setMarginWidth(0, "00000")  # Width for up to 5 digits
-        self.code_editor.setMarginsForegroundColor(QtGui.QColor("#888888"))
-        self.code_editor.setMarginsBackgroundColor(QtGui.QColor("#2b2b2b"))
-        
-        # Current line highlighting
-        self.code_editor.setCaretLineVisible(True)
-        self.code_editor.setCaretLineBackgroundColor(QtGui.QColor("#2d2d2d"))
-        
-        # Indentation
-        self.code_editor.setIndentationsUseTabs(False)
-        self.code_editor.setTabWidth(4)
-        self.code_editor.setAutoIndent(True)
-        
-        # Brace matching
-        self.code_editor.setBraceMatching(QsciScintilla.SloppyBraceMatch)
-        self.code_editor.setMatchedBraceBackgroundColor(QtGui.QColor("#4d4d4d"))
-        
-        # Auto-completion
-        self.code_editor.setAutoCompletionSource(QsciScintilla.AcsAll)
-        self.code_editor.setAutoCompletionThreshold(2)
-        self.code_editor.setAutoCompletionCaseSensitivity(False)
-        
-        # Edge mode (80 character line)
-        self.code_editor.setEdgeMode(QsciScintilla.EdgeLine)
-        self.code_editor.setEdgeColumn(80)
-        self.code_editor.setEdgeColor(QtGui.QColor("#444444"))
-        
-        # Python lexer (syntax highlighting)
-        self.python_lexer = QsciLexerPython()
-        self.python_lexer.setDefaultFont(font)
-        
-        # Set Python lexer colors (dark theme)
-        self.python_lexer.setDefaultPaper(QtGui.QColor("#1e1e1e"))
-        self.python_lexer.setDefaultColor(QtGui.QColor("#d4d4d4"))
-        self.python_lexer.setColor(QtGui.QColor("#569cd6"), QsciLexerPython.Keyword)  # Keywords (blue)
-        self.python_lexer.setColor(QtGui.QColor("#4ec9b0"), QsciLexerPython.ClassName)  # Classes (teal)
-        self.python_lexer.setColor(QtGui.QColor("#dcdcaa"), QsciLexerPython.FunctionMethodName)  # Functions (yellow)
-        self.python_lexer.setColor(QtGui.QColor("#ce9178"), QsciLexerPython.DoubleQuotedString)  # Strings (orange)
-        self.python_lexer.setColor(QtGui.QColor("#ce9178"), QsciLexerPython.SingleQuotedString)
-        self.python_lexer.setColor(QtGui.QColor("#6a9955"), QsciLexerPython.Comment)  # Comments (green)
-        self.python_lexer.setColor(QtGui.QColor("#b5cea8"), QsciLexerPython.Number)  # Numbers (light green)
-        self.python_lexer.setColor(QtGui.QColor("#c586c0"), QsciLexerPython.Decorator)  # Decorators (purple)
-        
-        # JSON lexer
-        self.json_lexer = QsciLexerJSON()
-        self.json_lexer.setDefaultFont(font)
-        self.json_lexer.setDefaultPaper(QtGui.QColor("#1e1e1e"))
-        
-        # Set initial lexer based on selection
-        self._set_editor_lexer()
-        
-        editor_layout.addWidget(self.code_editor)
-        
-        # Output/console area
-        output_label = QtWidgets.QLabel("Output / Console:")
-        editor_layout.addWidget(output_label)
-        
-        self.code_output = QtWidgets.QPlainTextEdit()
-        self.code_output.setFont(QtGui.QFont("Courier New", 9))
-        self.code_output.setReadOnly(True)
-        self.code_output.setMaximumHeight(150)
-        self.code_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
-        editor_layout.addWidget(self.code_output)
-        
-        # Set initial content
-        self.current_editor_file = None
-        self._load_default_template()
-        
-        return editor_container
-
-
-
-    def _set_editor_lexer(self):
-        """Set the appropriate lexer based on file type"""
-        file_type = self.cmb_file_type.currentText()
-        
-        if "JSON" in file_type:
-            self.code_editor.setLexer(self.json_lexer)
-        else:
-            self.code_editor.setLexer(self.python_lexer)
-
-    def _on_editor_type_changed(self, index):
-        """Load template when editor type changes"""
-        self._set_editor_lexer()
-        if self.current_editor_file is None:
-            self._load_default_template()
-
-
-    def _on_editor_type_changed(self, index):
-        """Load template when editor type changes"""
-        if self.current_editor_file is None:
-            self._load_default_template()
-
-    def _editor_open_file(self):
-        """Open file in editor"""
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open File", "",
-            "All Files (*);;Python (*.py);;JSON (*.json);;Text (*.txt)"
-        )
-        if path:
-            try:
-                with open(path, 'r') as f:
-                    content = f.read()
-                self.code_editor.setText(content)  # Use setText instead of setPlainText
-                self.current_editor_file = path
-                self.lbl_editor_file.setText(f"File: {os.path.basename(path)}")
-                self.code_output.appendPlainText(f"Opened: {path}")
-                
-                # Set lexer based on file extension
-                if path.endswith('.json'):
-                    self.code_editor.setLexer(self.json_lexer)
-                elif path.endswith('.py'):
-                    self.code_editor.setLexer(self.python_lexer)
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Open File", f"Failed to open:\n{e}")
-
-    def _editor_save_file(self):
-        """Save current file"""
-        if self.current_editor_file is None:
-            self._editor_save_file_as()
-            return
-        
-        try:
-            content = self.code_editor.text()  # Use text() instead of toPlainText()
-            with open(self.current_editor_file, 'w') as f:
-                f.write(content)
-            self.code_output.appendPlainText(f"Saved: {self.current_editor_file}")
-            QtWidgets.QMessageBox.information(self, "Save", "File saved successfully!")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save File", f"Failed to save:\n{e}")
-
-    def _load_default_template(self):
-        """Load default template based on selected type"""
-        file_type = self.cmb_file_type.currentText()
-        
-        if "Pipeline Config" in file_type:
-            template = '''{
-    "processors": [
-        {
-        "name": "example_processor",
-        "type": "custom",
-        "enabled": true,
-        "params": {
-            "threshold": 100
-        }
-        }
-    ]
-    }'''
-            self.code_editor.setText(template)  # Use setText
-            
-        elif "Python Processor" in file_type:
-            template = '''import numpy as np
-
-    class CustomProcessor:
-        """Custom image processor"""
-        
-        def __init__(self, params=None):
-            self.params = params or {}
-        
-        def process(self, image: np.ndarray) -> np.ndarray:
-            """
-            Process an image frame
-            
-            Args:
-                image: Input image as numpy array
-                
-            Returns:
-                Processed image
-            """
-            # Your processing code here
-            processed = image.copy()
-            
-            # Example: apply threshold
-            threshold = self.params.get('threshold', 100)
-            processed[processed < threshold] = 0
-            
-            return processed
-    '''
-            self.code_editor.setText(template)
-            
-        else:  # Custom Script
-            template = '''import numpy as np
-
-    # Your custom script here
-    # Access the viewer instance via: viewer
-
-    def process_frame(frame):
-        """Process a single frame"""
-        # Your code here
-        return frame
-    '''
-            self.code_editor.setText(template)
-
-    def _editor_save_file_as(self):
-        """Save file with new name"""
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save File As", "",
-            "Python (*.py);;JSON (*.json);;Text (*.txt);;All Files (*)"
-        )
-        if path:
-            self.current_editor_file = path
-            self._editor_save_file()
-            self.lbl_editor_file.setText(f"File: {os.path.basename(path)}")
-
-    def _editor_run_code(self):
-        """Execute or reload the code"""
-        file_type = self.cmb_file_type.currentText()
-        
-        try:
-            if "Pipeline Config" in file_type:
-                # Reload pipeline config
-                self._editor_log("Reloading pipeline configuration...")
-                if self.current_editor_file:
-                    _init_pipeline(self.current_editor_file)
-                    self._editor_log("✓ Pipeline reloaded successfully!")
-                else:
-                    self._editor_log("⚠ Save the config file first, then reload.")
-                    
-            elif "Python Processor" in file_type:
-                # Execute Python processor
-                self._editor_log("Loading Python processor...")
-                code = self.code_editor.toPlainText()
-                exec_globals = {'np': np}
-                exec(code, exec_globals)
-                self._editor_log("✓ Python code executed successfully!")
-                
-            else:  # Custom Script
-                # Execute custom script with viewer access
-                self._editor_log("Executing custom script...")
-                code = self.code_editor.toPlainText()
-                exec_globals = {
-                    'np': np,
-                    'viewer': self,
-                    'Image': Image if 'Image' in dir() else None
-                }
-                exec(code, exec_globals)
-                self._editor_log("✓ Script executed successfully!")
-                
-        except Exception as e:
-            self._editor_log(f"✗ Error: {e}")
-            if LOGGER:
-                log_exception(LOGGER, e)
-
-    def _editor_log(self, message: str):
-        """Add message to editor output"""
-        self.code_output.appendPlainText(message)
-
-
 
     def _create_top_bar(self):
         top_bar = QtWidgets.QWidget()
@@ -832,9 +505,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
         view_layout.addWidget(self.chk_crosshair)
         
-        view_group.setLayout(view_layout)
-        top_layout.addWidget(view_group)
-
         # Scale bar
         self.chk_scalebar = QtWidgets.QCheckBox("Scale Bar")
         self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
@@ -845,6 +515,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_scalebar_settings.setToolTip("Scale bar settings")
         btn_scalebar_settings.clicked.connect(self._open_scalebar_settings)
         view_layout.addWidget(btn_scalebar_settings)
+        
+        view_group.setLayout(view_layout)
+        top_layout.addWidget(view_group)
         
         # === ANALYSIS TOOLS GROUP ===
         analysis_group = QtWidgets.QGroupBox("Analysis")
@@ -858,6 +531,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
         analysis_layout.addWidget(self.btn_reset_roi)
         
+        self.chk_ellipse = QtWidgets.QCheckBox("Ellipse")
+        analysis_layout.addWidget(self.chk_ellipse)
+
+        self.btn_reset_ellipse = QtWidgets.QPushButton("Reset Ellipse")
+        analysis_layout.addWidget(self.btn_reset_ellipse)
+        
         self.chk_line = QtWidgets.QCheckBox("Line")
         analysis_layout.addWidget(self.chk_line)
         
@@ -866,17 +545,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         analysis_group.setLayout(analysis_layout)
         top_layout.addWidget(analysis_group)
-
-        #ELLIPSE ADDED
-        self.chk_ellipse = QtWidgets.QCheckBox("Ellipse")
-        analysis_layout.addWidget(self.chk_ellipse)
-
-        self.btn_reset_ellipse = QtWidgets.QPushButton("Reset Ellipse")
-        analysis_layout.addWidget(self.btn_reset_ellipse)
-
-        # Keep existing line profile controls...
-        #self.chk_line = QtWidgets.QCheckBox("Line")
-        #analysis_layout.addWidget(self.chk_line)
         
         # === TRANSFORM GROUP ===
         transform_group = QtWidgets.QGroupBox("Transform")
@@ -996,7 +664,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         info_group.setLayout(info_layout)
         left_layout.addWidget(info_group)
 
-
         roi_group = QtWidgets.QGroupBox("ROI Statistics")
         roi_layout = QtWidgets.QVBoxLayout()
         self.lbl_roi_info = QtWidgets.QLabel("No ROI selected")
@@ -1009,7 +676,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         roi_group.setLayout(roi_layout)
         left_layout.addWidget(roi_group)
 
-
         ellipse_group = QtWidgets.QGroupBox("Ellipse ROI Statistics")
         ellipse_layout = QtWidgets.QVBoxLayout()
         self.lbl_ellipse_info = QtWidgets.QLabel("No ellipse ROI selected")
@@ -1021,7 +687,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         ellipse_layout.addWidget(self.lbl_ellipse_info)
         ellipse_group.setLayout(ellipse_layout)
         left_layout.addWidget(ellipse_group)
-
 
         # Line Profile group
         line_group = QtWidgets.QGroupBox("Line Profile")
@@ -1304,9 +969,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
             
             # Use accumulated sum for display
             img = self.sub.accumulated_sum
-            
-            # Update status (optional - show in window title or status bar)
-            # self.setWindowTitle(f"PyStream - Accumulated: {self.subscriber.accum_frame_count} frames")
 
         # Compute contrast
         self._ensure_slider_range(img)
@@ -1328,7 +990,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.crosshair_x = img.shape[1] / 2.0
             self._update_crosshair_display()
         
-        # Update ROI Statistic
+        # Update ROI Statistics
         self.roi_manager.update_stats(img)
         self.ellipse_roi_manager.update_stats(img)
         self.line_manager.update_stats(img)
@@ -1371,7 +1033,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if (now - self._last_hist_t) >= self.hist_interval:
             self._update_histogram(img, vmin, vmax)
             self._last_hist_t = now
-    
 
     def _toggle_scalebar(self):
         """Toggle scale bar visibility."""
@@ -1496,7 +1157,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.info(f"Frame accumulation stopped at {self.sub.accum_frame_count} frames")
 
-
     def _autoscale_toggled(self):
         self.autoscale_enabled = self.chk_autoscale.isChecked()
         if self.autoscale_enabled and self._last_display_img is not None:
@@ -1581,19 +1241,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
             )
         except (IndexError, ValueError):
             pass
-
-    
-    def _on_mouse_click(self, event):
-        if not self.crosshair_enabled or self._last_display_img is None:
-            return
-        
-        pos = event.scenePos()
-        img_pos = self.image_view.getImageItem().mapFromScene(pos)
-        x, y = img_pos.x(), img_pos.y()
-        
-        self.crosshair_x = x
-        self.crosshair_y = y
-        self._update_crosshair_display()
     
     # ------------- Flat-field commands -------------
     def _capture_flat(self):
@@ -1710,7 +1357,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 QtWidgets.QApplication.processEvents()  # Update UI
                 
                 # Convert frames to appropriate format for TIFF
-                # Stack as list of PIL Images
                 pil_images = []
                 for frame in self.recorded_frames:
                     # Convert to uint16 if needed (TIFF supports uint16)
@@ -1866,7 +1512,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.scalebar_dialog:
             self.scalebar_dialog.close()
 
-	# Clean mosalign
+        # Clean mosalign
         self.pump_timer.stop()
         if self.motor_scan_dialog:
             self.motor_scan_dialog.close()    
