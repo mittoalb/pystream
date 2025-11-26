@@ -205,18 +205,18 @@ class EllipseROIManager:
     def _build_roi(self, x, y, w, h):
         """
         Create ellipse ROI with 8 handles for full control.
-        - 4 corner handles: resize both width and height (diagonal)
-        - 4 edge handles: resize width OR height (single axis)
+        - 4 axis handles (0°, 90°, 180°, 270°): stretch individual axes
+        - 4 diagonal handles (45°, 135°, 225°, 315°): scale radius uniformly
         """
         img_item = self.image_view.getImageItem()
 
-        # Outline pens
-        pen = pg.mkPen('k', width=self.roi_pen_width)
-        hover_pen = pg.mkPen((50, 50, 50), width=self.roi_pen_width + 1)
+        # Outline pens - YELLOW
+        pen = pg.mkPen((255, 255, 0), width=self.roi_pen_width + 1)  # Yellow outline, thicker
+        hover_pen = pg.mkPen((255, 200, 0), width=self.roi_pen_width + 2)  # Orange on hover, even thicker
 
-        # HANDLE pens (this controls the cyan you see!)
-        handle_pen = pg.mkPen(255, 0, 0, width=3)          # bright RED
-        handle_hover_pen = pg.mkPen(255, 255, 0, width=3)  # yellow on hover
+        # HANDLE pens - YELLOW filled squares
+        handle_pen = pg.mkPen(255, 255, 0, width=2)          # bright YELLOW outline
+        handle_hover_pen = pg.mkPen(255, 200, 0, width=3)    # orange on hover
 
         # Create EllipseROI with explicit handlePen / handleHoverPen
         self.roi = pg.EllipseROI(
@@ -243,19 +243,26 @@ class EllipseROIManager:
 
         # Remove default handles
         for handle in self.roi.getHandles():
-            self.roi.removeHandle(handle['item'])
+            self.roi.removeHandle(handle)
 
-        # CORNERS (diagonal resizing)
-        self.roi.addScaleHandle([1, 1], [0, 0])  # Bottom-Right
-        self.roi.addScaleHandle([0, 0], [1, 1])  # Top-Left
-        self.roi.addScaleHandle([1, 0], [0, 1])  # Top-Right
-        self.roi.addScaleHandle([0, 1], [1, 0])  # Bottom-Left
+        # AXIS HANDLES (0°, 90°, 180°, 270°) - stretch along one axis only
+        # These keep the opposite axis fixed and only stretch in one direction
+        self.roi.addScaleHandle([0.5, 0], [0.5, 1])  # Top (270°) - stretch vertical
+        self.roi.addScaleHandle([1, 0.5], [0, 0.5])  # Right (0°) - stretch horizontal
+        self.roi.addScaleHandle([0.5, 1], [0.5, 0])  # Bottom (90°) - stretch vertical
+        self.roi.addScaleHandle([0, 0.5], [1, 0.5])  # Left (180°) - stretch horizontal
 
-        # EDGES (single-axis resizing)
-        self.roi.addScaleHandle([0.5, 0], [0.5, 1])  # Top-Center
-        self.roi.addScaleHandle([0.5, 1], [0.5, 0])  # Bottom-Center
-        self.roi.addScaleHandle([0, 0.5], [1, 0.5])  # Left-Center
-        self.roi.addScaleHandle([1, 0.5], [0, 0.5])  # Right-Center
+        # DIAGONAL HANDLES (45°, 135°, 225°, 315°) - scale uniformly (radius)
+        # These lie on the ellipse circumference at diagonal positions
+        # Position on ellipse: [0.5 + 0.5*cos(θ), 0.5 + 0.5*sin(θ)]
+        # cos(45°) = sin(45°) = 0.707
+        d = 0.5 + 0.5 * 0.707  # ≈ 0.8535
+        d_inv = 0.5 - 0.5 * 0.707  # ≈ 0.1465
+        
+        self.roi.addScaleHandle([d, d], [0.5, 0.5])      # Bottom-Right (45°) on circumference
+        self.roi.addScaleHandle([d, d_inv], [0.5, 0.5])  # Top-Right (315°) on circumference
+        self.roi.addScaleHandle([d_inv, d_inv], [0.5, 0.5])  # Top-Left (225°) on circumference
+        self.roi.addScaleHandle([d_inv, d], [0.5, 0.5])  # Bottom-Left (135°) on circumference
 
         # Enlarge them
         self._style_handles()
@@ -291,17 +298,23 @@ class EllipseROIManager:
 
 
     def _style_handles(self):
-        """Make handles VERY visible with bright colors"""
+        """Make handles VERY visible with YELLOW filled squares"""
         if self.roi is None:
             return
 
-        # BRIGHT RED handles with white border for maximum visibility
-        handle_brush = pg.mkBrush(255, 0, 0, 255)    # Bright red
-        handle_pen = pg.mkPen('w', width=3)          # White border, thick
+        # BRIGHT YELLOW filled handles
+        handle_brush = pg.mkBrush(255, 255, 0, 255)    # Bright yellow fill
+        handle_pen = pg.mkPen('k', width=2)             # Black border
         size = float(self.handle_size * 2)
 
-        for handle_info in self.roi.getHandles():
-            handle_item = handle_info.get('item', None)
+        for handle_obj in self.roi.getHandles():
+            # Handle objects have an 'item' attribute that is the actual graphics item
+            if hasattr(handle_obj, 'item'):
+                handle_item = handle_obj.item
+            else:
+                # Fallback - handle_obj might be the item itself
+                handle_item = handle_obj
+                
             if handle_item is None:
                 continue
 
