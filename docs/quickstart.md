@@ -27,42 +27,7 @@ cd pystream
 pip install -e .
 ```
 
-### 3. Enable QScintilla Syntax Editor
-
-If your viewer uses the syntax editor (`PyQt5.Qsci`), install **QScintilla** that matches your PyQt version:
-
-### 4.
-
-In case you get the following error:
-
-```bash
-qt.qpa.plugin: Could not find the Qt platform plugin "xcb" in ""
-This application failed to start because no Qt platform plugin could be initialized. Reinstalling the application may fix this problem.
-```
-Ensure your QT_QPA_PLATFORM_PLUGIN_PATH is properly set. As an example:
-
-```bash
-export QT_QPA_PLATFORM_PLUGIN_PATH=/home/beams/USERTXM/conda/anaconda/envs/pystream/plugins/platforms
-```
-
-#### Recommended (Conda)
-```bash
-conda install -c conda-forge "pyqt<6" qscintilla2
-```
-
-#### Alternative (pip)
-```bash
-pip install QScintilla
-```
-
-If you see  
-`ModuleNotFoundError: No module named 'PyQt5.Qsci'`,  
-follow the conda-forge method above — pip wheels often miss the binary bindings on macOS and Linux.
-
----
-
-
-### 4. Display troubleshooting
+### 3. Display Troubleshooting
 
 In case you get the following error:
 
@@ -215,17 +180,6 @@ pystream/
 hash -r
 pystream --help
 ```
-
-### ⚠️ `ModuleNotFoundError: No module named 'PyQt5.Qsci'`
-- Ensure QScintilla is installed:  
-  `conda install -c conda-forge qscintilla2`
-- Remove broken pip installs:  
-  `rm -rf $CONDA_PREFIX/lib/python*/site-packages/QScintilla*`
-- On macOS/ARM64, prefer conda-forge (pip wheel lacks compiled library).
-
-### 💥 `OSError: .../QScintilla-*.dist-info/METADATA not found`
-- Broken wheel metadata → reinstall:  
-  `pip install --ignore-installed --no-deps --force-reinstall qscintilla==2.14.1`
 
 ### 🧠 Import errors in local modules
 Use **relative imports** inside `src/pystream/`, e.g.:
