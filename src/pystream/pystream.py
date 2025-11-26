@@ -43,6 +43,7 @@ from .plugins.mosalign import MotorScanDialog
 from .plugins.line import LineProfileManager
 from .plugins.ellipse import EllipseROIManager
 from .plugins.scalebar import ScaleBarManager, ScaleBarDialog
+from .plugins.console import ConsoleDialog
 
 
 LOGGER: Optional[logging.Logger] = None
@@ -268,7 +269,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         super().__init__()
         
         self.setWindowTitle("NTNDArray PyQtGraph Viewer")
-        self.setGeometry(100, 100, 1400, 900)
+        
+        # Detect screen size for adaptive UI
+        screen = QtWidgets.QApplication.desktop().availableGeometry()
+        self.is_small_screen = screen.width() < 1600 or screen.height() < 1000
         
         # ===== INITIALIZE ALL ATTRIBUTES FIRST =====
         self.cfg = _load_config(defaults={"pv_name": pv_name or ""})
@@ -283,6 +287,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.sub = None
         self.last_draw = 0.0
         self.paused = False
+
+        # Console
+        self.console_dialog = None
         
         # View/contrast state
         self.vmin = 0.0
@@ -339,7 +346,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Initialize ROI manager
         self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
-        self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
+        if hasattr(self, 'btn_reset_roi'):
+            self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
 
         # Initialize Ellipse ROI manager
         self.ellipse_roi_manager = EllipseROIManager(
@@ -348,7 +356,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
             logger=LOGGER
         )
         self.chk_ellipse.stateChanged.connect(self.ellipse_roi_manager.toggle)
-        self.btn_reset_ellipse.clicked.connect(self.ellipse_roi_manager.reset)
+        if hasattr(self, 'btn_reset_ellipse'):
+            self.btn_reset_ellipse.clicked.connect(self.ellipse_roi_manager.reset)
 
         # Initialize scale bar manager
         self.scalebar_manager = ScaleBarManager(
@@ -359,11 +368,13 @@ class PvViewerApp(QtWidgets.QMainWindow):
             position="bottom-right",
             color="white"
         )
-        self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
+        if hasattr(self, 'chk_scalebar'):
+            self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
 
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
-        self.btn_reset_line.clicked.connect(self.line_manager.reset)
+        if hasattr(self, 'btn_reset_line'):
+            self.btn_reset_line.clicked.connect(self.line_manager.reset)
         
         # Connect signal
         self.image_ready.connect(self._update_image_slot)
@@ -373,30 +384,87 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.pump_timer.timeout.connect(self._pump_queue)
         self.pump_timer.start(5)
         
+        # Apply adaptive window sizing
+        self._apply_adaptive_sizing(screen)
+        
         # Auto-connect if PV present
         if self.pv_entry.text().strip():
             self._connect_pv()
+    
+    def _apply_adaptive_sizing(self, screen):
+        """Apply window sizing based on screen size"""
+        # Get saved state from config
+        saved_geom = self.cfg.get("window_geometry", None)
+        saved_maximized = self.cfg.get("window_maximized", False)
+        
+        if saved_maximized:
+            # User had it maximized last time
+            self.showMaximized()
+        elif saved_geom and len(saved_geom) == 4:
+            # Restore saved position/size, but ensure it fits on current screen
+            x, y, w, h = saved_geom
+            w = min(w, screen.width())
+            h = min(h, screen.height())
+            x = max(screen.x(), min(x, screen.x() + screen.width() - w))
+            y = max(screen.y(), min(y, screen.y() + screen.height() - h))
+            self.setGeometry(x, y, w, h)
+        else:
+            # First run or no saved state
+            if self.is_small_screen:
+                # Small screen - start maximized
+                self.showMaximized()
+            else:
+                # Large screen - use 90% of available space, centered
+                width = min(1400, int(screen.width() * 0.9))
+                height = min(900, int(screen.height() * 0.9))
+                x = screen.x() + (screen.width() - width) // 2
+                y = screen.y() + (screen.height() - height) // 2
+                self.setGeometry(x, y, width, height)
+        
+        # Apply compact mode if needed
+        if self.is_small_screen:
+            self._apply_compact_mode()
+    
+    def _apply_compact_mode(self):
+        """Apply compact styling for small screens"""
+        try:
+            # Smaller left panel
+            if hasattr(self, 'left_panel'):
+                self.left_panel.setMaximumWidth(280)
+            
+            # Smaller histogram
+            if hasattr(self, 'hist_widget'):
+                self.hist_widget.setMinimumHeight(120)
+                self.hist_widget.setMaximumHeight(150)
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning("Failed to apply compact mode: %s", e)
     
     def _build_ui(self):
         """Build the main viewer UI and return as widget"""
         viewer_container = QtWidgets.QWidget()
         main_layout = QtWidgets.QVBoxLayout(viewer_container)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(5)
+        main_layout.setContentsMargins(3, 3, 3, 3)
+        main_layout.setSpacing(3)
         
-        # Top control bar
+        # Top control bar - simple single row
         top_bar = self._create_top_bar()
         main_layout.addWidget(top_bar)
         
-        # Splitter
+        # Splitter with THREE panels: control panel, left panel, image view
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
         
+        # Control panel (collapsible)
+        self.control_panel = self._create_control_panel()
+        self.control_panel.setVisible(False)  # Hidden by default
+        splitter.addWidget(self.control_panel)
+        
         # Left panel
-        left_panel = self._create_left_panel()
-        left_panel.setMinimumWidth(320)
-        left_panel.setMaximumWidth(400)
-        splitter.addWidget(left_panel)
+        self.left_panel = self._create_left_panel()
+        self.left_panel.setMinimumWidth(280 if self.is_small_screen else 320)
+        self.left_panel.setMaximumWidth(320 if self.is_small_screen else 400)
+        splitter.addWidget(self.left_panel)
         
         # PyQtGraph ImageView
         self.image_view = pg.ImageView()
@@ -422,9 +490,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.scene.sigMouseMoved.connect(self._on_mouse_move)
         
         splitter.addWidget(self.image_view)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([350, 1050])
+        splitter.setStretchFactor(0, 0)  # Control panel
+        splitter.setStretchFactor(1, 0)  # Left panel
+        splitter.setStretchFactor(2, 1)  # Image view
+        splitter.setSizes([0, 300, 1100])  # Control panel hidden by default
         
         main_layout.addWidget(splitter, stretch=1)
         
@@ -433,130 +502,162 @@ class PvViewerApp(QtWidgets.QMainWindow):
         return viewer_container
 
     def _create_top_bar(self):
+        """Create simple single-row toolbar with sidebar menu"""
         top_bar = QtWidgets.QWidget()
+        top_bar.setMaximumHeight(50)
         top_layout = QtWidgets.QHBoxLayout(top_bar)
+        top_layout.setSpacing(5)
         top_layout.setContentsMargins(5, 5, 5, 5)
-        top_layout.setSpacing(8)
         
-        # === CONNECTION GROUP ===
-        conn_group = QtWidgets.QGroupBox("Connection")
-        conn_layout = QtWidgets.QHBoxLayout()
-        conn_layout.setSpacing(5)
-        conn_layout.setContentsMargins(5, 5, 5, 5)
+        # Toggle sidebar button
+        btn_toggle_sidebar = QtWidgets.QPushButton("☰ Menu")
+        btn_toggle_sidebar.setMaximumWidth(80)
+        btn_toggle_sidebar.setToolTip("Toggle control panel")
+        btn_toggle_sidebar.clicked.connect(self._toggle_control_panel)
+        top_layout.addWidget(btn_toggle_sidebar)
         
-        conn_layout.addWidget(QtWidgets.QLabel("PV:"))
+        # PV Connection
+        top_layout.addWidget(QtWidgets.QLabel("PV:"))
         self.pv_entry = QtWidgets.QLineEdit(self.cfg.get("pv_name", ""))
-        self.pv_entry.setMinimumWidth(200)
+        self.pv_entry.setMinimumWidth(150)
+        self.pv_entry.setMaximumWidth(300)
         self.pv_entry.returnPressed.connect(self._connect_pv)
-        conn_layout.addWidget(self.pv_entry)
+        top_layout.addWidget(self.pv_entry)
         
         btn_connect = QtWidgets.QPushButton("Connect")
+        btn_connect.setMaximumWidth(80)
         btn_connect.clicked.connect(self._connect_pv)
-        conn_layout.addWidget(btn_connect)
+        top_layout.addWidget(btn_connect)
+        
+        # Quick controls
+        self.btn_pause = QtWidgets.QPushButton("⏸")
+        self.btn_pause.setCheckable(True)
+        self.btn_pause.setMaximumWidth(40)
+        self.btn_pause.setToolTip("Pause/Resume")
+        self.btn_pause.clicked.connect(self._toggle_pause)
+        top_layout.addWidget(self.btn_pause)
+        
+        self.btn_record = QtWidgets.QPushButton("⏺")
+        self.btn_record.setCheckable(True)
+        self.btn_record.setMaximumWidth(40)
+        self.btn_record.setToolTip("Record")
+        self.btn_record.clicked.connect(self._toggle_recording)
+        top_layout.addWidget(self.btn_record)
+        
+        self.chk_autoscale = QtWidgets.QCheckBox("Auto")
+        self.chk_autoscale.setChecked(True)
+        self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
+        top_layout.addWidget(self.chk_autoscale)
+        
+        top_layout.addStretch()
+        
+        # Status labels
+        self.lbl_fps = QtWidgets.QLabel("FPS: —")
+        self.lbl_fps.setStyleSheet("font-weight: bold;")
+        top_layout.addWidget(self.lbl_fps)
+        
+        self.lbl_uid = QtWidgets.QLabel("UID: —")
+        self.lbl_uid.setStyleSheet("font-weight: bold;")
+        top_layout.addWidget(self.lbl_uid)
+        
+        return top_bar
+    
+    def _create_control_panel(self):
+        """Create collapsible control panel with all settings"""
+        panel = QtWidgets.QWidget()
+        panel.setMaximumWidth(300)
+        panel.setMinimumWidth(250)
+        
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setSpacing(8)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # === PLAYBACK CONTROLS ===
+        playback_group = QtWidgets.QGroupBox("Playback")
+        playback_layout = QtWidgets.QVBoxLayout()
+        playback_layout.setSpacing(4)
         
         btn_disconnect = QtWidgets.QPushButton("Disconnect")
         btn_disconnect.clicked.connect(self._disconnect_pv)
-        conn_layout.addWidget(btn_disconnect)
-        
-        conn_group.setLayout(conn_layout)
-        top_layout.addWidget(conn_group)
-        
-        # === PLAYBACK GROUP ===
-        playback_group = QtWidgets.QGroupBox("Playback")
-        playback_layout = QtWidgets.QHBoxLayout()
-        playback_layout.setSpacing(5)
-        playback_layout.setContentsMargins(5, 5, 5, 5)
-        
-        self.btn_pause = QtWidgets.QPushButton("Pause")
-        self.btn_pause.setCheckable(True)
-        self.btn_pause.clicked.connect(self._toggle_pause)
-        playback_layout.addWidget(self.btn_pause)
+        playback_layout.addWidget(btn_disconnect)
         
         self.btn_accumulate = QtWidgets.QPushButton("Accumulate: OFF")
         self.btn_accumulate.setCheckable(True)
         self.btn_accumulate.clicked.connect(self._toggle_accumulation)
         playback_layout.addWidget(self.btn_accumulate)
         
-        self.btn_record = QtWidgets.QPushButton("Record")
-        self.btn_record.setCheckable(True)
-        self.btn_record.clicked.connect(self._toggle_recording)
-        playback_layout.addWidget(self.btn_record)
-        
         playback_group.setLayout(playback_layout)
-        top_layout.addWidget(playback_group)
+        layout.addWidget(playback_group)
         
-        # === VIEW CONTROLS GROUP ===
+        # === VIEW CONTROLS ===
         view_group = QtWidgets.QGroupBox("View")
-        view_layout = QtWidgets.QHBoxLayout()
-        view_layout.setSpacing(5)
-        view_layout.setContentsMargins(5, 5, 5, 5)
+        view_layout = QtWidgets.QVBoxLayout()
+        view_layout.setSpacing(4)
         
-        btn_home = QtWidgets.QPushButton("Home")
+        btn_home = QtWidgets.QPushButton("Reset View")
         btn_home.clicked.connect(self._reset_view)
-        btn_home.setToolTip("Reset zoom and pan to show full image")
         view_layout.addWidget(btn_home)
-        
-        self.chk_autoscale = QtWidgets.QCheckBox("Autoscale")
-        self.chk_autoscale.setChecked(True)
-        self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
-        view_layout.addWidget(self.chk_autoscale)
         
         self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
         self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
         view_layout.addWidget(self.chk_crosshair)
         
-        # Scale bar
         self.chk_scalebar = QtWidgets.QCheckBox("Scale Bar")
         self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
         view_layout.addWidget(self.chk_scalebar)
-
-        btn_scalebar_settings = QtWidgets.QPushButton("⚙")
-        btn_scalebar_settings.setMaximumWidth(30)
-        btn_scalebar_settings.setToolTip("Scale bar settings")
+        
+        btn_scalebar_settings = QtWidgets.QPushButton("Scale Bar Settings...")
         btn_scalebar_settings.clicked.connect(self._open_scalebar_settings)
         view_layout.addWidget(btn_scalebar_settings)
         
         view_group.setLayout(view_layout)
-        top_layout.addWidget(view_group)
+        layout.addWidget(view_group)
         
-        # === ANALYSIS TOOLS GROUP ===
+        # === ANALYSIS TOOLS ===
         analysis_group = QtWidgets.QGroupBox("Analysis")
-        analysis_layout = QtWidgets.QHBoxLayout()
-        analysis_layout.setSpacing(5)
-        analysis_layout.setContentsMargins(5, 5, 5, 5)
+        analysis_layout = QtWidgets.QVBoxLayout()
+        analysis_layout.setSpacing(4)
         
+        roi_layout = QtWidgets.QHBoxLayout()
         self.chk_roi = QtWidgets.QCheckBox("ROI")
-        analysis_layout.addWidget(self.chk_roi)
+        roi_layout.addWidget(self.chk_roi)
+        btn_reset_roi = QtWidgets.QPushButton("Reset")
+        btn_reset_roi.setMaximumWidth(60)
+        btn_reset_roi.clicked.connect(lambda: self.roi_manager.reset() if self.roi_manager else None)
+        roi_layout.addWidget(btn_reset_roi)
+        analysis_layout.addLayout(roi_layout)
         
-        self.btn_reset_roi = QtWidgets.QPushButton("Reset ROI")
-        analysis_layout.addWidget(self.btn_reset_roi)
-        
+        ellipse_layout = QtWidgets.QHBoxLayout()
         self.chk_ellipse = QtWidgets.QCheckBox("Ellipse")
-        analysis_layout.addWidget(self.chk_ellipse)
-
-        self.btn_reset_ellipse = QtWidgets.QPushButton("Reset Ellipse")
-        analysis_layout.addWidget(self.btn_reset_ellipse)
+        ellipse_layout.addWidget(self.chk_ellipse)
+        btn_reset_ellipse = QtWidgets.QPushButton("Reset")
+        btn_reset_ellipse.setMaximumWidth(60)
+        btn_reset_ellipse.clicked.connect(lambda: self.ellipse_roi_manager.reset() if self.ellipse_roi_manager else None)
+        ellipse_layout.addWidget(btn_reset_ellipse)
+        analysis_layout.addLayout(ellipse_layout)
         
+        line_layout = QtWidgets.QHBoxLayout()
         self.chk_line = QtWidgets.QCheckBox("Line")
-        analysis_layout.addWidget(self.chk_line)
-        
-        self.btn_reset_line = QtWidgets.QPushButton("Reset Line")
-        analysis_layout.addWidget(self.btn_reset_line)
+        line_layout.addWidget(self.chk_line)
+        btn_reset_line = QtWidgets.QPushButton("Reset")
+        btn_reset_line.setMaximumWidth(60)
+        btn_reset_line.clicked.connect(lambda: self.line_manager.reset() if self.line_manager else None)
+        line_layout.addWidget(btn_reset_line)
+        analysis_layout.addLayout(line_layout)
         
         analysis_group.setLayout(analysis_layout)
-        top_layout.addWidget(analysis_group)
+        layout.addWidget(analysis_group)
         
-        # === TRANSFORM GROUP ===
+        # === TRANSFORM ===
         transform_group = QtWidgets.QGroupBox("Transform")
-        transform_layout = QtWidgets.QHBoxLayout()
-        transform_layout.setSpacing(5)
-        transform_layout.setContentsMargins(5, 5, 5, 5)
+        transform_layout = QtWidgets.QVBoxLayout()
+        transform_layout.setSpacing(4)
         
-        self.chk_flip_h = QtWidgets.QCheckBox("Flip H")
+        self.chk_flip_h = QtWidgets.QCheckBox("Flip Horizontal")
         self.chk_flip_h.stateChanged.connect(self._view_changed)
         transform_layout.addWidget(self.chk_flip_h)
         
-        self.chk_flip_v = QtWidgets.QCheckBox("Flip V")
+        self.chk_flip_v = QtWidgets.QCheckBox("Flip Vertical")
         self.chk_flip_v.stateChanged.connect(self._view_changed)
         transform_layout.addWidget(self.chk_flip_v)
         
@@ -565,63 +666,54 @@ class PvViewerApp(QtWidgets.QMainWindow):
         transform_layout.addWidget(self.chk_transpose)
         
         transform_group.setLayout(transform_layout)
-        top_layout.addWidget(transform_group)
+        layout.addWidget(transform_group)
         
-        # === PROCESSING GROUP ===
+        # === PROCESSING ===
         processing_group = QtWidgets.QGroupBox("Processing")
-        processing_layout = QtWidgets.QHBoxLayout()
-        processing_layout.setSpacing(5)
-        processing_layout.setContentsMargins(5, 5, 5, 5)
+        processing_layout = QtWidgets.QVBoxLayout()
+        processing_layout.setSpacing(4)
         
-        self.chk_apply_flat = QtWidgets.QCheckBox("Apply Flat")
+        self.chk_apply_flat = QtWidgets.QCheckBox("Apply Flat Field")
         self.chk_apply_flat.stateChanged.connect(self._view_changed)
         processing_layout.addWidget(self.chk_apply_flat)
         
-        btn_capture = QtWidgets.QPushButton("Capture")
+        btn_capture = QtWidgets.QPushButton("Capture Flat")
         btn_capture.clicked.connect(self._capture_flat)
         processing_layout.addWidget(btn_capture)
         
-        btn_load = QtWidgets.QPushButton("Load...")
+        btn_load = QtWidgets.QPushButton("Load Flat...")
         btn_load.clicked.connect(self._load_flat)
         processing_layout.addWidget(btn_load)
         
-        btn_save = QtWidgets.QPushButton("Save...")
-        btn_save.clicked.connect(self._save_flat)
-        processing_layout.addWidget(btn_save)
-        
-        btn_clear = QtWidgets.QPushButton("Clear")
+        btn_clear = QtWidgets.QPushButton("Clear Flat")
         btn_clear.clicked.connect(self._clear_flat)
         processing_layout.addWidget(btn_clear)
         
+        btn_console = QtWidgets.QPushButton("Python Console")
+        btn_console.clicked.connect(self._open_console)
+        processing_layout.addWidget(btn_console)
+        
         btn_motor_scan = QtWidgets.QPushButton("Mosalign")
         btn_motor_scan.clicked.connect(self._open_motor_scan)
-        btn_motor_scan.setToolTip("Open Mosalign GUI")
         processing_layout.addWidget(btn_motor_scan)
         
         processing_group.setLayout(processing_layout)
-        top_layout.addWidget(processing_group)
+        layout.addWidget(processing_group)
         
-        # Add stretch to push status labels to the right
-        top_layout.addStretch()
+        layout.addStretch()
         
-        # === STATUS LABELS ===
-        self.lbl_fps = QtWidgets.QLabel("FPS: —")
-        self.lbl_fps.setMinimumWidth(80)
-        self.lbl_fps.setStyleSheet("font-weight: bold;")
-        top_layout.addWidget(self.lbl_fps)
-        
-        self.lbl_uid = QtWidgets.QLabel("UID: —")
-        self.lbl_uid.setMinimumWidth(100)
-        self.lbl_uid.setStyleSheet("font-weight: bold;")
-        top_layout.addWidget(self.lbl_uid)
-        
-        return top_bar
+        return panel
+    
+    def _toggle_control_panel(self):
+        """Toggle visibility of control panel"""
+        if hasattr(self, 'control_panel'):
+            self.control_panel.setVisible(not self.control_panel.isVisible())
     
     def _create_left_panel(self):
         left_panel = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         left_layout.setContentsMargins(5, 5, 5, 5)
-        left_layout.setSpacing(8)
+        left_layout.setSpacing(6 if self.is_small_screen else 8)
         
         # Contrast group
         contrast_group = QtWidgets.QGroupBox("Contrast")
@@ -648,7 +740,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
         hist_group = QtWidgets.QGroupBox("Histogram")
         hist_layout = QtWidgets.QVBoxLayout()
         self.hist_widget = pg.PlotWidget()
-        self.hist_widget.setMinimumHeight(180)
+        hist_height = 120 if self.is_small_screen else 180
+        self.hist_widget.setMinimumHeight(hist_height)
+        self.hist_widget.setMaximumHeight(hist_height + 30)
         self.hist_widget.setBackground('k')
         hist_layout.addWidget(self.hist_widget)
         hist_group.setLayout(hist_layout)
@@ -659,7 +753,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         info_layout = QtWidgets.QVBoxLayout()
         self.lbl_info = QtWidgets.QLabel("No image")
         self.lbl_info.setWordWrap(True)
-        self.lbl_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 8px; border: 1px solid #333; }")
+        self.lbl_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; font-size: 10px; }")
         info_layout.addWidget(self.lbl_info)
         info_group.setLayout(info_layout)
         left_layout.addWidget(info_group)
@@ -669,8 +763,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.lbl_roi_info = QtWidgets.QLabel("No ROI selected")
         self.lbl_roi_info.setWordWrap(True)
         self.lbl_roi_info.setStyleSheet(
-                "QLabel { background-color: #1a1a1a; padding: 8px; "
-                "border: 1px solid #333; font-family: monospace; }"
+                "QLabel { background-color: #1a1a1a; padding: 6px; "
+                "border: 1px solid #333; font-family: monospace; font-size: 9px; }"
         )
         roi_layout.addWidget(self.lbl_roi_info)
         roi_group.setLayout(roi_layout)
@@ -681,8 +775,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.lbl_ellipse_info = QtWidgets.QLabel("No ellipse ROI selected")
         self.lbl_ellipse_info.setWordWrap(True)
         self.lbl_ellipse_info.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; padding: 8px; "
-            "border: 1px solid #333; font-family: monospace; }"
+            "QLabel { background-color: #1a1a1a; padding: 6px; "
+            "border: 1px solid #333; font-family: monospace; font-size: 9px; }"
         )
         ellipse_layout.addWidget(self.lbl_ellipse_info)
         ellipse_group.setLayout(ellipse_layout)
@@ -693,6 +787,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         line_layout = QtWidgets.QVBoxLayout()
         self.lbl_line_info = QtWidgets.QLabel("No line selected")
         self.lbl_line_info.setWordWrap(True)
+        self.lbl_line_info.setStyleSheet("font-size: 9px;")
         line_layout.addWidget(self.lbl_line_info)
         line_group.setLayout(line_layout)
         left_layout.addWidget(line_group)
@@ -702,7 +797,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         cursor_layout = QtWidgets.QVBoxLayout()
         self.lbl_cursor_info = QtWidgets.QLabel("Move mouse over image")
         self.lbl_cursor_info.setWordWrap(True)
-        self.lbl_cursor_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 8px; border: 1px solid #333; font-family: monospace; }")
+        self.lbl_cursor_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; font-family: monospace; font-size: 9px; }")
         cursor_layout.addWidget(self.lbl_cursor_info)
         cursor_group.setLayout(cursor_layout)
         left_layout.addWidget(cursor_group)
@@ -712,7 +807,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         crosshair_layout = QtWidgets.QVBoxLayout()
         self.lbl_crosshair = QtWidgets.QLabel("Disabled")
         self.lbl_crosshair.setWordWrap(True)
-        self.lbl_crosshair.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 8px; border: 1px solid #333; font-family: monospace; }")
+        self.lbl_crosshair.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; font-family: monospace; font-size: 9px; }")
         crosshair_layout.addWidget(self.lbl_crosshair)
         crosshair_group.setLayout(crosshair_layout)
         left_layout.addWidget(crosshair_group)
@@ -720,7 +815,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Recording group
         record_group = QtWidgets.QGroupBox("Recording (TIFF Stack)")
         record_layout = QtWidgets.QVBoxLayout()
-        record_layout.setSpacing(6)
+        record_layout.setSpacing(4)
         
         # Path selection with label
         record_layout.addWidget(QtWidgets.QLabel("Output File:"))
@@ -732,19 +827,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         path_layout.addWidget(self.record_path_entry)
         btn_browse = QtWidgets.QPushButton("Browse...")
         btn_browse.clicked.connect(self._browse_record_path)
-        btn_browse.setMaximumWidth(100)
+        btn_browse.setMaximumWidth(80)
         path_layout.addWidget(btn_browse)
         record_layout.addLayout(path_layout)
         
         # Status label with instructions
         self.lbl_record_status = QtWidgets.QLabel(
             "Not recording\n\n"
-            "Click 'Start Recording' to begin\n"
-            "capturing all frames.\n"
-            "Click 'Stop Recording' to save."
+            "Click 'Record' to begin"
         )
         self.lbl_record_status.setWordWrap(True)
-        self.lbl_record_status.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; }")
+        self.lbl_record_status.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 4px; border: 1px solid #333; font-size: 9px; }")
         record_layout.addWidget(self.lbl_record_status)
         
         record_group.setLayout(record_layout)
@@ -956,6 +1049,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self._last_display_img = img
         self.current_uid = uid
 
+        # Apply console processing (if enabled)
+        if self.console_dialog is not None:
+            img = self.console_dialog.process_image(img)
+
         if self.sub and self.sub.accumulating:
             # Accumulate frames
             if self.sub.accumulated_sum is None:
@@ -1023,16 +1120,23 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.recorded_frames.append(np.copy(img))
             num_frames = len(self.recorded_frames)
             self.lbl_record_status.setText(
-                f"🔴 RECORDING\n\n"
-                f"Frames: {num_frames}\n\n"
-                f"Click 'Stop Recording' to save\n"
-                f"all {num_frames} frames as TIFF stack"
+                f"🔴 REC\nFrames: {num_frames}"
             )
         
         # Histogram update (throttled)
         if (now - self._last_hist_t) >= self.hist_interval:
             self._update_histogram(img, vmin, vmax)
             self._last_hist_t = now
+
+
+    def _open_console(self):
+        """Open the Python console dialog"""
+        if self.console_dialog is None:
+            self.console_dialog = ConsoleDialog(parent=self, logger=LOGGER)
+        
+        self.console_dialog.show()
+        self.console_dialog.raise_()
+        self.console_dialog.activateWindow()
 
     def _toggle_scalebar(self):
         """Toggle scale bar visibility."""
@@ -1139,21 +1243,26 @@ class PvViewerApp(QtWidgets.QMainWindow):
         """Toggle frame accumulation on/off"""
         if self.sub is None:
             QtWidgets.QMessageBox.warning(self, "Accumulate", "Not connected to a PV.")
-            self.btn_accumulate.setChecked(False)
+            if hasattr(self, 'btn_accumulate'):
+                self.btn_accumulate.setChecked(False)
             return
     
-        self.sub.accumulating = self.btn_accumulate.isChecked()
+        # Handle both button and direct call
+        if hasattr(self, 'btn_accumulate'):
+            self.sub.accumulating = self.btn_accumulate.isChecked()
+            if self.sub.accumulating:
+                self.btn_accumulate.setText("Accumulate: ON")
+            else:
+                self.btn_accumulate.setText("Accumulate: OFF")
+        else:
+            self.sub.accumulating = not self.sub.accumulating
     
         if self.sub.accumulating:
-            # Starting accumulation
-            self.btn_accumulate.setText("Accumulate: ON")
             self.sub.accumulated_sum = None  # Reset
             self.sub.accum_frame_count = 0
             if LOGGER:
                 LOGGER.info("Frame accumulation started")
         else:
-            # Stopping accumulation
-            self.btn_accumulate.setText("Accumulate: OFF")
             if LOGGER:
                 LOGGER.info(f"Frame accumulation stopped at {self.sub.accum_frame_count} frames")
 
@@ -1173,10 +1282,24 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self._updating_sliders = False
     
     def _view_changed(self):
-        self.flip_h = self.chk_flip_h.isChecked()
-        self.flip_v = self.chk_flip_v.isChecked()
-        self.transpose_img = self.chk_transpose.isChecked()
-        self.apply_flat_enabled = self.chk_apply_flat.isChecked()
+        # Handle both checkbox and action states
+        if hasattr(self, 'chk_flip_h'):
+            self.flip_h = self.chk_flip_h.isChecked()
+        if hasattr(self, 'action_flip_h'):
+            self.flip_h = self.action_flip_h.isChecked()
+            
+        if hasattr(self, 'chk_flip_v'):
+            self.flip_v = self.chk_flip_v.isChecked()
+        if hasattr(self, 'action_flip_v'):
+            self.flip_v = self.action_flip_v.isChecked()
+            
+        if hasattr(self, 'chk_transpose'):
+            self.transpose_img = self.chk_transpose.isChecked()
+        if hasattr(self, 'action_transpose'):
+            self.transpose_img = self.action_transpose.isChecked()
+            
+        if hasattr(self, 'chk_apply_flat'):
+            self.apply_flat_enabled = self.chk_apply_flat.isChecked()
     
     def _toggle_crosshair(self):
         self.crosshair_enabled = self.chk_crosshair.isChecked()
@@ -1315,29 +1438,19 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.recording = True
             self.recorded_frames = []
             self.record_path = path
-            self.btn_record.setText("Stop Recording")
+            self.btn_record.setText("⏹" if self.is_small_screen else "Stop Recording")
             self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
-            self.lbl_record_status.setText(
-                "🔴 RECORDING\n\n"
-                "Frames: 0\n\n"
-                "Click 'Stop Recording' to save\n"
-                "all captured frames as TIFF stack"
-            )
+            self.lbl_record_status.setText("🔴 REC\nFrames: 0")
             if LOGGER:
                 LOGGER.info("Started recording to %s", path)
         else:
             # Stop recording and save
             self.recording = False
-            self.btn_record.setText("Start Recording")
+            self.btn_record.setText("⏺" if self.is_small_screen else "Record")
             self.btn_record.setStyleSheet("")
             
             if not self.recorded_frames:
-                self.lbl_record_status.setText(
-                    "Not recording\n\n"
-                    "Click 'Start Recording' to begin\n"
-                    "capturing all frames.\n"
-                    "Click 'Stop Recording' to save."
-                )
+                self.lbl_record_status.setText("Not recording")
                 QtWidgets.QMessageBox.information(
                     self, "Stop Recording", 
                     "No frames were recorded."
@@ -1349,12 +1462,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 from PIL import Image
                 
                 num_frames = len(self.recorded_frames)
-                self.lbl_record_status.setText(
-                    f"Saving {num_frames} frames\n"
-                    f"to TIFF stack...\n\n"
-                    f"Please wait..."
-                )
-                QtWidgets.QApplication.processEvents()  # Update UI
+                self.lbl_record_status.setText(f"Saving {num_frames} frames...")
+                QtWidgets.QApplication.processEvents()
                 
                 # Convert frames to appropriate format for TIFF
                 pil_images = []
@@ -1382,12 +1491,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                     compression="tiff_deflate"
                 )
                 
-                self.lbl_record_status.setText(
-                    f"✓ Saved successfully!\n\n"
-                    f"{num_frames} frames saved to:\n"
-                    f"{os.path.basename(self.record_path)}\n\n"
-                    f"Ready to record again"
-                )
+                self.lbl_record_status.setText(f"✓ Saved {num_frames} frames")
                 if LOGGER:
                     LOGGER.info("Saved %d frames to %s", num_frames, self.record_path)
                 
@@ -1397,11 +1501,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                     f"as multi-page TIFF stack to:\n\n{self.record_path}"
                 )
             except Exception as e:
-                self.lbl_record_status.setText(
-                    "✗ Save failed!\n\n"
-                    "See error message.\n\n"
-                    "Ready to record again"
-                )
+                self.lbl_record_status.setText("✗ Save failed!")
                 if LOGGER:
                     LOGGER.error("Failed to save recording:")
                     log_exception(LOGGER, e)
@@ -1416,9 +1516,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
     def _toggle_pause(self):
         self.paused = not self.paused
         if self.paused:
-            self.btn_pause.setText("Resume")
+            self.btn_pause.setText("▶" if self.is_small_screen else "Resume")
         else:
-            self.btn_pause.setText("Pause")
+            self.btn_pause.setText("⏸" if self.is_small_screen else "Pause")
         if LOGGER:
             LOGGER.info("Paused = %s", self.paused)
 
@@ -1487,12 +1587,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.btn_record.setChecked(False)
                 self._toggle_recording()
         
+        # Save window state
         try:
+            if not self.isMaximized():
+                geom = self.geometry()
+                self.cfg["window_geometry"] = [geom.x(), geom.y(), geom.width(), geom.height()]
+            self.cfg["window_maximized"] = self.isMaximized()
             self.cfg["pv_name"] = self.pv_entry.text().strip()
             _save_config(self.cfg)
         except Exception as e:
             if LOGGER:
-                LOGGER.error("[Config] Failed to persist PV on close")
+                LOGGER.error("[Config] Failed to save config on close")
                 log_exception(LOGGER, e)
         
         try:
@@ -1506,6 +1611,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.roi_manager.cleanup()
         self.line_manager.cleanup()
         self.ellipse_roi_manager.cleanup()
+
+        if self.console_dialog:
+            self.console_dialog.close()
 
         if self.scalebar_manager:
             self.scalebar_manager.cleanup()

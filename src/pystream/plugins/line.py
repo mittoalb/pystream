@@ -235,11 +235,14 @@ class LineProfileManager:
         return h.pos()
 
     @staticmethod
-    def _handle_item(h):
-        """Return handle GraphicsObject from dict or object."""
-        if isinstance(h, dict):
-            return h["item"]
-        return h.item
+    def _handle_item(self, h):
+        """Extract the graphics item from a handle."""
+        # Handle objects ARE the item in newer pyqtgraph
+        if hasattr(h, 'item'):
+            return h.item
+        else:
+            # Fallback - h IS the item itself
+            return h
 
     def _create_line_from_image(self, image: np.ndarray):
         h, w = image.shape[:2]
@@ -296,37 +299,33 @@ class LineProfileManager:
             self.line.addTranslateHandle([center_x, center_y])
 
     def _style_handles(self):
-        """Style the line endpoint handles and center handle."""
-        yellow_brush = pg.mkBrush(255, 255, 0, 255)  # Yellow fill
-        black_pen = pg.mkPen(0, 0, 0, 255, width=1)  # Black outline
-        center_brush = pg.mkBrush(255, 200, 0, 200)  # Darker yellow
-
-        handles = self.line.getHandles()
-        for idx, h in enumerate(handles):
+        if not hasattr(self, 'line_roi') or self.line_roi is None:
+            return
+        
+        handle_brush = pg.mkBrush(255, 0, 0, 255)
+        handle_pen = pg.mkPen('w', width=3)
+        size = float(self.handle_size * 2)
+        
+        for h in self.line_roi.getHandles():
             item = self._handle_item(h)
             if item is None:
                 continue
-
-            is_center = (idx >= 2)  # first 2 handles are endpoints
-
-            if hasattr(item, "setSize"):
-                try:
-                    size = self.handle_size + 4 if is_center else self.handle_size
+                
+            try:
+                if hasattr(item, 'setSize'):
                     item.setSize(size)
-                except Exception:
-                    pass
-
-            brush = center_brush if is_center else yellow_brush
-            try:
-                if hasattr(item, "setBrush"):
-                    item.setBrush(brush)
-            except Exception:
-                pass
-            try:
-                if hasattr(item, "setPen"):
-                    item.setPen(black_pen)
-            except Exception:
-                pass
+                elif hasattr(item, 'setScale'):
+                    item.setScale(size / 10.0)
+                
+                if hasattr(item, 'setBrush'):
+                    item.setBrush(handle_brush)
+                if hasattr(item, 'setPen'):
+                    item.setPen(handle_pen)
+                
+                item.setZValue(self.line_roi.zValue() + 1)
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug("Handle styling issue: %s", e)
 
     def _install_key_handler(self):
         """Install event filter to detect Shift key on application level."""

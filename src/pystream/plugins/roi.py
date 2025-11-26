@@ -256,32 +256,38 @@ class ROIManager:
             self.logger.info("ImageJ-style ROI created at (%d, %d) size (%d, %d)", x, y, w, h)
 
     def _style_handles(self):
-        """Make handles more visible like ImageJ"""
         if self.roi is None:
             return
-            
-        # Yellow fill, black border for high visibility
-        handle_brush = pg.mkBrush(255, 255, 0, 255)  # Solid yellow
-        handle_pen = pg.mkPen('k', width=2)  # Black border
-        
-        for handle_info in self.roi.getHandles():
-            handle_item = handle_info.get('item', None)
+
+        # BRIGHT RED handles with white border for maximum visibility
+        handle_brush = pg.mkBrush(255, 0, 0, 255)    # Bright red
+        handle_pen = pg.mkPen('w', width=3)          # White border, thick
+        size = float(self.handle_size * 2)
+
+        for handle_obj in self.roi.getHandles():
+            # Handle objects ARE the item in newer pyqtgraph
+            if hasattr(handle_obj, 'item'):
+                handle_item = handle_obj.item
+            else:
+                # Fallback - handle_obj IS the item itself
+                handle_item = handle_obj
+                
             if handle_item is None:
                 continue
-            
+
             try:
-                # Set size
-                if hasattr(handle_item, 'setRadius'):
-                    handle_item.setRadius(self.handle_size)
-                
-                # Set colors
+                # Actually change the size
+                if hasattr(handle_item, 'setSize'):
+                    handle_item.setSize(size)
+                elif hasattr(handle_item, 'setScale'):
+                    handle_item.setScale(size / 10.0)
+
                 if hasattr(handle_item, 'setBrush'):
                     handle_item.setBrush(handle_brush)
                 if hasattr(handle_item, 'setPen'):
                     handle_item.setPen(handle_pen)
-                    
-                # Ensure high Z-value
-                handle_item.setZValue(2000)
+
+                handle_item.setZValue(self.roi.zValue() + 1)
             except Exception as e:
                 if self.logger:
                     self.logger.debug("Handle styling issue: %s", e)
