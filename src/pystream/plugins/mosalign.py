@@ -404,13 +404,12 @@ class MotorScanDialog(QtWidgets.QDialog):
         try:
             pv_name = self.image_pv.text().strip()
 
-            # Get image size from EPICS
+            # Get image size from EPICS using pvapy
             size_x_pv = pv_name.replace("Pva1:Image", "cam1:ArraySizeX_RBV")
             size_y_pv = pv_name.replace("Pva1:Image", "cam1:SizeY_RBV")
 
-            import epics
-            size_x = epics.caget(size_x_pv)
-            size_y = epics.caget(size_y_pv)
+            size_x = pva.Channel(size_x_pv).get()['value']
+            size_y = pva.Channel(size_y_pv).get()['value']
 
             img_h, img_w = int(size_y), int(size_x)
 

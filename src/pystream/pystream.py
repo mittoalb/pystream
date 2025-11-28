@@ -696,7 +696,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_motor_scan = QtWidgets.QPushButton("Mosalign")
         btn_motor_scan.clicked.connect(self._open_motor_scan)
         processing_layout.addWidget(btn_motor_scan)
-        
+
+        btn_viewer = QtWidgets.QPushButton("Viewer")
+        btn_viewer.clicked.connect(self._open_viewer)
+        processing_layout.addWidget(btn_viewer)
+
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
         
@@ -1570,7 +1574,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.motor_scan_dialog.show()
         self.motor_scan_dialog.raise_()
         self.motor_scan_dialog.activateWindow()
-  
+
+    def _open_viewer(self):
+        """Open a standalone viewer window"""
+        from .plugins.viewer import HDF5ImageDividerDialog
+        viewer_dialog = HDF5ImageDividerDialog(parent=self)
+        viewer_dialog.show()
+        viewer_dialog.raise_()
+        viewer_dialog.activateWindow()
+
     def closeEvent(self, event):
         # Stop recording if active
         if self.recording:

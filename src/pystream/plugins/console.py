@@ -98,7 +98,17 @@ class PythonConsole(QtWidgets.QWidget):
         btn_clear = QtWidgets.QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_function)
         btn_layout.addWidget(btn_clear)
-        
+
+        btn_load = QtWidgets.QPushButton("Load...")
+        btn_load.clicked.connect(self._load_from_file)
+        btn_load.setToolTip("Load Python code from file")
+        btn_layout.addWidget(btn_load)
+
+        btn_save = QtWidgets.QPushButton("Save...")
+        btn_save.clicked.connect(self._save_to_file)
+        btn_save.setToolTip("Save Python code to file")
+        btn_layout.addWidget(btn_save)
+
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
@@ -257,6 +267,65 @@ def process(img):
         self.chk_enable.setChecked(False)
         self.enabled = False
         self._log_status("Function cleared.")
+
+    def _load_from_file(self):
+        """Load Python code from a file"""
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Python File",
+            "",
+            "Python Files (*.py);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+
+            self.code_editor.setPlainText(code)
+            self._log_status(f"✓ Loaded code from: {file_path}")
+
+            if self.logger:
+                self.logger.info(f"Loaded console code from {file_path}")
+
+        except Exception as e:
+            self._log_status(f"⚠ ERROR loading file: {str(e)}", error=True)
+            if self.logger:
+                self.logger.error(f"Failed to load file {file_path}: {e}")
+
+    def _save_to_file(self):
+        """Save Python code to a file"""
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Python File",
+            "",
+            "Python Files (*.py);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        # Add .py extension if not present
+        if not file_path.endswith('.py'):
+            file_path += '.py'
+
+        try:
+            code = self.code_editor.toPlainText()
+
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(code)
+
+            self._log_status(f"✓ Saved code to: {file_path}")
+
+            if self.logger:
+                self.logger.info(f"Saved console code to {file_path}")
+
+        except Exception as e:
+            self._log_status(f"⚠ ERROR saving file: {str(e)}", error=True)
+            if self.logger:
+                self.logger.error(f"Failed to save file {file_path}: {e}")
     
     def _log_status(self, message: str, error: bool = False):
         """Log message to status display"""
