@@ -357,6 +357,36 @@ def process(img):
     return img * 2.0
 ```
 
+## Saving and Loading Code
+
+### Save Processing Functions
+
+Click **"Save..."** to save your processing function to a `.py` file:
+- Automatically adds `.py` extension if not provided
+- Saves entire editor contents
+- Use for backing up complex functions
+- Share functions with colleagues
+
+### Load Processing Functions
+
+Click **"Load..."** to load a previously saved processing function:
+- Opens file dialog to select `.py` file
+- Replaces current editor contents
+- Preserves function history by saving first
+- Click **"Execute"** after loading to activate
+
+### Example: Creating a Function Library
+
+```bash
+# Save different processing functions
+my_blur_filter.py
+my_edge_detector.py
+my_background_subtract.py
+
+# Load when needed
+# Click "Load..." → select my_blur_filter.py → "Execute" → "Enable"
+```
+
 ## Buttons and Controls
 
 | Control | Function |
@@ -365,6 +395,8 @@ def process(img):
 | **Execute (Compile)** | Compile code and test function |
 | **Reset to Default** | Load default template with examples |
 | **Clear** | Clear function and disable processing |
+| **Load...** | Load Python code from a .py file |
+| **Save...** | Save Python code to a .py file |
 
 ## Status Messages
 

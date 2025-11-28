@@ -74,27 +74,32 @@ pystream --pv 2bmSP2:Pva1:Image --max-fps 0 --log-level DEBUG
 ## Features
 
 ### Interactive Crosshair
-1. Check **“Crosshair”** in the toolbar  
-2. Click or drag on the image  
-3. X, Y position and pixel value displayed in the left panel  
+1. Check **"Crosshair"** in the toolbar
+2. Click or drag on the image
+3. X, Y position and pixel value displayed in the left panel
 
 ### Recording
-1. Choose output directory  
-2. Set filename prefix (default: `frame`)  
-3. Click **Start Recording** → frames saved as `prefix_000001.tiff`, `prefix_000002.tiff`, …  
-4. Click **Stop Recording** to end  
+1. Choose output directory
+2. Set filename prefix (default: `frame`)
+3. Click **Start Recording** → frames saved as `prefix_000001.tiff`, `prefix_000002.tiff`, …
+4. Click **Stop Recording** to end
 
 ### Flat-Field Correction
-- **Capture**: save current frame as flat reference  
-- **Apply Flat**: toggle correction on/off  
-- **Load / Save**: import/export `.npy`  
+- **Capture**: save current frame as flat reference
+- **Apply Flat**: toggle correction on/off
+- **Load / Save**: import/export `.npy`
 - Formula: `I_norm = (I_raw / I_flat) * mean(I_flat)`
 
 ### Image Controls
-- Flip H/V, Transpose  
-- Manual or auto contrast  
-- Pause / Resume streaming  
-- Save single frame (`.npy`, `.png`)  
+- Flip H/V, Transpose
+- Manual or auto contrast
+- Pause / Resume streaming
+- Save single frame (`.npy`, `.png`)
+
+### Processing Plugins
+- **Python Console**: Write custom real-time processing functions with save/load capability
+- **Mosalign**: 2D motor scanning with image stitching and tomoscan integration
+- **Viewer**: HDF5 image viewer with metadata extraction
 
 ---
 
@@ -164,12 +169,13 @@ pystream/
 
 ## Requirements
 
-- Python ≥ 3.8  
-- numpy ≥ 1.21  
-- PyQt5 ≥ 5.15  
-- pyqtgraph ≥ 0.13.0  
-- pvapy ≥ 5.6.0  
-- Pillow ≥ 9.0  
+- Python ≥ 3.8
+- numpy ≥ 1.21
+- PyQt5 ≥ 5.15
+- pyqtgraph ≥ 0.13.0
+- pvapy ≥ 5.6.0
+- Pillow ≥ 9.0
+- h5py ≥ 3.0
 
 ---
 
