@@ -407,40 +407,57 @@ class MotorScanDialog(QtWidgets.QDialog):
         # REAL MODE: Get from PV
         try:
             pv_name = self.image_pv.text().strip()
-            timeout = 5.0  # 5 second timeout for PV operations
 
-            # Get image size from EPICS using pvapy with timeout
+            # Get image size from EPICS using pvapy
+            # Note: pvapy Channel.get() doesn't support timeout parameter directly
+            # Use default timeout set by pvapy library
             size_x_pv = pv_name.replace("Pva1:Image", "cam1:ArraySizeX_RBV")
             size_y_pv = pv_name.replace("Pva1:Image", "cam1:SizeY_RBV")
 
-            # Create channels with timeout
+            # Get dimensions
             try:
                 size_x_ch = pva.Channel(size_x_pv)
-                size_x_data = size_x_ch.get(timeout)
+                size_x_data = size_x_ch.get()
                 size_x = size_x_data['value']
             except Exception as e:
-                self._log(f"⚠ Timeout getting image width from {size_x_pv}: {e}")
+                self._log(f"⚠ Error getting image width from {size_x_pv}: {e}")
                 return None
 
             try:
                 size_y_ch = pva.Channel(size_y_pv)
-                size_y_data = size_y_ch.get(timeout)
+                size_y_data = size_y_ch.get()
                 size_y = size_y_data['value']
             except Exception as e:
-                self._log(f"⚠ Timeout getting image height from {size_y_pv}: {e}")
+                self._log(f"⚠ Error getting image height from {size_y_pv}: {e}")
                 return None
 
             img_h, img_w = int(size_y), int(size_x)
 
-            # Get image data with timeout
+            # Get image data
             try:
                 pv = pva.Channel(pv_name)
-                img_data = pv.get(timeout)
-                arr = img_data['value'][0]['ushortValue']
+                img_data = pv.get()
+
+                # Safely extract image array
+                if 'value' not in img_data:
+                    self._log(f"⚠ No 'value' field in image data from {pv_name}")
+                    return None
+
+                value = img_data['value']
+                if not isinstance(value, list) or len(value) == 0:
+                    self._log(f"⚠ Invalid image data structure from {pv_name}")
+                    return None
+
+                if 'ushortValue' not in value[0]:
+                    self._log(f"⚠ No 'ushortValue' field in image data from {pv_name}")
+                    return None
+
+                arr = value[0]['ushortValue']
                 img = np.asarray(arr, dtype=np.uint16).reshape(img_h, img_w)
                 return img
+
             except Exception as e:
-                self._log(f"⚠ Timeout getting image from {pv_name}: {e}")
+                self._log(f"⚠ Error getting image from {pv_name}: {e}")
                 return None
 
         except Exception as e:
