@@ -194,10 +194,14 @@ class MotorScanDialog(QtWidgets.QDialog):
         button_layout = QtWidgets.QHBoxLayout()
 
         self.start_btn = QtWidgets.QPushButton("Start Scan")
+        self.start_btn.setAutoDefault(False)  # Prevent Enter from triggering
+        self.start_btn.setDefault(False)
         self.start_btn.clicked.connect(self._start_scan)
         button_layout.addWidget(self.start_btn)
 
         self.stop_btn = QtWidgets.QPushButton("Stop")
+        self.stop_btn.setAutoDefault(False)  # Prevent Enter from triggering
+        self.stop_btn.setDefault(False)
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop_scan)
         button_layout.addWidget(self.stop_btn)
@@ -403,23 +407,44 @@ class MotorScanDialog(QtWidgets.QDialog):
         # REAL MODE: Get from PV
         try:
             pv_name = self.image_pv.text().strip()
+            timeout = 5.0  # 5 second timeout for PV operations
 
-            # Get image size from EPICS using pvapy
+            # Get image size from EPICS using pvapy with timeout
             size_x_pv = pv_name.replace("Pva1:Image", "cam1:ArraySizeX_RBV")
             size_y_pv = pv_name.replace("Pva1:Image", "cam1:SizeY_RBV")
 
-            size_x = pva.Channel(size_x_pv).get()['value']
-            size_y = pva.Channel(size_y_pv).get()['value']
+            # Create channels with timeout
+            try:
+                size_x_ch = pva.Channel(size_x_pv)
+                size_x_data = size_x_ch.get(timeout)
+                size_x = size_x_data['value']
+            except Exception as e:
+                self._log(f"⚠ Timeout getting image width from {size_x_pv}: {e}")
+                return None
+
+            try:
+                size_y_ch = pva.Channel(size_y_pv)
+                size_y_data = size_y_ch.get(timeout)
+                size_y = size_y_data['value']
+            except Exception as e:
+                self._log(f"⚠ Timeout getting image height from {size_y_pv}: {e}")
+                return None
 
             img_h, img_w = int(size_y), int(size_x)
 
-            pv = pva.Channel(pv_name)
-            arr = pv.get()['value'][0]['ushortValue']
-            img = np.asarray(arr, dtype=np.uint16).reshape(img_h, img_w)
+            # Get image data with timeout
+            try:
+                pv = pva.Channel(pv_name)
+                img_data = pv.get(timeout)
+                arr = img_data['value'][0]['ushortValue']
+                img = np.asarray(arr, dtype=np.uint16).reshape(img_h, img_w)
+                return img
+            except Exception as e:
+                self._log(f"⚠ Timeout getting image from {pv_name}: {e}")
+                return None
 
-            return img
         except Exception as e:
-            self._log(f"Error getting image: {e}")
+            self._log(f"⚠ Error getting image: {e}")
             return None
 
     def _caput(self, pv: str, value: float, timeout: float):
