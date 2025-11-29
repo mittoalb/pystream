@@ -760,7 +760,12 @@ class ScanWorker(QtCore.QThread):
         """Run tomoscan at current position"""
         prefix = self.dialog.tomoscan_prefix.text().strip()
         tomoscan_cmd = self.dialog.tomoscan_path.text().strip()
+
+        # Build full command for logging
+        full_cmd = f"{tomoscan_cmd} single --tomoscan-prefix {prefix}"
+
         self.log_signal.emit(f"  Starting tomoscan at ({x_pos:.3f}, {y_pos:.3f})...")
+        self.log_signal.emit(f"  Command: {full_cmd}")
 
         try:
             # Store absolute positions (tomoscan zeros motors)
@@ -769,7 +774,7 @@ class ScanWorker(QtCore.QThread):
 
             # Run tomoscan
             if self.dialog.test_mode:
-                self.log_signal.emit(f"  [MOCK] {tomoscan_cmd} single --tomoscan-prefix {prefix}")
+                self.log_signal.emit(f"  [MOCK MODE - not actually running]")
                 time.sleep(0.5)
                 result_returncode = 0
             else:
