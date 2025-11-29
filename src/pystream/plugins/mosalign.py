@@ -421,12 +421,22 @@ class MotorScanDialog(QtWidgets.QDialog):
                 # Flip vertically to correct display orientation
                 img = np.flipud(self.stitched_image.copy())
 
-                # Use percentile-based contrast
+                # Use percentile-based contrast on actual data
                 if self.auto_contrast.isChecked():
-                    nz = img[img > 0]
-                    if nz.size > 0:
-                        vmin, vmax = np.percentile(nz, [1, 99])
+                    # Exclude zeros (unfilled canvas) and extreme values (frame borders)
+                    # Use a more conservative threshold to exclude background
+                    nz = img[img > 100]  # Exclude near-zero background
+                    if nz.size > 100:  # Need enough pixels for good statistics
+                        # Use narrower percentile range for better contrast
+                        vmin, vmax = np.percentile(nz, [0.5, 99.5])
+                        # Ensure reasonable dynamic range
+                        if vmax - vmin < 1000:
+                            # Expand range if too narrow
+                            mean_val = np.mean(nz)
+                            vmin = max(0, mean_val - 10000)
+                            vmax = min(65535, mean_val + 10000)
                     else:
+                        # Fallback for mostly empty canvas
                         vmin, vmax = 0, 65535
                     self.image_view.setImage(img, levels=[vmin, vmax])
                 else:
@@ -797,17 +807,6 @@ class ScanWorker(QtCore.QThread):
         self.dialog.stitched_lock.lock()
         try:
             self.dialog.stitched_image[start_y:end_y, start_x:end_x] = sub
-
-            border_val = int(np.max(sub)) if sub.size > 0 else 65535
-            for t in range(3):
-                if start_y + t < end_y:
-                    self.dialog.stitched_image[start_y + t, start_x:end_x] = border_val
-                if end_y - 1 - t >= start_y:
-                    self.dialog.stitched_image[end_y - 1 - t, start_x:end_x] = border_val
-                if start_x + t < end_x:
-                    self.dialog.stitched_image[start_y:end_y, start_x + t] = border_val
-                if end_x - 1 - t >= start_x:
-                    self.dialog.stitched_image[start_y:end_y, end_x - 1 - t] = border_val
         finally:
             self.dialog.stitched_lock.unlock()
 
