@@ -598,11 +598,19 @@ class MotorScanDialog(QtWidgets.QDialog):
         self.scanning = False
         self._scan_just_finished = True  # Prevent preview from accessing camera data
 
-        # Stop preview timer FIRST to prevent any access to camera/image data
+        # Stop preview timer to avoid further camera access
         if self.preview_timer.isActive():
             self.preview_timer.stop()
             self._log("Preview timer stopped (scan finished)")
 
+        # 👉 Force one last refresh of the stitched mosaic, so the final tile is visible
+        if self.enable_preview.isChecked():
+            try:
+                self._refresh_stitched_preview()
+            except Exception as e:
+                self._log(f"Final preview refresh error: {e}")
+
+        # Let Qt process any pending UI events
         QtCore.QCoreApplication.processEvents()
         time.sleep(0.1)
 
