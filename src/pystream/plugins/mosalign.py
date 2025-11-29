@@ -41,13 +41,15 @@ class MotorScanDialog(QtWidgets.QDialog):
         # Timer to refresh preview during scan
         self.preview_timer = QtCore.QTimer()
         self.preview_timer.timeout.connect(self._refresh_stitched_preview)
-        self.preview_timer.start(500)  # Start immediately to show placeholder
 
         self.setWindowTitle("Mosalign")
         self.resize(1200, 800)
 
         self._build_ui()
         self._load_config()
+
+        # Start preview timer AFTER UI is built
+        self.preview_timer.start(500)  # Start immediately to show placeholder
 
     def _build_ui(self):
         main_layout = QtWidgets.QHBoxLayout(self)
