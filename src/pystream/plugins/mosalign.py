@@ -19,7 +19,6 @@ from typing import Optional
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
-import pvaccess as pva
 
 
 class MotorScanDialog(QtWidgets.QDialog):
@@ -404,84 +403,23 @@ class MotorScanDialog(QtWidgets.QDialog):
         if self.test_mode:
             return self._generate_mock_image(position_index, total_positions)
 
-        # REAL MODE: Get from PV
-        # Wrap everything in broad exception handler to prevent segfaults
+        # REAL MODE: Get from parent viewer's current image
+        # This completely avoids pvapy segfault issues by reusing the parent's connection
         try:
-            pv_name = self.image_pv.text().strip()
+            parent = self.parent()
 
-            # Try to use the already-connected PV from main viewer if available
-            # This is more reliable than creating new channels
-            if hasattr(self.parent(), 'current_image') and self.parent().current_image is not None:
+            # Check if parent viewer has an image
+            if parent and hasattr(parent, '_last_display_img') and parent._last_display_img is not None:
                 try:
-                    img = self.parent().current_image.copy()
+                    img = parent._last_display_img.copy()
                     self._log(f"✓ Got image from main viewer ({img.shape[1]}x{img.shape[0]})")
                     return img
                 except Exception as e:
-                    self._log(f"⚠ Could not use viewer image: {e}")
-                    # Fall through to direct PV access
-
-            # Direct PV access - this can cause segfaults if PV is unavailable
-            self._log(f"Attempting to get image from {pv_name}...")
-
-            try:
-                # Get image size - use subprocess for safety to avoid segfault
-                size_x_pv = pv_name.replace("Pva1:Image", "cam1:ArraySizeX_RBV")
-                size_y_pv = pv_name.replace("Pva1:Image", "cam1:SizeY_RBV")
-
-                # Use caget subprocess instead of pvapy to avoid segfaults
-                result = subprocess.run(
-                    ['caget', '-t', size_x_pv],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.returncode != 0:
-                    self._log(f"⚠ caget failed for {size_x_pv}")
+                    self._log(f"⚠ Could not copy viewer image: {e}")
                     return None
-                size_x = int(result.stdout.strip())
-
-                result = subprocess.run(
-                    ['caget', '-t', size_y_pv],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.returncode != 0:
-                    self._log(f"⚠ caget failed for {size_y_pv}")
-                    return None
-                size_y = int(result.stdout.strip())
-
-                img_h, img_w = size_y, size_x
-
-                # Now try to get the actual image using pvapy
-                # This is still risky but we've validated the PVs exist
-                pv = pva.Channel(pv_name)
-                img_data = pv.get()
-
-                # Safely extract image array
-                if 'value' not in img_data:
-                    self._log(f"⚠ No 'value' field in image data")
-                    return None
-
-                value = img_data['value']
-                if not isinstance(value, list) or len(value) == 0:
-                    self._log(f"⚠ Invalid image data structure")
-                    return None
-
-                if 'ushortValue' not in value[0]:
-                    self._log(f"⚠ No 'ushortValue' field in image data")
-                    return None
-
-                arr = value[0]['ushortValue']
-                img = np.asarray(arr, dtype=np.uint16).reshape(img_h, img_w)
-                self._log(f"✓ Got image from PV ({img_w}x{img_h})")
-                return img
-
-            except subprocess.TimeoutExpired:
-                self._log(f"⚠ Timeout getting image dimensions")
-                return None
-            except Exception as e:
-                self._log(f"⚠ Error in PV access: {e}")
+            else:
+                self._log(f"⚠ No image available from main viewer")
+                self._log(f"   Please ensure the main viewer is connected and receiving images")
                 return None
 
         except KeyboardInterrupt:
