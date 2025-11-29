@@ -61,9 +61,11 @@ class MotorScanDialog(QtWidgets.QDialog):
 
         self.motor1_pv = QtWidgets.QLineEdit("2bmb:m17")
         self.motor2_pv = QtWidgets.QLineEdit("2bmHXP:m3")
+        self.tomoscan_path = QtWidgets.QLineEdit("tomoscan")
 
         pv_layout.addRow("Motor 1 (X):", self.motor1_pv)
         pv_layout.addRow("Motor 2 (Y):", self.motor2_pv)
+        pv_layout.addRow("Tomoscan Path:", self.tomoscan_path)
 
         pv_group.setLayout(pv_layout)
         layout.addWidget(pv_group)
@@ -757,6 +759,7 @@ class ScanWorker(QtCore.QThread):
                                    eff_w, eff_h, out_w, out_h, motor1_pv, motor2_pv):
         """Run tomoscan at current position"""
         prefix = self.dialog.tomoscan_prefix.text().strip()
+        tomoscan_cmd = self.dialog.tomoscan_path.text().strip()
         self.log_signal.emit(f"  Starting tomoscan at ({x_pos:.3f}, {y_pos:.3f})...")
 
         try:
@@ -766,12 +769,12 @@ class ScanWorker(QtCore.QThread):
 
             # Run tomoscan
             if self.dialog.test_mode:
-                self.log_signal.emit(f"  [MOCK] tomoscan single --tomoscan-prefix {prefix}")
+                self.log_signal.emit(f"  [MOCK] {tomoscan_cmd} single --tomoscan-prefix {prefix}")
                 time.sleep(0.5)
                 result_returncode = 0
             else:
                 result = subprocess.run(
-                    ['tomoscan', 'single', '--tomoscan-prefix', prefix],
+                    [tomoscan_cmd, 'single', '--tomoscan-prefix', prefix],
                     capture_output=True,
                     text=True,
                     timeout=300
