@@ -41,6 +41,7 @@ class MotorScanDialog(QtWidgets.QDialog):
         # Timer to refresh preview during scan
         self.preview_timer = QtCore.QTimer()
         self.preview_timer.timeout.connect(self._refresh_stitched_preview)
+        self.preview_timer.start(500)  # Start immediately to show placeholder
 
         self.setWindowTitle("Mosalign")
         self.resize(1200, 800)
@@ -378,6 +379,7 @@ class MotorScanDialog(QtWidgets.QDialog):
         if not self.scanning and hasattr(self, '_scan_just_finished'):
             return
 
+        # Don't hold lock for too long
         self.stitched_lock.lock()
         try:
             if self.stitched_image is not None:
@@ -408,11 +410,19 @@ class MotorScanDialog(QtWidgets.QDialog):
             else:
                 # Show placeholder when no scan data yet
                 if not hasattr(self, '_placeholder_shown'):
-                    placeholder = np.zeros((100, 100), dtype=np.uint16)
-                    self.image_view.setImage(placeholder)
+                    # Create a visible placeholder (white square with text)
+                    placeholder = np.ones((400, 400), dtype=np.uint16) * 10000
+                    # Add a border
+                    placeholder[0:10, :] = 65535
+                    placeholder[-10:, :] = 65535
+                    placeholder[:, 0:10] = 65535
+                    placeholder[:, -10:] = 65535
+
+                    self.image_view.setImage(placeholder, levels=[0, 65535])
                     self.view_box.autoRange()
                     self._placeholder_shown = True
-                    self._log("Preview: Waiting for scan to start...")
+                    self._log("Preview: Placeholder displayed - waiting for scan to start...")
+                    self._log("  (Placeholder is a gray square with white border)")
         except Exception as e:
             # Catch any display errors to prevent crashes
             if not hasattr(self, '_preview_error_logged'):
