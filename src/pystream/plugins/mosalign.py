@@ -405,63 +405,89 @@ class MotorScanDialog(QtWidgets.QDialog):
             return self._generate_mock_image(position_index, total_positions)
 
         # REAL MODE: Get from PV
+        # Wrap everything in broad exception handler to prevent segfaults
         try:
             pv_name = self.image_pv.text().strip()
 
-            # Get image size from EPICS using pvapy
-            # Note: pvapy Channel.get() doesn't support timeout parameter directly
-            # Use default timeout set by pvapy library
-            size_x_pv = pv_name.replace("Pva1:Image", "cam1:ArraySizeX_RBV")
-            size_y_pv = pv_name.replace("Pva1:Image", "cam1:SizeY_RBV")
+            # Try to use the already-connected PV from main viewer if available
+            # This is more reliable than creating new channels
+            if hasattr(self.parent(), 'current_image') and self.parent().current_image is not None:
+                try:
+                    img = self.parent().current_image.copy()
+                    self._log(f"✓ Got image from main viewer ({img.shape[1]}x{img.shape[0]})")
+                    return img
+                except Exception as e:
+                    self._log(f"⚠ Could not use viewer image: {e}")
+                    # Fall through to direct PV access
 
-            # Get dimensions
+            # Direct PV access - this can cause segfaults if PV is unavailable
+            self._log(f"Attempting to get image from {pv_name}...")
+
             try:
-                size_x_ch = pva.Channel(size_x_pv)
-                size_x_data = size_x_ch.get()
-                size_x = size_x_data['value']
-            except Exception as e:
-                self._log(f"⚠ Error getting image width from {size_x_pv}: {e}")
-                return None
+                # Get image size - use subprocess for safety to avoid segfault
+                size_x_pv = pv_name.replace("Pva1:Image", "cam1:ArraySizeX_RBV")
+                size_y_pv = pv_name.replace("Pva1:Image", "cam1:SizeY_RBV")
 
-            try:
-                size_y_ch = pva.Channel(size_y_pv)
-                size_y_data = size_y_ch.get()
-                size_y = size_y_data['value']
-            except Exception as e:
-                self._log(f"⚠ Error getting image height from {size_y_pv}: {e}")
-                return None
+                # Use caget subprocess instead of pvapy to avoid segfaults
+                result = subprocess.run(
+                    ['caget', '-t', size_x_pv],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode != 0:
+                    self._log(f"⚠ caget failed for {size_x_pv}")
+                    return None
+                size_x = int(result.stdout.strip())
 
-            img_h, img_w = int(size_y), int(size_x)
+                result = subprocess.run(
+                    ['caget', '-t', size_y_pv],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode != 0:
+                    self._log(f"⚠ caget failed for {size_y_pv}")
+                    return None
+                size_y = int(result.stdout.strip())
 
-            # Get image data
-            try:
+                img_h, img_w = size_y, size_x
+
+                # Now try to get the actual image using pvapy
+                # This is still risky but we've validated the PVs exist
                 pv = pva.Channel(pv_name)
                 img_data = pv.get()
 
                 # Safely extract image array
                 if 'value' not in img_data:
-                    self._log(f"⚠ No 'value' field in image data from {pv_name}")
+                    self._log(f"⚠ No 'value' field in image data")
                     return None
 
                 value = img_data['value']
                 if not isinstance(value, list) or len(value) == 0:
-                    self._log(f"⚠ Invalid image data structure from {pv_name}")
+                    self._log(f"⚠ Invalid image data structure")
                     return None
 
                 if 'ushortValue' not in value[0]:
-                    self._log(f"⚠ No 'ushortValue' field in image data from {pv_name}")
+                    self._log(f"⚠ No 'ushortValue' field in image data")
                     return None
 
                 arr = value[0]['ushortValue']
                 img = np.asarray(arr, dtype=np.uint16).reshape(img_h, img_w)
+                self._log(f"✓ Got image from PV ({img_w}x{img_h})")
                 return img
 
+            except subprocess.TimeoutExpired:
+                self._log(f"⚠ Timeout getting image dimensions")
+                return None
             except Exception as e:
-                self._log(f"⚠ Error getting image from {pv_name}: {e}")
+                self._log(f"⚠ Error in PV access: {e}")
                 return None
 
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
-            self._log(f"⚠ Error getting image: {e}")
+            self._log(f"⚠ Unexpected error getting image: {e}")
             return None
 
     def _caput(self, pv: str, value: float, timeout: float):
