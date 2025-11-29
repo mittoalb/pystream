@@ -226,6 +226,7 @@ class MotorScanDialog(QtWidgets.QDialog):
         right_layout.addWidget(QtWidgets.QLabel("Live Preview (Stitched Mosaic)"))
 
         self.graphics_view = pg.GraphicsLayoutWidget()
+        self.graphics_view.setMinimumSize(400, 400)  # Ensure preview is visible
         self.view_box = self.graphics_view.addViewBox()
         self.view_box.setAspectLocked(True)
         self.image_view = pg.ImageItem()
@@ -383,6 +384,7 @@ class MotorScanDialog(QtWidgets.QDialog):
                 auto_range = not hasattr(self, '_preview_initialized')
                 if auto_range:
                     self._preview_initialized = True
+                    self._log("Preview: First mosaic image displayed")
 
                 # Use percentile-based contrast
                 if self.auto_contrast.isChecked():
@@ -399,6 +401,19 @@ class MotorScanDialog(QtWidgets.QDialog):
                     self.image_view.setImage(img)
                     if auto_range:
                         self.view_box.autoRange()
+            else:
+                # Show placeholder when no scan data yet
+                if not hasattr(self, '_placeholder_shown'):
+                    placeholder = np.zeros((100, 100), dtype=np.uint16)
+                    self.image_view.setImage(placeholder)
+                    self.view_box.autoRange()
+                    self._placeholder_shown = True
+                    self._log("Preview: Waiting for scan to start...")
+        except Exception as e:
+            # Catch any display errors to prevent crashes
+            if not hasattr(self, '_preview_error_logged'):
+                self._log(f"Preview error: {e}")
+                self._preview_error_logged = True
         finally:
             self.stitched_lock.unlock()
 
@@ -535,9 +550,14 @@ class MotorScanDialog(QtWidgets.QDialog):
         # Reset preview initialization
         if hasattr(self, '_preview_initialized'):
             delattr(self, '_preview_initialized')
+        if hasattr(self, '_placeholder_shown'):
+            delattr(self, '_placeholder_shown')
+        if hasattr(self, '_preview_error_logged'):
+            delattr(self, '_preview_error_logged')
 
         # Start preview refresh timer
         self.preview_timer.start(500)
+        self._log("Preview timer started (500ms refresh)")
 
         # Create and start scan thread
         self.scan_thread = ScanWorker(self)
