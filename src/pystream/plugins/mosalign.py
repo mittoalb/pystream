@@ -398,7 +398,11 @@ class MotorScanDialog(QtWidgets.QDialog):
             self.stitched_lock.unlock()
 
     def _get_image_now(self, position_index: int = 1, total_positions: int = 1):
-        """Get image from PV - supports test mode"""
+        """Get image from PV - supports test mode
+
+        Thread-safe method that gets image from parent viewer to avoid pvapy segfaults.
+        Uses retry logic and careful numpy array handling for thread safety.
+        """
         # TEST MODE: Return mock image
         if self.test_mode:
             return self._generate_mock_image(position_index, total_positions)
@@ -408,24 +412,57 @@ class MotorScanDialog(QtWidgets.QDialog):
         try:
             parent = self.parent()
 
-            # Check if parent viewer has an image
-            if parent and hasattr(parent, '_last_display_img') and parent._last_display_img is not None:
+            # Verify parent exists
+            if not parent:
+                self._log(f"⚠ No parent viewer available")
+                return None
+
+            # Try up to 3 times with small delays to handle timing issues
+            for attempt in range(3):
                 try:
-                    img = parent._last_display_img.copy()
+                    if not hasattr(parent, '_last_display_img'):
+                        self._log(f"⚠ Parent viewer does not have _last_display_img attribute")
+                        return None
+
+                    img_ref = parent._last_display_img
+
+                    if img_ref is None:
+                        if attempt < 2:
+                            time.sleep(0.05)  # Wait for next frame
+                            continue
+                        else:
+                            self._log(f"⚠ No image available from main viewer after retries")
+                            self._log(f"   Please ensure the main viewer is connected and receiving images")
+                            return None
+
+                    # Thread-safe copy using np.array() instead of .copy()
+                    # This creates a deep copy that's independent of the parent's array
+                    img = np.array(img_ref, dtype=img_ref.dtype)
+
+                    if img.size == 0:
+                        self._log(f"⚠ Empty image from main viewer")
+                        return None
+
                     self._log(f"✓ Got image from main viewer ({img.shape[1]}x{img.shape[0]})")
                     return img
-                except Exception as e:
-                    self._log(f"⚠ Could not copy viewer image: {e}")
-                    return None
-            else:
-                self._log(f"⚠ No image available from main viewer")
-                self._log(f"   Please ensure the main viewer is connected and receiving images")
-                return None
+
+                except (AttributeError, RuntimeError, ValueError) as e:
+                    if attempt < 2:
+                        self._log(f"⚠ Retry {attempt + 1}/3: {e}")
+                        time.sleep(0.05)
+                        continue
+                    else:
+                        self._log(f"⚠ Could not copy viewer image after retries: {e}")
+                        return None
+
+            return None
 
         except KeyboardInterrupt:
             raise
         except Exception as e:
             self._log(f"⚠ Unexpected error getting image: {e}")
+            import traceback
+            self._log(traceback.format_exc())
             return None
 
     def _caput(self, pv: str, value: float, timeout: float):
