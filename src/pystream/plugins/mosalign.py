@@ -802,14 +802,16 @@ class ScanWorker(QtCore.QThread):
                 else:
                     self.log_signal.emit("  ⚠ Could not capture projection")
 
-                # Restore motor positions
+                # Restore motor positions (tomoscan zeros motors during rotation)
+                self.log_signal.emit(f"  Restoring motors to grid position X={abs_x_pos:.3f}, Y={abs_y_pos:.3f}")
                 if self.dialog.test_mode:
-                    self.log_signal.emit(f"  [MOCK] Restore to ({abs_x_pos:.3f}, {abs_y_pos:.3f})")
+                    self.log_signal.emit(f"  [MOCK MODE - not actually moving motors]")
                 else:
                     subprocess.run(['caput', motor1_pv, str(abs_x_pos)],
                                  capture_output=True, timeout=5)
                     subprocess.run(['caput', motor2_pv, str(abs_y_pos)],
                                  capture_output=True, timeout=5)
+                    self.log_signal.emit(f"  ✓ Motors restored")
                 time.sleep(0.2)
 
             else:
