@@ -48,8 +48,8 @@ class MotorScanDialog(QtWidgets.QDialog):
         self._build_ui()
         self._load_config()
 
-        # Start preview timer AFTER UI is built
-        self.preview_timer.start(500)  # Start immediately to show placeholder
+        # NEW: Initialize preview according to checkbox (and control timer)
+        self._on_preview_toggled(self.enable_preview.isChecked())
 
     def _build_ui(self):
         main_layout = QtWidgets.QHBoxLayout(self)
@@ -186,6 +186,7 @@ class MotorScanDialog(QtWidgets.QDialog):
         # Preview settings
         self.enable_preview = QtWidgets.QCheckBox("Enable Live Preview")
         self.enable_preview.setChecked(True)
+        self.enable_preview.toggled.connect(self._on_preview_toggled)  # NEW
         layout.addWidget(self.enable_preview)
 
         self.auto_contrast = QtWidgets.QCheckBox("Auto Contrast")
@@ -332,6 +333,26 @@ class MotorScanDialog(QtWidgets.QDialog):
             self._log("Test Mode DISABLED - using real PVs and tomoscan")
             self.connection_status.setText("Status: Not connected")
 
+    def _on_preview_toggled(self, checked: bool):
+        """Handle changes to the 'Enable Live Preview' checkbox."""
+        if checked:
+            self._log("Live preview ENABLED")
+            if not self.preview_timer.isActive():
+                self.preview_timer.start(500)
+            # Force a refresh if we already have a stitched image
+            self._refresh_stitched_preview()
+        else:
+            self._log("Live preview DISABLED")
+            if self.preview_timer.isActive():
+                self.preview_timer.stop()
+            # Clear any image from the preview
+            try:
+                self.image_view.clear()
+            except Exception:
+                pass
+            if hasattr(self, "_preview_initialized"):
+                delattr(self, "_preview_initialized")
+
     def _generate_mock_image(self, position_index: int, total_positions: int):
         """Generate a mock image for testing"""
         img_h, img_w = 1024, 1280
@@ -342,8 +363,8 @@ class MotorScanDialog(QtWidgets.QDialog):
 
         # Position-dependent pattern
         pattern = (np.sin(x_grad * 10 + position_index) * 0.3 +
-                  np.cos(y_grad * 8 + position_index * 0.5) * 0.3 +
-                  0.4)
+                   np.cos(y_grad * 8 + position_index * 0.5) * 0.3 +
+                   0.4)
 
         # Add circular features
         center_y, center_x = img_h // 2, img_w // 2
@@ -377,22 +398,11 @@ class MotorScanDialog(QtWidgets.QDialog):
         if not self.enable_preview.isChecked():
             return
 
-        # Don't try to refresh if scan just finished (prevents segfaults)
-        if not self.scanning and hasattr(self, '_scan_just_finished'):
-            return
-
-        # Don't hold lock for too long
         self.stitched_lock.lock()
         try:
             if self.stitched_image is not None:
                 # Flip vertically to correct display orientation
                 img = np.flipud(self.stitched_image.copy())
-
-                # Auto-range only on first update
-                auto_range = not hasattr(self, '_preview_initialized')
-                if auto_range:
-                    self._preview_initialized = True
-                    self._log("Preview: First mosaic image displayed")
 
                 # Use percentile-based contrast
                 if self.auto_contrast.isChecked():
@@ -401,35 +411,16 @@ class MotorScanDialog(QtWidgets.QDialog):
                         vmin, vmax = np.percentile(nz, [1, 99])
                     else:
                         vmin, vmax = 0, 65535
-
                     self.image_view.setImage(img, levels=[vmin, vmax])
-                    if auto_range:
-                        self.view_box.autoRange()
                 else:
                     self.image_view.setImage(img)
-                    if auto_range:
-                        self.view_box.autoRange()
-            else:
-                # Show placeholder when no scan data yet
-                if not hasattr(self, '_placeholder_shown'):
-                    # Create a visible placeholder (white square with text)
-                    placeholder = np.ones((400, 400), dtype=np.uint16) * 10000
-                    # Add a border
-                    placeholder[0:10, :] = 65535
-                    placeholder[-10:, :] = 65535
-                    placeholder[:, 0:10] = 65535
-                    placeholder[:, -10:] = 65535
 
-                    self.image_view.setImage(placeholder, levels=[0, 65535])
+                # Auto-range on first update
+                if not hasattr(self, '_preview_initialized'):
                     self.view_box.autoRange()
-                    self._placeholder_shown = True
-                    self._log("Preview: Placeholder displayed - waiting for scan to start...")
-                    self._log("  (Placeholder is a gray square with white border)")
+                    self._preview_initialized = True
         except Exception as e:
-            # Catch any display errors to prevent crashes
-            if not hasattr(self, '_preview_error_logged'):
-                self._log(f"Preview error: {e}")
-                self._preview_error_logged = True
+            self._log(f"Preview error: {e}")
         finally:
             self.stitched_lock.unlock()
 
@@ -444,7 +435,6 @@ class MotorScanDialog(QtWidgets.QDialog):
             return self._generate_mock_image(position_index, total_positions)
 
         # REAL MODE: Get from parent viewer's current image
-        # This completely avoids pvapy segfault issues by reusing the parent's connection
         try:
             parent = self.parent()
 
@@ -471,8 +461,6 @@ class MotorScanDialog(QtWidgets.QDialog):
                             self._log(f"   Please ensure the main viewer is connected and receiving images")
                             return None
 
-                    # Thread-safe copy using np.array() instead of .copy()
-                    # This creates a deep copy that's independent of the parent's array
                     img = np.array(img_ref, dtype=img_ref.dtype)
 
                     if img.size == 0:
@@ -503,12 +491,10 @@ class MotorScanDialog(QtWidgets.QDialog):
 
     def _caput(self, pv: str, value: float, timeout: float):
         """Set motor position using caput - supports test mode"""
-        # TEST MODE: Just log the action
         if self.test_mode:
             self._log(f"  [MOCK] caput {pv} {value}")
             return
 
-        # REAL MODE: Execute caput
         try:
             subprocess.run(
                 ['caput', '-w', str(timeout), pv, str(value)],
@@ -523,12 +509,10 @@ class MotorScanDialog(QtWidgets.QDialog):
 
     def _wait_for_motor(self, pv: str, target: float, tolerance: float = 0.001, timeout: float = 30.0):
         """Wait for motor to reach target position - supports test mode"""
-        # TEST MODE: Simulate instant motor arrival
         if self.test_mode:
             time.sleep(0.05)
             return True
 
-        # REAL MODE: Wait for motor
         readback_pv = f"{pv}.RBV"
         start_time = time.time()
 
@@ -564,18 +548,17 @@ class MotorScanDialog(QtWidgets.QDialog):
         self.progress.setValue(0)
 
         # Reset preview initialization
-        if hasattr(self, '_preview_initialized'):
-            delattr(self, '_preview_initialized')
-        if hasattr(self, '_placeholder_shown'):
-            delattr(self, '_placeholder_shown')
-        if hasattr(self, '_preview_error_logged'):
-            delattr(self, '_preview_error_logged')
-        if hasattr(self, '_scan_just_finished'):
-            delattr(self, '_scan_just_finished')
+        for attr in ("_preview_initialized",
+                     "_placeholder_shown",
+                     "_preview_error_logged",
+                     "_scan_just_finished"):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
-        # Start preview refresh timer
-        self.preview_timer.start(500)
-        self._log("Preview timer started (500ms refresh)")
+        if self.enable_preview.isChecked():
+            self._log("Preview timer active (500ms refresh)")
+        else:
+            self._log("Live preview disabled - no mosaic display")
 
         # Create and start scan thread
         self.scan_thread = ScanWorker(self)
@@ -601,9 +584,8 @@ class MotorScanDialog(QtWidgets.QDialog):
         # Stop preview timer FIRST to prevent any access to camera/image data
         if self.preview_timer.isActive():
             self.preview_timer.stop()
-            self._log("Preview timer stopped")
+            self._log("Preview timer stopped (scan finished)")
 
-        # Small delay to ensure any pending timer callbacks complete
         QtCore.QCoreApplication.processEvents()
         time.sleep(0.1)
 
@@ -688,7 +670,6 @@ class ScanWorker(QtCore.QThread):
             if test_img is not None:
                 img_h, img_w = test_img.shape
 
-                # Calculate effective step size in pixels
                 pixel_size_um = self.dialog.pixel_size.value()
                 x_step_um = x_step * 1000
                 y_step_um = y_step * 1000
@@ -696,7 +677,6 @@ class ScanWorker(QtCore.QThread):
                 eff_w = int(x_step_um / pixel_size_um)
                 eff_h = int(y_step_um / pixel_size_um)
 
-                # Total canvas size
                 out_w = eff_w * x_step_size + (img_w - eff_w)
                 out_h = eff_h * y_step_size + (img_h - eff_h)
 
@@ -707,12 +687,10 @@ class ScanWorker(QtCore.QThread):
                 self.log_signal.emit("⚠ Failed to get test image!")
                 return
 
-            # Initialize stitched canvas
             self.dialog.stitched_lock.lock()
             self.dialog.stitched_image = np.zeros((out_h, out_w), dtype=np.uint16)
             self.dialog.stitched_lock.unlock()
 
-            # Scan X-Y grid
             for i in range(x_step_size):
                 if not self.dialog.scanning:
                     break
@@ -721,7 +699,6 @@ class ScanWorker(QtCore.QThread):
                     if not self.dialog.scanning:
                         break
 
-                    # Motor positions
                     x_pos = x_start + (i * x_step)
                     y_pos = y_start + (j * y_step)
 
@@ -731,31 +708,24 @@ class ScanWorker(QtCore.QThread):
                         f"[{position}/{total_positions}] X={x_pos:.3f}, Y={y_pos:.3f}"
                     )
 
-                    # Move motors
                     if not self.dialog.test_mode:
                         try:
                             subprocess.run(['caput', motor1_pv, str(x_pos)],
-                                         capture_output=True, timeout=5)
+                                           capture_output=True, timeout=5)
                             subprocess.run(['caput', motor2_pv, str(y_pos)],
-                                         capture_output=True, timeout=5)
+                                           capture_output=True, timeout=5)
                         except Exception as e:
                             self.log_signal.emit(f"  ⚠ Motor error: {e}")
 
-                    # Wait for motors
                     self.dialog._wait_for_motor(motor1_pv, x_pos, motor_tolerance, timeout)
                     self.dialog._wait_for_motor(motor2_pv, y_pos, motor_tolerance, timeout)
 
-                    # Update position display
                     self.position_signal.emit(position, total_positions, x_pos, y_pos, 0)
 
-                    # Wait for settling
                     time.sleep(0.1 if self.dialog.test_mode else settle_time)
 
-                    # Capture preview image BEFORE tomoscan (tomoscan stops camera)
-                    # NOTE: Camera does NOT restart after tomoscan, only when next tomoscan begins
-                    # So only the first position will have a mosaic image when tomoscan is enabled
                     img = None
-                    max_retries = 3  # Quick retries only
+                    max_retries = 3
 
                     for retry in range(max_retries):
                         img = self.dialog._get_image_now(position, total_positions)
@@ -770,13 +740,10 @@ class ScanWorker(QtCore.QThread):
                         self.log_signal.emit(f"  ✓ Image captured and placed in mosaic")
                     else:
                         if self.dialog.run_tomoscan.isChecked() and position > 1:
-                            # Expected - camera stopped after previous tomoscan
                             self.log_signal.emit(f"  (No mosaic image - camera stopped by previous tomoscan)")
                         else:
-                            # Unexpected - first position or no tomoscan
                             self.log_signal.emit(f"  ✗ No image available - check camera stream")
 
-                    # Run tomoscan if enabled
                     if self.dialog.run_tomoscan.isChecked():
                         self._run_tomoscan_at_position(x_pos, y_pos, motor1_pv, motor2_pv)
 
@@ -795,7 +762,6 @@ class ScanWorker(QtCore.QThread):
         """Place image in stitched canvas"""
         img_h, img_w = img.shape
 
-        # Calculate position
         start_x = i * eff_w
         start_y = j * eff_h
         end_x = min(start_x + img_w, out_w)
@@ -803,12 +769,10 @@ class ScanWorker(QtCore.QThread):
 
         sub = img[:end_y - start_y, :end_x - start_x]
 
-        # Update stitched image
         self.dialog.stitched_lock.lock()
         try:
             self.dialog.stitched_image[start_y:end_y, start_x:end_x] = sub
 
-            # Draw border
             border_val = int(np.max(sub)) if sub.size > 0 else 65535
             for t in range(3):
                 if start_y + t < end_y:
@@ -827,18 +791,15 @@ class ScanWorker(QtCore.QThread):
         prefix = self.dialog.tomoscan_prefix.text().strip()
         tomoscan_cmd = self.dialog.tomoscan_path.text().strip()
 
-        # Build full command for logging
         full_cmd = f"{tomoscan_cmd} single --tomoscan-prefix {prefix}"
 
         self.log_signal.emit(f"  Starting tomoscan at ({x_pos:.3f}, {y_pos:.3f})...")
         self.log_signal.emit(f"  Command: {full_cmd}")
 
         try:
-            # Store absolute positions (tomoscan zeros motors)
             abs_x_pos = x_pos
             abs_y_pos = y_pos
 
-            # Run tomoscan
             if self.dialog.test_mode:
                 self.log_signal.emit(f"  [MOCK MODE - not actually running]")
                 time.sleep(0.5)
@@ -854,25 +815,18 @@ class ScanWorker(QtCore.QThread):
 
             if result_returncode == 0:
                 self.log_signal.emit("  ✓ Tomoscan completed")
-
-                # Skip projection capture to avoid segfaults
-                # The tomoscan data is saved to disk anyway
                 self.log_signal.emit("  (Projection capture skipped - data saved by tomoscan)")
 
-                # Restore motor positions (tomoscan zeros motors during rotation)
                 self.log_signal.emit(f"  Restoring motors to grid position X={abs_x_pos:.3f}, Y={abs_y_pos:.3f}")
                 if self.dialog.test_mode:
                     self.log_signal.emit(f"  [MOCK MODE - not actually moving motors]")
                 else:
                     subprocess.run(['caput', motor1_pv, str(abs_x_pos)],
-                                 capture_output=True, timeout=5)
+                                   capture_output=True, timeout=5)
                     subprocess.run(['caput', motor2_pv, str(abs_y_pos)],
-                                 capture_output=True, timeout=5)
+                                   capture_output=True, timeout=5)
                     self.log_signal.emit(f"  ✓ Motors restored")
 
-                # Note: Camera does NOT automatically restart after tomoscan
-                # Camera will only restart when the NEXT tomoscan begins
-                # Mosaic preview will show only the first captured image
                 self.log_signal.emit(f"  (Camera stream stopped - will restart at next tomoscan)")
                 time.sleep(0.2)
 
@@ -892,7 +846,6 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
 
-    # Apply basic styling
     app.setStyle('Fusion')
     palette = QtGui.QPalette()
     palette.setColor(QtGui.QPalette.Window, QtGui.QColor(53, 53, 53))
