@@ -259,6 +259,8 @@ class MotorScanDialog(QtWidgets.QDialog):
                     self.motor1_pv.setText(config['motor1_pv'])
                 if 'motor2_pv' in config:
                     self.motor2_pv.setText(config['motor2_pv'])
+                if 'tomoscan_path' in config:
+                    self.tomoscan_path.setText(config['tomoscan_path'])
                 if 'image_pv' in config:
                     self.image_pv.setText(config['image_pv'])
                 if 'tomoscan_prefix' in config:
@@ -295,6 +297,7 @@ class MotorScanDialog(QtWidgets.QDialog):
         config = {
             'motor1_pv': self.motor1_pv.text(),
             'motor2_pv': self.motor2_pv.text(),
+            'tomoscan_path': self.tomoscan_path.text(),
             'image_pv': self.image_pv.text(),
             'tomoscan_prefix': self.tomoscan_prefix.text(),
             'pixel_size': self.pixel_size.value(),
@@ -708,10 +711,7 @@ class ScanWorker(QtCore.QThread):
 
                     # Run tomoscan if enabled
                     if self.dialog.run_tomoscan.isChecked():
-                        self._run_tomoscan_at_position(
-                            x_pos, y_pos, i, j, position, total_positions,
-                            eff_w, eff_h, out_w, out_h, motor1_pv, motor2_pv
-                        )
+                        self._run_tomoscan_at_position(x_pos, y_pos, motor1_pv, motor2_pv)
 
                     self.progress_signal.emit(position, total_positions)
 
@@ -755,8 +755,7 @@ class ScanWorker(QtCore.QThread):
         finally:
             self.dialog.stitched_lock.unlock()
 
-    def _run_tomoscan_at_position(self, x_pos, y_pos, i, j, position, total_positions,
-                                   eff_w, eff_h, out_w, out_h, motor1_pv, motor2_pv):
+    def _run_tomoscan_at_position(self, x_pos, y_pos, motor1_pv, motor2_pv):
         """Run tomoscan at current position"""
         prefix = self.dialog.tomoscan_prefix.text().strip()
         tomoscan_cmd = self.dialog.tomoscan_path.text().strip()
@@ -789,18 +788,9 @@ class ScanWorker(QtCore.QThread):
             if result_returncode == 0:
                 self.log_signal.emit("  ✓ Tomoscan completed")
 
-                # Wait for first projection
-                time.sleep(0.5 if self.dialog.test_mode else 1.0)
-
-                # Capture first projection (different pattern)
-                tomo_img = self.dialog._get_image_now(position + 1000, total_positions)
-
-                if tomo_img is not None:
-                    self.log_signal.emit("  Got tomoscan projection")
-                    self._place_image_in_canvas(tomo_img, i, j, eff_w, eff_h, out_w, out_h)
-                    self.log_signal.emit("  ✓ Placed in preview")
-                else:
-                    self.log_signal.emit("  ⚠ Could not capture projection")
+                # Skip projection capture to avoid segfaults
+                # The tomoscan data is saved to disk anyway
+                self.log_signal.emit("  (Projection capture skipped - data saved by tomoscan)")
 
                 # Restore motor positions (tomoscan zeros motors during rotation)
                 self.log_signal.emit(f"  Restoring motors to grid position X={abs_x_pos:.3f}, Y={abs_y_pos:.3f}")
