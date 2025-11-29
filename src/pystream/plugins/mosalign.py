@@ -374,6 +374,10 @@ class MotorScanDialog(QtWidgets.QDialog):
         if not self.enable_preview.isChecked():
             return
 
+        # Don't try to refresh if scan just finished (prevents segfaults)
+        if not self.scanning and hasattr(self, '_scan_just_finished'):
+            return
+
         self.stitched_lock.lock()
         try:
             if self.stitched_image is not None:
@@ -554,6 +558,8 @@ class MotorScanDialog(QtWidgets.QDialog):
             delattr(self, '_placeholder_shown')
         if hasattr(self, '_preview_error_logged'):
             delattr(self, '_preview_error_logged')
+        if hasattr(self, '_scan_just_finished'):
+            delattr(self, '_scan_just_finished')
 
         # Start preview refresh timer
         self.preview_timer.start(500)
@@ -578,9 +584,19 @@ class MotorScanDialog(QtWidgets.QDialog):
     def _scan_finished(self):
         """Called when scan completes"""
         self.scanning = False
+        self._scan_just_finished = True  # Prevent preview from accessing camera data
+
+        # Stop preview timer FIRST to prevent any access to camera/image data
+        if self.preview_timer.isActive():
+            self.preview_timer.stop()
+            self._log("Preview timer stopped")
+
+        # Small delay to ensure any pending timer callbacks complete
+        QtCore.QCoreApplication.processEvents()
+        time.sleep(0.1)
+
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.preview_timer.stop()
         self._log("=== Scan finished ===")
 
     def _update_progress(self, current: int, total: int):
@@ -723,11 +739,30 @@ class ScanWorker(QtCore.QThread):
                     # Wait for settling
                     time.sleep(0.1 if self.dialog.test_mode else settle_time)
 
-                    # Capture preview image
-                    img = self.dialog._get_image_now(position, total_positions)
+                    # Capture preview image BEFORE tomoscan (tomoscan stops camera)
+                    # NOTE: Camera does NOT restart after tomoscan, only when next tomoscan begins
+                    # So only the first position will have a mosaic image when tomoscan is enabled
+                    img = None
+                    max_retries = 3  # Quick retries only
+
+                    for retry in range(max_retries):
+                        img = self.dialog._get_image_now(position, total_positions)
+                        if img is not None:
+                            break
+                        if retry < max_retries - 1:
+                            self.log_signal.emit(f"  ⚠ No image yet, waiting... ({retry+1}/{max_retries})")
+                            time.sleep(0.2)
 
                     if img is not None:
                         self._place_image_in_canvas(img, i, j, eff_w, eff_h, out_w, out_h)
+                        self.log_signal.emit(f"  ✓ Image captured and placed in mosaic")
+                    else:
+                        if self.dialog.run_tomoscan.isChecked() and position > 1:
+                            # Expected - camera stopped after previous tomoscan
+                            self.log_signal.emit(f"  (No mosaic image - camera stopped by previous tomoscan)")
+                        else:
+                            # Unexpected - first position or no tomoscan
+                            self.log_signal.emit(f"  ✗ No image available - check camera stream")
 
                     # Run tomoscan if enabled
                     if self.dialog.run_tomoscan.isChecked():
@@ -822,6 +857,11 @@ class ScanWorker(QtCore.QThread):
                     subprocess.run(['caput', motor2_pv, str(abs_y_pos)],
                                  capture_output=True, timeout=5)
                     self.log_signal.emit(f"  ✓ Motors restored")
+
+                # Note: Camera does NOT automatically restart after tomoscan
+                # Camera will only restart when the NEXT tomoscan begins
+                # Mosaic preview will show only the first captured image
+                self.log_signal.emit(f"  (Camera stream stopped - will restart at next tomoscan)")
                 time.sleep(0.2)
 
             else:
