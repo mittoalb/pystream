@@ -18,11 +18,6 @@ import numpy as np
 from typing import Optional
 from PyQt5 import QtWidgets, QtCore, QtGui
 
-from PyQt5.QtGui import QTextCursor
-from PyQt5.QtCore import qRegisterMetaType
-
-qRegisterMetaType(QTextCursor)
-
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
 
@@ -395,13 +390,13 @@ class MotorScanDialog(QtWidgets.QDialog):
     def _log(self, message: str):
         """Add message to log in a thread-safe way.
 
-        - Always safe to call from any thread.
-        - Only the GUI thread touches QTextEdit.
+        - Can be called from any thread.
+        - Only GUI thread touches QTextEdit.
         """
         timestamp = time.strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
 
-        # Always log to Python logger / stdout
+        # Always send to Python logger / stdout
         if self.logger:
             self.logger.info(message)
         else:
@@ -412,7 +407,7 @@ class MotorScanDialog(QtWidgets.QDialog):
             try:
                 self.log_output.append(line)
             except RuntimeError:
-                # Widget might already be destroyed during shutdown
+                # Widget might have been destroyed during shutdown
                 pass
 
     def _refresh_stitched_preview(self):
