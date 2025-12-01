@@ -818,9 +818,8 @@ class ScanWorker(QtCore.QThread):
                 self.log_signal.emit(f"✗ Error: mosaic.sh not found at {mosaic_path}")
                 return
 
-            # Prepare command with parameters
-            cmd = ['bash', mosaic_path, str(h_steps), str(v_steps),
-                   str(h_step_size), str(v_step_size), tomoscan_prefix]
+            # Prepare command with parameters - use bash explicitly
+            cmd = ['bash', '-c', f'bash "{mosaic_path}" {h_steps} {v_steps} {h_step_size} {v_step_size} "{tomoscan_prefix}"']
 
             self.log_signal.emit("═" * 60)
             self.log_signal.emit("TOMOSCAN MOSAIC MODE")
@@ -832,12 +831,14 @@ class ScanWorker(QtCore.QThread):
             self.log_signal.emit(f"Total scans: {h_steps * v_steps}")
             self.log_signal.emit("─" * 60)
 
-            # Run the bash script with parameters
+            # Run the bash script with parameters in an interactive shell
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                cwd=script_dir
+                cwd=script_dir,
+                shell=False,
+                executable='/bin/bash'
             )
 
             # Log output
