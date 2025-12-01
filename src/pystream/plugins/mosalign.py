@@ -12,6 +12,7 @@ Features:
 """
 
 import logging
+import os
 import subprocess
 import time
 import numpy as np
@@ -670,8 +671,14 @@ class ScanWorker(QtCore.QThread):
         self.dialog = dialog
 
     def run(self):
-        """Run the 2D X-Y scan"""
+        """Run the 2D X-Y scan or execute mosaic.sh script"""
         try:
+            # Check if TOMOSCAN mode is active
+            if self.dialog.run_tomoscan.isChecked():
+                self._run_mosaic_script()
+                return
+
+            # Regular scanning mode (original code)
             # Get parameters
             motor1_pv = self.dialog.motor1_pv.text().strip()
             motor2_pv = self.dialog.motor2_pv.text().strip()
@@ -774,13 +781,7 @@ class ScanWorker(QtCore.QThread):
                         self._place_image_in_canvas(img, i, j, eff_w, eff_h, out_w, out_h)
                         self.log_signal.emit(f"  ✓ Image captured and placed in mosaic")
                     else:
-                        if self.dialog.run_tomoscan.isChecked() and position > 1:
-                            self.log_signal.emit(f"  (No mosaic image - camera stopped by previous tomoscan)")
-                        else:
-                            self.log_signal.emit(f"  ✗ No image available - check camera stream")
-
-                    if self.dialog.run_tomoscan.isChecked():
-                        self._run_tomoscan_at_position(x_pos, y_pos, motor1_pv, motor2_pv)
+                        self.log_signal.emit(f"  ✗ No image available - check camera stream")
 
                     self.progress_signal.emit(position, total_positions)
 
@@ -792,6 +793,79 @@ class ScanWorker(QtCore.QThread):
             self.log_signal.emit(traceback.format_exc())
         finally:
             self.finished_signal.emit()
+
+    def _run_mosaic_script(self):
+        """Execute the mosaic.sh script with parameters from the GUI"""
+        try:
+            # Get parameters from GUI
+            x_step_size = self.dialog.x_step_size.value()
+            y_step_size = self.dialog.y_step_size.value()
+            x_step = self.dialog.x_step.value()
+            y_step = self.dialog.y_step.value()
+            tomoscan_prefix = self.dialog.tomoscan_prefix.text().strip()
+
+            # Path to the mosaic.sh script (assuming it's in the same directory as the plugin)
+            script_path = os.path.join(os.path.dirname(__file__), 'mosaic.sh')
+
+            # Check if script exists
+            if not os.path.exists(script_path):
+                self.log_signal.emit(f"✗ Error: mosaic.sh not found at {script_path}")
+                return
+
+            # Prepare command arguments
+            cmd = [
+                'bash',
+                script_path,
+                str(x_step_size),  # h_steps
+                str(y_step_size),  # v_steps
+                str(x_step),       # h_step_size
+                str(y_step),       # v_step_size
+                tomoscan_prefix    # tomoscan_prefix
+            ]
+
+            self.log_signal.emit("═" * 60)
+            self.log_signal.emit("TOMOSCAN MOSAIC MODE")
+            self.log_signal.emit("═" * 60)
+            self.log_signal.emit(f"Executing: {' '.join(cmd)}")
+            self.log_signal.emit(f"Grid: {x_step_size}x{y_step_size}")
+            self.log_signal.emit(f"Step sizes: X={x_step}mm, Y={y_step}mm")
+            self.log_signal.emit(f"Tomoscan prefix: {tomoscan_prefix}")
+            self.log_signal.emit(f"Total scans: {x_step_size * y_step_size}")
+            self.log_signal.emit("─" * 60)
+
+            # Execute the script
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            # Stream output in real-time
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_signal.emit(line)
+                if not self.dialog.scanning:
+                    process.terminate()
+                    self.log_signal.emit("✗ Mosaic acquisition canceled by user")
+                    break
+
+            # Wait for process to complete
+            return_code = process.wait()
+
+            self.log_signal.emit("─" * 60)
+            if return_code == 0:
+                self.log_signal.emit("✓ Mosaic acquisition completed successfully!")
+            else:
+                self.log_signal.emit(f"✗ Mosaic acquisition failed with exit code {return_code}")
+            self.log_signal.emit("═" * 60)
+
+        except Exception as e:
+            self.log_signal.emit(f"✗ Failed to execute mosaic.sh: {e}")
+            import traceback
+            self.log_signal.emit(traceback.format_exc())
 
     def _place_image_in_canvas(self, img, i, j, eff_w, eff_h, out_w, out_h):
         """Place image in stitched canvas"""
