@@ -17,7 +17,7 @@ dependencies = [
   "PyQt5-Qt5==5.15.14",
   "PyQt5-sip>=12.13,<13",
   "pyqtgraph>=0.13.0",
-  "Pillow>=9.0",py
+  "Pillow>=9.0",
   "h5py>=3.0",
 ]
 

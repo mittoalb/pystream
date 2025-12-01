@@ -804,18 +804,20 @@ class ScanWorker(QtCore.QThread):
             y_step = self.dialog.y_step.value()
             tomoscan_prefix = self.dialog.tomoscan_prefix.text().strip()
 
-            # Path to the mosaic.sh script (assuming it's in the same directory as the plugin)
-            script_path = os.path.join(os.path.dirname(__file__), 'mosaic.sh')
+            # Path to the mosaic.sh script (in the same directory as this plugin)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            script_name = 'mosaic.sh'
+            script_path = os.path.join(script_dir, script_name)
 
             # Check if script exists
             if not os.path.exists(script_path):
                 self.log_signal.emit(f"✗ Error: mosaic.sh not found at {script_path}")
                 return
 
-            # Prepare command arguments
+            # Prepare command arguments - use relative path from script directory
             cmd = [
                 'bash',
-                script_path,
+                script_name,  # Use just the filename, not full path
                 str(x_step_size),  # h_steps
                 str(y_step_size),  # v_steps
                 str(x_step),       # h_step_size
@@ -833,9 +835,10 @@ class ScanWorker(QtCore.QThread):
             self.log_signal.emit(f"Total scans: {x_step_size * y_step_size}")
             self.log_signal.emit("─" * 60)
 
-            # Execute the script
+            # Execute the script from its directory
             process = subprocess.Popen(
                 cmd,
+                cwd=script_dir,  # Run from the script directory
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
