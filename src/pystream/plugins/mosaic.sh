@@ -24,6 +24,11 @@ echo "Step sizes: X=${H_STEP_SIZE}mm, Y=${V_STEP_SIZE}mm"
 echo "Tomoscan prefix: ${TOMOSCAN_PREFIX}"
 echo "Total scans: $((H_STEPS * V_STEPS))"
 
+# Activate tomoscan conda environment
+echo "Activating tomoscan conda environment..."
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate tomoscan
+
 # Run the tomoscan mosaic command
 echo "Executing tomoscan mosaic command..."
 
