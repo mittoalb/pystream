@@ -806,39 +806,31 @@ class ScanWorker(QtCore.QThread):
 
             # Path to the mosaic.sh script (in the same directory as this plugin)
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            script_name = 'mosaic.sh'
-            script_path = os.path.join(script_dir, script_name)
+            script_path = os.path.join(script_dir, 'mosaic.sh')
 
             # Check if script exists
             if not os.path.exists(script_path):
                 self.log_signal.emit(f"✗ Error: mosaic.sh not found at {script_path}")
                 return
 
-            # Prepare command arguments - use relative path from script directory
-            cmd = [
-                'bash',
-                script_name,  # Use just the filename, not full path
-                str(x_step_size),  # h_steps
-                str(y_step_size),  # v_steps
-                str(x_step),       # h_step_size
-                str(y_step),       # v_step_size
-                tomoscan_prefix    # tomoscan_prefix
-            ]
+            # Activate tomoscan conda environment and run script
+            cmd = f'source /opt/miniconda3/etc/profile.d/conda.sh && conda activate tomoscan && bash "{script_path}" {x_step_size} {y_step_size} {x_step} {y_step} "{tomoscan_prefix}"'
 
             self.log_signal.emit("═" * 60)
             self.log_signal.emit("TOMOSCAN MOSAIC MODE")
             self.log_signal.emit("═" * 60)
-            self.log_signal.emit(f"Executing: {' '.join(cmd)}")
+            self.log_signal.emit(f"Script: {script_path}")
             self.log_signal.emit(f"Grid: {x_step_size}x{y_step_size}")
             self.log_signal.emit(f"Step sizes: X={x_step}mm, Y={y_step}mm")
             self.log_signal.emit(f"Tomoscan prefix: {tomoscan_prefix}")
             self.log_signal.emit(f"Total scans: {x_step_size * y_step_size}")
             self.log_signal.emit("─" * 60)
 
-            # Execute the script from its directory
+            # Execute the script with conda environment
             process = subprocess.Popen(
                 cmd,
-                cwd=script_dir,  # Run from the script directory
+                shell=True,
+                executable='/bin/bash',
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
