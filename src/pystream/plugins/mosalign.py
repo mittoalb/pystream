@@ -802,6 +802,8 @@ class ScanWorker(QtCore.QThread):
             v_steps = self.dialog.y_step_size.value()
             h_step_size = self.dialog.x_step.value()
             v_step_size = self.dialog.y_step.value()
+            h_start = self.dialog.x_start.value()
+            v_start = self.dialog.y_start.value()
             tomoscan_prefix = self.dialog.tomoscan_prefix.text().strip()
             tomoscan_path = self.dialog.tomoscan_path.text().strip()
 
@@ -819,15 +821,17 @@ class ScanWorker(QtCore.QThread):
                 self.log_signal.emit(f"✗ Error: mosaic.sh not found at {mosaic_path}")
                 return
 
-            # Prepare command with parameters (pass tomoscan path as 6th parameter)
+            # Prepare command with parameters (pass starting positions as 7th and 8th parameters)
             cmd = ['bash', mosaic_path, str(h_steps), str(v_steps),
-                   str(h_step_size), str(v_step_size), tomoscan_prefix, tomoscan_path]
+                   str(h_step_size), str(v_step_size), tomoscan_prefix, tomoscan_path,
+                   str(h_start), str(v_start)]
 
             self.log_signal.emit("═" * 60)
             self.log_signal.emit("TOMOSCAN MOSAIC MODE")
             self.log_signal.emit("═" * 60)
             self.log_signal.emit(f"Script: {mosaic_path}")
             self.log_signal.emit(f"Grid: {h_steps}x{v_steps}")
+            self.log_signal.emit(f"Start positions: X={h_start}mm, Y={v_start}mm")
             self.log_signal.emit(f"Step sizes: X={h_step_size}mm, Y={v_step_size}mm")
             self.log_signal.emit(f"Tomoscan prefix: {tomoscan_prefix}")
             self.log_signal.emit(f"Tomoscan path: {tomoscan_path}")

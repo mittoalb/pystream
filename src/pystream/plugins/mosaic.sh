@@ -6,8 +6,8 @@
 # Check if all required parameters are provided
 if [ $# -lt 4 ]; then
     echo "Error: Missing parameters!"
-    echo "Usage: $0 <h_steps> <v_steps> <h_step_size> <v_step_size> [tomoscan_prefix] [tomoscan_path]"
-    echo "Example: $0 3 3 0.2 0.2 32id:TomoScan: tomoscan"
+    echo "Usage: $0 <h_steps> <v_steps> <h_step_size> <v_step_size> [tomoscan_prefix] [tomoscan_path] [h_start] [v_start]"
+    echo "Example: $0 3 3 0.2 0.2 32id:TomoScan: tomoscan 0 0"
     exit 1
 fi
 
@@ -18,9 +18,12 @@ H_STEP_SIZE=$3
 V_STEP_SIZE=$4
 TOMOSCAN_PREFIX=${5:-"32id:TomoScan:"}  # Default prefix if not provided
 TOMOSCAN_CMD=${6:-"tomoscan"}  # Default command if not provided
+H_START=${7:-0}  # Default horizontal start position if not provided
+V_START=${8:-0}  # Default vertical start position if not provided
 
 echo "Starting mosaic acquisition with parameters:"
 echo "Grid size: ${H_STEPS}x${V_STEPS}"
+echo "Start positions: X=${H_START}mm, Y=${V_START}mm"
 echo "Step sizes: X=${H_STEP_SIZE}mm, Y=${V_STEP_SIZE}mm"
 echo "Tomoscan prefix: ${TOMOSCAN_PREFIX}"
 echo "Tomoscan command: ${TOMOSCAN_CMD}"
@@ -41,8 +44,8 @@ ${TOMOSCAN_CMD} mosaic \
     --vertical-steps ${V_STEPS} \
     --horizontal-step-size ${H_STEP_SIZE} \
     --vertical-step-size ${V_STEP_SIZE} \
-    --horizontal-start 0 \
-    --vertical-start 0 \
+    --horizontal-start ${H_START} \
+    --vertical-start ${V_START} \
     --verbose
 
 # Check if the command was successful
