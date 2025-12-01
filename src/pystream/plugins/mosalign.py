@@ -798,67 +798,68 @@ class ScanWorker(QtCore.QThread):
         """Execute the mosaic.sh script with parameters from the GUI"""
         try:
             # Get parameters from GUI
-            x_step_size = self.dialog.x_step_size.value()
-            y_step_size = self.dialog.y_step_size.value()
-            x_step = self.dialog.x_step.value()
-            y_step = self.dialog.y_step.value()
+            h_steps = self.dialog.x_step_size.value()
+            v_steps = self.dialog.y_step_size.value()
+            h_step_size = self.dialog.x_step.value()
+            v_step_size = self.dialog.y_step.value()
             tomoscan_prefix = self.dialog.tomoscan_prefix.text().strip()
 
-            # Path to the mosaic.sh script (in the same directory as this plugin)
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            script_path = os.path.join(script_dir, 'mosaic.sh')
-
-            # Check if script exists
-            if not os.path.exists(script_path):
-                self.log_signal.emit(f"✗ Error: mosaic.sh not found at {script_path}")
+            # Validate parameters
+            if h_steps < 1 or v_steps < 1:
+                self.log_signal.emit("✗ Error: Steps must be >= 1")
                 return
 
-            # Activate tomoscan conda environment and run script
-            cmd = f'source /opt/miniconda3/etc/profile.d/conda.sh && conda activate tomoscan && bash "{script_path}" {x_step_size} {y_step_size} {x_step} {y_step} "{tomoscan_prefix}"'
+            # Get the directory where this plugin is located
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            mosaic_path = os.path.join(script_dir, 'mosaic.sh')
+
+            # Check if the script exists
+            if not os.path.exists(mosaic_path):
+                self.log_signal.emit(f"✗ Error: mosaic.sh not found at {mosaic_path}")
+                return
+
+            # Prepare command with parameters
+            cmd = ['bash', mosaic_path, str(h_steps), str(v_steps),
+                   str(h_step_size), str(v_step_size), tomoscan_prefix]
 
             self.log_signal.emit("═" * 60)
             self.log_signal.emit("TOMOSCAN MOSAIC MODE")
             self.log_signal.emit("═" * 60)
-            self.log_signal.emit(f"Script: {script_path}")
-            self.log_signal.emit(f"Grid: {x_step_size}x{y_step_size}")
-            self.log_signal.emit(f"Step sizes: X={x_step}mm, Y={y_step}mm")
+            self.log_signal.emit(f"Script: {mosaic_path}")
+            self.log_signal.emit(f"Grid: {h_steps}x{v_steps}")
+            self.log_signal.emit(f"Step sizes: X={h_step_size}mm, Y={v_step_size}mm")
             self.log_signal.emit(f"Tomoscan prefix: {tomoscan_prefix}")
-            self.log_signal.emit(f"Total scans: {x_step_size * y_step_size}")
+            self.log_signal.emit(f"Total scans: {h_steps * v_steps}")
             self.log_signal.emit("─" * 60)
 
-            # Execute the script with conda environment
-            process = subprocess.Popen(
+            # Run the bash script with parameters
+            result = subprocess.run(
                 cmd,
-                shell=True,
-                executable='/bin/bash',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                capture_output=True,
                 text=True,
-                bufsize=1
+                cwd=script_dir
             )
 
-            # Stream output in real-time
-            for line in process.stdout:
-                line = line.rstrip()
-                if line:
+            # Log output
+            if result.stdout:
+                for line in result.stdout.splitlines():
                     self.log_signal.emit(line)
-                if not self.dialog.scanning:
-                    process.terminate()
-                    self.log_signal.emit("✗ Mosaic acquisition canceled by user")
-                    break
 
-            # Wait for process to complete
-            return_code = process.wait()
+            if result.stderr:
+                for line in result.stderr.splitlines():
+                    self.log_signal.emit(f"STDERR: {line}")
 
             self.log_signal.emit("─" * 60)
-            if return_code == 0:
-                self.log_signal.emit("✓ Mosaic acquisition completed successfully!")
+            if result.returncode == 0:
+                self.log_signal.emit("✓ Mosaic script completed successfully")
             else:
-                self.log_signal.emit(f"✗ Mosaic acquisition failed with exit code {return_code}")
+                self.log_signal.emit(f"✗ Mosaic script failed with exit code {result.returncode}")
             self.log_signal.emit("═" * 60)
 
+        except FileNotFoundError as e:
+            self.log_signal.emit(f"✗ Script error: mosaic.sh not found: {e}")
         except Exception as e:
-            self.log_signal.emit(f"✗ Failed to execute mosaic.sh: {e}")
+            self.log_signal.emit(f"✗ Failed to run mosaic.sh: {e}")
             import traceback
             self.log_signal.emit(traceback.format_exc())
 
