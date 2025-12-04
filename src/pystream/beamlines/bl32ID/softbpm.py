@@ -181,7 +181,7 @@ class SoftBPMDialog(QtWidgets.QDialog):
 
         # Row 1: Image PV
         self.pv_table.setItem(1, 0, QtWidgets.QTableWidgetItem("Image PV"))
-        self.image_pv_input = QtWidgets.QLineEdit("32idcPG3:Pva1:Image")
+        self.image_pv_input = QtWidgets.QLineEdit("32idbSP1:Pva1:Image")
         self.pv_table.setCellWidget(1, 1, self.image_pv_input)
 
         # Row 2: Beam current PV
