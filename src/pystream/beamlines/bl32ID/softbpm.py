@@ -561,9 +561,36 @@ class SoftBPMThread(QtCore.QThread):
             return None
 
     def _get_image_average(self) -> Optional[float]:
-        """Get average intensity from image PV."""
+        """Get average intensity from image PV by actively fetching fresh data."""
         try:
-            # Try to get image from parent dialog's parent (main viewer)
+            # Method 1: Try to use pvget for PVA (PV Access) image
+            # This is the preferred method for image PVs
+            result = subprocess.run(
+                ['pvget', '-t', self.image_pv],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if result.returncode == 0 and result.stdout:
+                # Parse the image data from pvget output
+                # Format depends on PV structure, may need adjustment
+                output = result.stdout.strip()
+                if output:
+                    # Try to extract numeric values and compute mean
+                    # This is a simplified parser - may need refinement
+                    try:
+                        import re
+                        numbers = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', output)
+                        if numbers:
+                            values = [float(n) for n in numbers]
+                            if len(values) > 10:  # Sanity check - should be image-sized array
+                                return float(np.mean(values))
+                    except (ValueError, TypeError) as e:
+                        self.logger.debug(f"Failed to parse pvget output: {e}")
+
+            # Method 2: Fallback to parent viewer's cached image
+            # This ensures we still work if pvget fails
             if self.parent_dialog is not None:
                 parent_viewer = self.parent_dialog.parent()
                 if hasattr(parent_viewer, 'current_image'):
@@ -579,9 +606,12 @@ class SoftBPMThread(QtCore.QThread):
                         if image is not None and isinstance(image, np.ndarray):
                             return float(np.mean(image))
 
-            self.logger.warning("Unable to access image data for average calculation")
+            self.logger.warning("Unable to access fresh image data via PV or parent viewer")
             return None
 
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"Timeout fetching image from {self.image_pv}")
+            return None
         except Exception as e:
             self.logger.error(f"Error calculating image average: {e}")
             return None
