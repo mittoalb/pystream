@@ -50,7 +50,6 @@ class MotorScanDialog(QtWidgets.QDialog):
         self._build_ui()
         self._load_config()
 
-        # NEW: Initialize preview according to checkbox (and control timer)
         self._on_preview_toggled(self.enable_preview.isChecked())
 
     def _build_ui(self):
@@ -453,25 +452,16 @@ class MotorScanDialog(QtWidgets.QDialog):
             self.stitched_lock.unlock()
 
     def _get_image_now(self, position_index: int = 1, total_positions: int = 1):
-        """Get image from PV - supports test mode
-
-        Thread-safe method that gets image from parent viewer to avoid pvapy segfaults.
-        Uses retry logic and careful numpy array handling for thread safety.
-        """
-        # TEST MODE: Return mock image
         if self.test_mode:
             return self._generate_mock_image(position_index, total_positions)
 
-        # REAL MODE: Get from parent viewer's current image
         try:
             parent = self.parent()
 
-            # Verify parent exists
             if not parent:
                 self._log(f"⚠ No parent viewer available")
                 return None
 
-            # Try up to 3 times with small delays to handle timing issues
             for attempt in range(3):
                 try:
                     if not hasattr(parent, '_last_display_img'):
@@ -482,7 +472,7 @@ class MotorScanDialog(QtWidgets.QDialog):
 
                     if img_ref is None:
                         if attempt < 2:
-                            time.sleep(0.05)  # Wait for next frame
+                            time.sleep(0.05)
                             continue
                         else:
                             self._log(f"⚠ No image available from main viewer after retries")
@@ -518,9 +508,7 @@ class MotorScanDialog(QtWidgets.QDialog):
             return None
 
     def _caput(self, pv: str, value: float, timeout: float):
-        """Set motor position using caput - supports test mode"""
         if self.test_mode:
-            self._log(f"  [MOCK] caput {pv} {value}")
             return
 
         try:
@@ -536,7 +524,6 @@ class MotorScanDialog(QtWidgets.QDialog):
             self._log(f"⚠ caput error for {pv}: {e}")
 
     def _wait_for_motor(self, pv: str, target: float, tolerance: float = 0.001, timeout: float = 30.0):
-        """Wait for motor to reach target position - supports test mode"""
         if self.test_mode:
             time.sleep(0.05)
             return True
@@ -614,14 +601,12 @@ class MotorScanDialog(QtWidgets.QDialog):
             self.preview_timer.stop()
             self._log("Preview timer stopped (scan finished)")
 
-        # 👉 Force one last refresh of the stitched mosaic, so the final tile is visible
         if self.enable_preview.isChecked():
             try:
                 self._refresh_stitched_preview()
             except Exception as e:
                 self._log(f"Final preview refresh error: {e}")
 
-        # Let Qt process any pending UI events
         QtCore.QCoreApplication.processEvents()
         time.sleep(0.1)
 
@@ -673,13 +658,10 @@ class ScanWorker(QtCore.QThread):
     def run(self):
         """Run the 2D X-Y scan or execute mosaic.sh script"""
         try:
-            # Check if TOMOSCAN mode is active
             if self.dialog.run_tomoscan.isChecked():
                 self._run_mosaic_script()
                 return
 
-            # Regular scanning mode (original code)
-            # Get parameters
             motor1_pv = self.dialog.motor1_pv.text().strip()
             motor2_pv = self.dialog.motor2_pv.text().strip()
 
@@ -698,7 +680,6 @@ class ScanWorker(QtCore.QThread):
             total_positions = x_step_size * y_step_size
             position = 0
 
-            # Move to start position
             self.log_signal.emit(f"Moving to start: X={x_start:.3f}, Y={y_start:.3f}")
             self.dialog._caput(motor1_pv, x_start, timeout)
             time.sleep(0.1)
@@ -795,9 +776,7 @@ class ScanWorker(QtCore.QThread):
             self.finished_signal.emit()
 
     def _run_mosaic_script(self):
-        """Execute the mosaic.sh script with parameters from the GUI"""
         try:
-            # Get parameters from GUI
             h_steps = self.dialog.x_step_size.value()
             v_steps = self.dialog.y_step_size.value()
             h_step_size = self.dialog.x_step.value()
@@ -807,21 +786,17 @@ class ScanWorker(QtCore.QThread):
             tomoscan_prefix = self.dialog.tomoscan_prefix.text().strip()
             tomoscan_path = self.dialog.tomoscan_path.text().strip()
 
-            # Validate parameters
             if h_steps < 1 or v_steps < 1:
                 self.log_signal.emit("✗ Error: Steps must be >= 1")
                 return
 
-            # Get the directory where this plugin is located
             script_dir = os.path.dirname(os.path.abspath(__file__))
             mosaic_path = os.path.join(script_dir, 'mosaic.sh')
 
-            # Check if the script exists
             if not os.path.exists(mosaic_path):
                 self.log_signal.emit(f"✗ Error: mosaic.sh not found at {mosaic_path}")
                 return
 
-            # Prepare command with parameters (pass starting positions as 7th and 8th parameters)
             cmd = ['bash', mosaic_path, str(h_steps), str(v_steps),
                    str(h_step_size), str(v_step_size), tomoscan_prefix, tomoscan_path,
                    str(h_start), str(v_start)]
@@ -838,13 +813,11 @@ class ScanWorker(QtCore.QThread):
             self.log_signal.emit(f"Total scans: {h_steps * v_steps}")
             self.log_signal.emit("─" * 60)
 
-            # Run the bash script with parameters
             result = subprocess.run(cmd,
                                   capture_output=True,
                                   text=True,
                                   cwd=script_dir)
 
-            # Log output
             if result.stdout:
                 for line in result.stdout.splitlines():
                     self.log_signal.emit(line)

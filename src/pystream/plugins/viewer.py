@@ -18,7 +18,6 @@ Tab 2: Comprehensive metadata viewer
 
 import h5py
 import numpy as np
-from typing import Optional
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
@@ -236,20 +235,17 @@ class MetadataViewer(QtWidgets.QWidget):
         """Populate the metadata table with data"""
         self.metadata_table.setSortingEnabled(False)
         self.metadata_table.setRowCount(len(metadata))
-        
+
         for row, (full_path, value, dtype) in enumerate(metadata):
-            # Path/Attribute (combined)
             path_item = QtWidgets.QTableWidgetItem(full_path)
             path_item.setFlags(path_item.flags() & ~QtCore.Qt.ItemIsEditable)
             self.metadata_table.setItem(row, 0, path_item)
-            
-            # Value - format based on type
+
             if isinstance(value, (int, np.integer)):
                 value_str = str(value)
             elif isinstance(value, (float, np.floating)):
                 value_str = f"{value:.6g}"
             elif isinstance(value, list):
-                # Array/list - show values
                 if len(str(value)) > 500:
                     value_str = str(value)[:500] + "..."
                 else:
@@ -258,60 +254,52 @@ class MetadataViewer(QtWidgets.QWidget):
                 value_str = str(value)
                 if len(value_str) > 500:
                     value_str = value_str[:500] + "..."
-            
+
             value_item = QtWidgets.QTableWidgetItem(value_str)
             value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemIsEditable)
             value_item.setToolTip(str(value))
             self.metadata_table.setItem(row, 1, value_item)
-            
-            # Type
+
             type_item = QtWidgets.QTableWidgetItem(dtype)
             type_item.setFlags(type_item.flags() & ~QtCore.Qt.ItemIsEditable)
             self.metadata_table.setItem(row, 2, type_item)
-        
+
         self.metadata_table.setSortingEnabled(True)
         self.metadata_table.resizeColumnsToContents()
-        # Make sure value column is wide enough
         current_width = self.metadata_table.columnWidth(1)
         self.metadata_table.setColumnWidth(1, max(200, current_width))
     
     def _populate_structure_tree(self, h5file, structure):
         """Populate the structure tree with file hierarchy"""
         self.structure_tree.clear()
-        
-        # Create root item
+
         root = QtWidgets.QTreeWidgetItem(self.structure_tree)
         root.setText(0, '/')
         root.setText(1, 'Group')
         root.setExpanded(True)
-        
-        # Build tree
+
         items_dict = {'/': root}
-        
+
         for path, obj_type, shape, dtype in sorted(structure):
-            # Get parent path
             parent_path = '/' + '/'.join(path.split('/')[:-1]) if '/' in path else '/'
             parent_path = parent_path.replace('//', '/')
-            
-            # Create item
+
             item = QtWidgets.QTreeWidgetItem()
             item.setText(0, path)
             item.setText(1, obj_type)
-            
+
             if shape is not None:
                 item.setText(2, str(shape))
             if dtype is not None:
                 item.setText(3, str(dtype))
-            
-            # Add to parent
+
             if parent_path in items_dict:
                 items_dict[parent_path].addChild(item)
             else:
                 root.addChild(item)
-            
+
             items_dict[path] = item
-        
-        # Expand all
+
         self.structure_tree.expandAll()
         self.structure_tree.resizeColumnToContents(0)
         self.structure_tree.resizeColumnToContents(1)
@@ -320,15 +308,13 @@ class MetadataViewer(QtWidgets.QWidget):
         """Filter metadata table by search text"""
         if not hasattr(self, '_all_metadata'):
             return
-        
+
         if not text:
-            # Show all
             self._populate_metadata_table(self._all_metadata)
         else:
-            # Filter by path/attribute name
             filtered = [
                 item for item in self._all_metadata
-                if text.lower() in item[0].lower()  # item[0] is full_path
+                if text.lower() in item[0].lower()
             ]
             self._populate_metadata_table(filtered)
     
@@ -624,42 +610,34 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open HDF5 File", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)"
         )
-        
+
         if not filename:
             return
-        
+
         try:
-            # Close previous file if exists
             if self.hdf5_file is not None:
                 self.hdf5_file.close()
-            
-            # Open new file
+
             self.hdf5_file = h5py.File(filename, 'r')
-            
-            # Try to load expected datasets
+
             if 'exchange/data' in self.hdf5_file and 'exchange/data_white' in self.hdf5_file:
                 self.data_dataset = self.hdf5_file['exchange/data']
                 self.data_white_dataset = self.hdf5_file['exchange/data_white']
-                
-                # Update UI
+
                 self.file_path_label.setText(filename.split('/')[-1])
                 self.file_path_label.setStyleSheet("color: white;")
-                
-                # Update dataset info
+
                 self.data_shape_label.setText(str(self.data_dataset.shape))
                 self.white_shape_label.setText(str(self.data_white_dataset.shape))
-                
+
                 num_images = self.data_dataset.shape[0]
                 self.num_images_label.setText(str(num_images))
-                
-                # Configure slider
+
                 self.image_slider.setMaximum(num_images - 1)
                 self.image_slider.setEnabled(True)
-                
-                # Load first image
+
                 self._load_and_display_image(0)
-                
-                # Load metadata into metadata viewer
+
                 self.metadata_viewer.load_metadata(self.hdf5_file)
                 
             else:
@@ -684,19 +662,16 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         """Load and display image at given index"""
         if self.data_dataset is None:
             return
-        
+
         try:
             self.current_index = index
             self.index_label.setText(str(index))
-            
-            # Load data (reading from disk)
+
             self.current_data = np.array(self.data_dataset[index])
-            
-            # Use first white image for now (could be made configurable)
+
             white_index = min(index, self.data_white_dataset.shape[0] - 1)
             self.current_white = np.array(self.data_white_dataset[white_index])
-            
-            # Update display
+
             self._update_display()
             
         except Exception as e:
@@ -708,26 +683,20 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         """Update the image display with current shift and normalization settings"""
         if self.current_data is None:
             return
-        
+
         try:
             if self.normalization_enabled:
-                # Apply shift to white image
                 shifted_white = self._apply_shift(self.current_white, self.shift_x, self.shift_y)
-                
-                # Perform division with small epsilon to avoid division by zero
+
                 epsilon = 1e-10
                 self.result_image = self.current_data / (shifted_white + epsilon)
-                
-                # Replace infinities and NaNs
+
                 self.result_image = np.nan_to_num(self.result_image, nan=0.0, posinf=0.0, neginf=0.0)
             else:
-                # Show raw data only
                 self.result_image = self.current_data.copy()
-            
-            # Update statistics
+
             self._update_statistics()
-            
-            # Apply contrast settings
+
             self._apply_contrast_settings()
             
         except Exception as e:
@@ -780,25 +749,22 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         """Apply x and y shift to an image"""
         if shift_x == 0 and shift_y == 0:
             return image
-        
-        # Create shifted image
+
         shifted = np.zeros_like(image)
-        
-        # Calculate source and destination regions
+
         src_x_start = max(0, -shift_x)
         src_x_end = image.shape[1] - max(0, shift_x)
         src_y_start = max(0, -shift_y)
         src_y_end = image.shape[0] - max(0, shift_y)
-        
+
         dst_x_start = max(0, shift_x)
         dst_x_end = image.shape[1] - max(0, -shift_x)
         dst_y_start = max(0, shift_y)
         dst_y_end = image.shape[0] - max(0, -shift_y)
-        
-        # Copy shifted data
+
         shifted[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = \
             image[src_y_start:src_y_end, src_x_start:src_x_end]
-        
+
         return shifted
     
     def _on_slider_changed(self, value):
@@ -808,28 +774,23 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     def _on_normalization_changed(self, state):
         """Handle normalization checkbox change"""
         self.normalization_enabled = (state == QtCore.Qt.Checked)
-        
-        # Update mode label
+
         if self.normalization_enabled:
             self.mode_label.setText("Mode: <b>Division (data / data_white)</b>")
         else:
             self.mode_label.setText("Mode: <b>Raw Data Only</b>")
-        
-        # Update display
+
         self._update_display()
     
     def _on_contrast_changed(self, index):
         """Handle contrast mode change"""
-        # Show/hide manual controls
         is_manual = (index == 5)
         self.manual_controls.setVisible(is_manual)
-        
-        # If switching to manual, set initial values from current image
+
         if is_manual and self.result_image is not None:
             self.min_spin.setValue(float(np.min(self.result_image)))
             self.max_spin.setValue(float(np.max(self.result_image)))
-        
-        # Update display
+
         self._update_display()
     
     def _on_manual_levels_changed(self):
@@ -857,20 +818,17 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         """Handle keyboard events for shifting"""
         if self.current_data is None:
             return
-        
-        # Only allow shifting when normalization is enabled
+
         if not self.normalization_enabled:
             super().keyPressEvent(event)
             return
-        
-        # Determine step size based on modifiers
+
         step = 1
         if event.modifiers() & QtCore.Qt.ShiftModifier:
             step = 10
         elif event.modifiers() & QtCore.Qt.ControlModifier:
             step = 50
-        
-        # Handle arrow keys
+
         if event.key() == QtCore.Qt.Key_Left:
             self.shift_x -= step
             self._update_shift_labels()

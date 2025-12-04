@@ -7,7 +7,6 @@ Allows users to define custom processing functions that operate on the
 image stream in real-time, just before visualization.
 """
 
-import sys
 import logging
 from typing import Optional, Callable
 import numpy as np
@@ -27,15 +26,11 @@ class PythonConsole(QtWidgets.QWidget):
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)
         self.logger = logger
-        
-        # Processing function (called on each frame)
+
         self.process_func: Optional[Callable] = None
         self.enabled = False
-        
-        # Build UI
+
         self._build_ui()
-        
-        # Default template
         self._set_default_template()
     
     def _build_ui(self):
@@ -192,49 +187,44 @@ def process(img):
     def _execute_code(self):
         """Compile and activate the user's processing function"""
         code = self.code_editor.toPlainText()
-        
+
         if not code.strip():
             self._log_status("⚠ No code to execute", error=True)
             return
-        
+
         try:
-            # Create namespace with useful imports
             namespace = {
                 'np': np,
                 'numpy': np,
             }
-            
-            # Try to import optional packages
+
             try:
                 import scipy
                 import scipy.ndimage
                 namespace['scipy'] = scipy
             except ImportError:
                 pass
-            
+
             try:
                 import cv2
                 namespace['cv2'] = cv2
             except ImportError:
                 pass
-            
+
             try:
                 import skimage
                 namespace['skimage'] = skimage
             except ImportError:
                 pass
-            
-            # Execute user code
+
             exec(code, namespace)
-            
-            # Extract the 'process' function
+
             if 'process' not in namespace:
                 self._log_status("⚠ ERROR: No 'process' function found in code", error=True)
                 return
-            
+
             self.process_func = namespace['process']
-            
-            # Test it with a dummy image
+
             try:
                 test_img = np.random.rand(10, 10).astype(np.float32)
                 result = self.process_func(test_img)
@@ -307,7 +297,6 @@ def process(img):
         if not file_path:
             return
 
-        # Add .py extension if not present
         if not file_path.endswith('.py'):
             file_path += '.py'
 
@@ -357,21 +346,19 @@ def process(img):
         
         try:
             result = self.process_func(img)
-            
-            # Validate result
+
             if not isinstance(result, np.ndarray):
                 self._log_status("⚠ Function returned non-array. Disabling.", error=True)
                 self.enabled = False
                 self.chk_enable.setChecked(False)
                 return img
-            
+
             return result
         
         except Exception as e:
             self._log_status(f"⚠ RUNTIME ERROR: {str(e)}", error=True)
             if self.logger:
                 self.logger.error("Console processing error: %s", e)
-            # Disable on error to prevent spam
             self.enabled = False
             self.chk_enable.setChecked(False)
             return img

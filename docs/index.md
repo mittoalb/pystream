@@ -7,10 +7,11 @@ PyStream is a Python package for real-time image streaming, processing, and anal
 ## Features
 
 - **Real-time Streaming**: Live image visualization from EPICS PVs
-- **Image Analysis**: Information metrics, quality assessment, focus detection
+- **Image Analysis**: Information metrics, quality assessment, focus detection, distance measurement
 - **Motor Control**: Automated mosaic scanning and alignment
 - **HDF5 Tools**: Virtual loading and flat-field correction
 - **Plugin Architecture**: Extensible processing pipeline
+- **Beamlines System**: Auto-discovery of beamline-specific tools
 
 ## Contents
 
@@ -19,5 +20,6 @@ PyStream is a Python package for real-time image streaming, processing, and anal
 
 quickstart
 plugins/index
+beamlines/index
 api
 ```
