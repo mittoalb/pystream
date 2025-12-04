@@ -598,6 +598,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
                         if hasattr(module, 'MotorScanDialog'):
                             btn.clicked.connect(self._open_motor_scan)
+                        elif hasattr(module, 'SoftBPMDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_softbpm(m))
                         else:
                             btn.setEnabled(False)
                             btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
@@ -1625,6 +1627,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.motor_scan_dialog.show()
         self.motor_scan_dialog.raise_()
         self.motor_scan_dialog.activateWindow()
+
+    def _open_softbpm(self, module):
+        """Open the SoftBPM dialog"""
+        if not hasattr(self, 'softbpm_dialog') or self.softbpm_dialog is None:
+            self.softbpm_dialog = module.SoftBPMDialog(parent=self, logger=LOGGER)
+        self.softbpm_dialog.show()
+        self.softbpm_dialog.raise_()
+        self.softbpm_dialog.activateWindow()
 
     def _open_viewer(self):
         """Open a standalone viewer window"""
