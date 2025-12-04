@@ -445,20 +445,24 @@ class SoftBPMThread(QtCore.QThread):
         self.running = False
         self.logger = logging.getLogger(__name__)
 
-        # Create PVA channel for image data (reuse for performance)
+        # PVA channel will be created in the worker thread
         self.image_channel = None
         self.last_image_id = None  # Track last processed image ID to avoid reprocessing
-        try:
-            self.image_channel = pva.Channel(self.image_pv)
-            self.logger.info(f"PVA channel created for {self.image_pv}")
-        except Exception as e:
-            self.logger.warning(f"Failed to create PVA channel: {e}, will use fallback")
 
     def run(self):
         """Main monitoring loop."""
         self.running = True
         mode_str = "[TEST MODE - Motors disabled]" if self.test_mode else "[ACTIVE - Motors enabled]"
         self.log_message.emit(f"Starting monitoring loop {mode_str}")
+
+        # Create PVA channel in worker thread (not GUI thread)
+        try:
+            self.image_channel = pva.Channel(self.image_pv)
+            self.log_message.emit(f"✓ PVA channel created for {self.image_pv}")
+            self.logger.info(f"PVA channel created for {self.image_pv}")
+        except Exception as e:
+            self.log_message.emit(f"✗ Failed to create PVA channel: {e}, will use fallback")
+            self.logger.warning(f"Failed to create PVA channel: {e}, will use fallback")
 
         while self.running:
             try:
@@ -603,18 +607,25 @@ class SoftBPMThread(QtCore.QThread):
             # This actively fetches the current image from the PV every time
             if self.image_channel is not None:
                 try:
+                    self.logger.info(f"Attempting PVA get() on {self.image_pv}...")
+
                     # Get data from PV - note this returns the LAST PUBLISHED image
                     # which may be the same as last time if camera hasn't published new data
                     pv_data = self.image_channel.get()
+
+                    self.logger.info("✓ PVA get() returned successfully, checking structure...")
+                    self.logger.info(f"PV data keys: {list(pv_data.getStructureDict().keys())}")
 
                     # Get unique image ID to detect new images
                     image_id = None
                     if 'uniqueId' in pv_data:
                         image_id = int(pv_data['uniqueId'])
+                        self.logger.info(f"Found uniqueId: {image_id}")
                     elif 'timeStamp' in pv_data:
                         # Use timestamp as fallback unique ID
                         ts = pv_data['timeStamp']
                         image_id = ts.get('secondsPastEpoch', 0) * 1000000000 + ts.get('nanoSeconds', 0)
+                        self.logger.info(f"Using timestamp as ID: {image_id}")
 
                     # Extract image array from NTNDArray structure
                     # Based on how pystream.py handles NTNDArray data
@@ -645,7 +656,9 @@ class SoftBPMThread(QtCore.QThread):
                                 return (image_id, mean_intensity)
 
                 except Exception as pva_error:
-                    self.logger.warning(f"PVA fetch failed: {pva_error}")
+                    import traceback
+                    self.logger.warning(f"✗ PVA fetch failed: {pva_error}")
+                    self.logger.warning(f"Traceback: {traceback.format_exc()}")
 
             # Method 2: Fallback to parent viewer's cached image
             # This ensures we still work if PVA fails
