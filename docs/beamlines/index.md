@@ -79,10 +79,13 @@ To add your own beamline-specific tools:
 
 ### bl32ID
 
-Advanced Photon Source beamline 32-ID with the following tools:
+Advanced Photon Source beamline 32-ID with specialized tools for tomography and imaging:
 
+- **Detector Control**: Manage camera binning and ROI settings
+- **SoftBPM**: Software beam position monitor with automatic motor adjustment
 - **Mosalign**: 2D motor scanning with image stitching and tomoscan integration
-  - See [Mosalign Documentation](../plugins/mosalign.md) for details
+
+See [bl32ID Documentation](bl32ID.md) for complete details on all plugins.
 
 ## Auto-Discovery Mechanism
 
