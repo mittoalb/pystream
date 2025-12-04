@@ -13,17 +13,15 @@ Real-time monitoring of image information content metrics:
 - Mutual information vs reference (optional)
 """
 
-import os
 import time
 import threading
-import queue
-from typing import Optional, Tuple
+from typing import Optional
 import logging
 
 import numpy as np
 import pvaccess as pva
 
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 
 try:
@@ -45,7 +43,6 @@ except ImportError:
 def to_gray_float01(arr: np.ndarray) -> np.ndarray:
     """Convert image array to grayscale float32 in [0,1]."""
     if arr.ndim == 3 and arr.shape[-1] in (3, 4):
-        # RGB/RGBA to grayscale
         if arr.shape[-1] == 4:
             arr = arr[..., :3]
         if arr.dtype.kind in "ui":
@@ -54,7 +51,6 @@ def to_gray_float01(arr: np.ndarray) -> np.ndarray:
             arrf = arr.astype(np.float32)
         g = 0.2126 * arrf[..., 0] + 0.7152 * arrf[..., 1] + 0.0722 * arrf[..., 2]
     else:
-        # Single channel
         g = arr.astype(np.float32)
         if arr.dtype.kind in "ui":
             info = np.iinfo(arr.dtype)
@@ -95,30 +91,28 @@ def zlib_compressibility(img: np.ndarray, bins: int = 256) -> float:
 def laplacian_variance(img: np.ndarray) -> float:
     """Variance of Laplacian (focus/texture measure)."""
     k = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)
-    
+
     if _HAS_SCIPY:
         L = conv2(img, k, mode='same', boundary='symm')
     else:
-        # Fallback without scipy
         pad = np.pad(img, 1, mode='edge')
-        L = (pad[1:-1, 2:] + pad[1:-1, :-2] + 
+        L = (pad[1:-1, 2:] + pad[1:-1, :-2] +
              pad[2:, 1:-1] + pad[:-2, 1:-1] - 4 * pad[1:-1, 1:-1])
-    
+
     return float(np.var(L, dtype=np.float64))
 
 
 def spectral_entropy(img: np.ndarray, eps: float = 1e-12) -> float:
     """Entropy of normalized power spectrum."""
     h, w = img.shape
-    
-    # Apply Hann window
+
     wy = np.hanning(h)[:, None]
     wx = np.hanning(w)[None, :]
     win = wy * wx
-    
+
     F = fft2(img * win)
     P = np.abs(F) ** 2
-    P[0, 0] = 0.0  # Remove DC
+    P[0, 0] = 0.0
     
     S = P / (P.sum() + eps)
     S = S[S > 0]
@@ -129,75 +123,63 @@ def spectral_entropy(img: np.ndarray, eps: float = 1e-12) -> float:
 def spectral_centroid(img: np.ndarray) -> float:
     """Spectral centroid - center of mass of frequency spectrum (normalized 0-1)."""
     h, w = img.shape
-    
-    # Apply Hann window
+
     wy = np.hanning(h)[:, None]
     wx = np.hanning(w)[None, :]
     win = wy * wx
-    
+
     F = fft2(img * win)
     P = np.abs(F) ** 2
-    P[0, 0] = 0.0  # Remove DC
-    
-    # Frequency coordinates
+    P[0, 0] = 0.0
+
     fy = np.fft.fftfreq(h)
     fx = np.fft.fftfreq(w)
-    
-    # Distance from DC (0,0) for each frequency
+
     FY, FX = np.meshgrid(fy, fx, indexing='ij')
     freq_dist = np.sqrt(FY**2 + FX**2)
-    
-    # Weighted average frequency
+
     total_power = P.sum()
     if total_power > 0:
         centroid = np.sum(freq_dist * P) / total_power
     else:
         centroid = 0.0
-    
-    # Normalize to 0-1 (max frequency is ~0.707 for Nyquist)
+
     return float(centroid / 0.707)
 
 
 def high_frequency_energy(img: np.ndarray, threshold: float = 0.3) -> float:
     """Ratio of high-frequency energy to total energy (sharpness indicator)."""
     h, w = img.shape
-    
-    # Apply Hann window
+
     wy = np.hanning(h)[:, None]
     wx = np.hanning(w)[None, :]
     win = wy * wx
-    
+
     F = fft2(img * win)
     P = np.abs(F) ** 2
-    P[0, 0] = 0.0  # Remove DC
-    
-    # Frequency coordinates
+    P[0, 0] = 0.0
+
     fy = np.fft.fftfreq(h)
     fx = np.fft.fftfreq(w)
     FY, FX = np.meshgrid(fy, fx, indexing='ij')
     freq_dist = np.sqrt(FY**2 + FX**2)
-    
-    # High frequency mask (beyond threshold)
+
     high_freq_mask = freq_dist > threshold
-    
+
     total_energy = P.sum()
     if total_energy > 0:
         high_freq_energy = P[high_freq_mask].sum()
         ratio = high_freq_energy / total_energy
     else:
         ratio = 0.0
-    
+
     return float(ratio)
 
 
 def gradient_magnitude(img: np.ndarray) -> float:
     """Mean gradient magnitude (edge/detail content)."""
-    # Compute gradients
     gy, gx = np.gradient(img)
-    
-    # Magnitude
     mag = np.sqrt(gx**2 + gy**2)
-    
     return float(np.mean(mag))
 
 
@@ -205,30 +187,25 @@ def spectral_flatness(img: np.ndarray, eps: float = 1e-12) -> float:
     """Spectral flatness (Wiener entropy) - ratio of geometric to arithmetic mean.
     Close to 1 = noise-like (flat spectrum), close to 0 = tonal (peaked spectrum)."""
     h, w = img.shape
-    
-    # Apply Hann window
+
     wy = np.hanning(h)[:, None]
     wx = np.hanning(w)[None, :]
     win = wy * wx
-    
+
     F = fft2(img * win)
     P = np.abs(F) ** 2
-    P[0, 0] = 0.0  # Remove DC
+    P[0, 0] = 0.0
     P = P.ravel()
-    P = P[P > eps]  # Non-zero values
-    
+    P = P[P > eps]
+
     if len(P) == 0:
         return 0.0
-    
-    # Geometric mean
+
     log_P = np.log(P + eps)
     geom_mean = np.exp(np.mean(log_P))
-    
-    # Arithmetic mean
     arith_mean = np.mean(P)
-    
     flatness = geom_mean / (arith_mean + eps)
-    
+
     return float(flatness)
 
 
@@ -254,11 +231,11 @@ def mutual_information(img_a: np.ndarray, img_b: np.ndarray, bins: int = 64) -> 
     return float(Ha + Hb - Hab)
 
 
-def compute_all_metrics(img: np.ndarray, bins: int = 256, 
+def compute_all_metrics(img: np.ndarray, bins: int = 256,
                        ref: Optional[np.ndarray] = None) -> dict:
     """Compute all information metrics for an image."""
     img_gray = to_gray_float01(img)
-    
+
     metrics = {
         'shannon_entropy': shannon_entropy_bits(img_gray, bins),
         'normalized_entropy': normalized_entropy(img_gray, bins),
@@ -270,7 +247,7 @@ def compute_all_metrics(img: np.ndarray, bins: int = 256,
         'gradient_magnitude': gradient_magnitude(img_gray),
         'spectral_flatness': spectral_flatness(img_gray),
     }
-    
+
     if ref is not None:
         ref_gray = to_gray_float01(ref)
         if ref_gray.shape == img_gray.shape:
@@ -278,18 +255,16 @@ def compute_all_metrics(img: np.ndarray, bins: int = 256,
                 img_gray, ref_gray, bins=min(64, bins // 2))
         else:
             metrics['mutual_information'] = 0.0
-    
-    # Compute interest score (0-1 scale, higher = more interesting)
-    # Combines multiple metrics weighted by importance
+
     interest = 0.0
-    interest += metrics['normalized_entropy'] * 0.25  # Information content
-    interest += metrics['laplacian_variance'] / 500.0 * 0.25  # Focus/sharpness (normalized)
-    interest += metrics['spectral_entropy'] / 15.0 * 0.20  # Frequency richness
-    interest += metrics['high_frequency_energy'] * 0.15  # Detail content
-    interest += metrics['gradient_magnitude'] * 2.0 * 0.15  # Edge content
-    
+    interest += metrics['normalized_entropy'] * 0.25
+    interest += metrics['laplacian_variance'] / 500.0 * 0.25
+    interest += metrics['spectral_entropy'] / 15.0 * 0.20
+    interest += metrics['high_frequency_energy'] * 0.15
+    interest += metrics['gradient_magnitude'] * 2.0 * 0.15
+
     metrics['interest_score'] = min(1.0, max(0.0, float(interest)))
-    
+
     return metrics
 
 
@@ -302,7 +277,7 @@ def pva_get_ndarray(det_pv):
     ch = pva.Channel(det_pv)
     st = ch.get()
     val = st['value'][0]
-    
+
     for key in ('ushortValue', 'shortValue', 'intValue', 'floatValue',
                 'doubleValue', 'ubyteValue', 'byteValue'):
         if key in val:
@@ -310,16 +285,14 @@ def pva_get_ndarray(det_pv):
             break
     else:
         raise RuntimeError("Unsupported NTNDArray type")
-    
-    # Try to get dimensions from PVA structure
+
     dims = []
     try:
         if 'dimension' in st:
             dims = st['dimension']
     except Exception:
         pass
-    
-    # Validate dimensions match array size
+
     if len(dims) >= 2:
         try:
             h = int(dims[0]['size'])
@@ -345,20 +318,17 @@ def pva_get_ndarray(det_pv):
     for h, w in common_shapes:
         if h * w == size:
             return flat.reshape(h, w)
-    
-    # Last resort: square or closest to square
+
     side = int(np.sqrt(size))
     if side * side == size:
         return flat.reshape(side, side)
-    
-    # Find closest factors
+
     for i in range(side, 0, -1):
         if size % i == 0:
             h = i
             w = size // i
             return flat.reshape(h, w)
-    
-    # Give up, return 1D
+
     raise RuntimeError(f"Cannot determine shape for array of size {size}")
 
 
@@ -376,15 +346,13 @@ class ImageInfoDialog(QtWidgets.QDialog):
         self.logger = logger
         self.setWindowTitle("Image Information Metrics")
         self.setGeometry(100, 100, 1200, 800)
-        
-        # State
+
         self._running = False
         self._worker_thread = None
         self._reference_frame = None
         self._frame_count = 0
         self._start_time = None
-        
-        # Data storage
+
         self.max_points = 1000
         self.times = []
         self.data = {
@@ -400,32 +368,27 @@ class ImageInfoDialog(QtWidgets.QDialog):
             'mutual_information': [],
             'interest_score': [],
         }
-        
-        # Track best frame
+
         self.best_frame_idx = -1
         self.best_interest_score = 0.0
-        
-        # Track ALL interesting frames (above threshold)
-        self.interesting_frames = []  # List of (frame_idx, time, interest_score, metrics_dict)
-        self.interest_threshold = 0.6  # Configurable threshold
-        
-        # Tomography mode
+
+        self.interesting_frames = []
+        self.interest_threshold = 0.6
+
         self.tomography_mode = False
-        self.start_angle = 0.0  # degrees
-        self.angular_spacing = 0.5  # degrees per frame
-        
-        # Tomography angular projection tracking
+        self.start_angle = 0.0
+        self.angular_spacing = 0.5
+
         self.tomography_enabled = False
         self.angle_start = 0.0
         self.angle_end = 360.0
-        self.angular_spacing = 0.5  # degrees per frame
+        self.angular_spacing = 0.5
         
         self._build_ui()
         self.metrics_updated.connect(self._on_metrics_update)
         
     def _build_ui(self):
         """Build the UI with dark theme"""
-        # Apply dark theme
         self.setStyleSheet("""
             QDialog {
                 background-color: #1e1e1e;

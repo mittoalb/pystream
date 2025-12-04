@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# mosaic.sh - Mosaic acquisition script using tomoscan mosaic command
+# Parameters are passed from the Python GUI
+
+# Check if all required parameters are provided
+if [ $# -lt 4 ]; then
+    echo "Error: Missing parameters!"
+    echo "Usage: $0 <h_steps> <v_steps> <h_step_size> <v_step_size> [tomoscan_prefix] [tomoscan_path] [h_start] [v_start]"
+    echo "Example: $0 3 3 0.2 0.2 32id:TomoScan: tomoscan 0 0"
+    exit 1
+fi
+
+# Read parameters from command line arguments
+H_STEPS=$1
+V_STEPS=$2
+H_STEP_SIZE=$3
+V_STEP_SIZE=$4
+TOMOSCAN_PREFIX=${5:-"32id:TomoScan:"}  # Default prefix if not provided
+TOMOSCAN_CMD=${6:-"tomoscan"}  # Default command if not provided
+H_START=${7:-0}  # Default horizontal start position if not provided
+V_START=${8:-0}  # Default vertical start position if not provided
+
+echo "Starting mosaic acquisition with parameters:"
+echo "Grid size: ${H_STEPS}x${V_STEPS}"
+echo "Start positions: X=${H_START}mm, Y=${V_START}mm"
+echo "Step sizes: X=${H_STEP_SIZE}mm, Y=${V_STEP_SIZE}mm"
+echo "Tomoscan prefix: ${TOMOSCAN_PREFIX}"
+echo "Tomoscan command: ${TOMOSCAN_CMD}"
+echo "Total scans: $((H_STEPS * V_STEPS))"
+
+# Activate tomoscan conda environment
+echo "Activating tomoscan conda environment..."
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate tomoscan
+
+# Run the tomoscan mosaic command
+echo "Executing tomoscan mosaic command..."
+
+${TOMOSCAN_CMD} mosaic \
+    --scan-type Mosaic \
+    --tomoscan-prefix "${TOMOSCAN_PREFIX}" \
+    --horizontal-steps ${H_STEPS} \
+    --vertical-steps ${V_STEPS} \
+    --horizontal-step-size ${H_STEP_SIZE} \
+    --vertical-step-size ${V_STEP_SIZE} \
+    --horizontal-start ${H_START} \
+    --vertical-start ${V_START} \
+    --verbose
+
+# Check if the command was successful
+if [ $? -eq 0 ]; then
+    echo "Mosaic acquisition completed successfully!"
+else
+    echo "Error: Mosaic acquisition failed!"
+    exit 1
+fi

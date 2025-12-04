@@ -1,12 +1,14 @@
 # Line Profile Plugin
 
-ImageJ-style line tool for drawing lines and extracting intensity profiles from images.
+ImageJ-style line tool for drawing lines, measuring distances, and extracting intensity profiles from images.
 
 ## Overview
 
 The Line Profile plugin provides:
 - Interactive line drawing with endpoint and center handles
 - **Shift-key constraint** for horizontal/vertical lines (ImageJ-style)
+- **Distance measurement** in multiple units (pixels, micrometers, millimeters)
+- **ΔX and ΔY measurements** for dimensional analysis
 - Real-time line profile extraction
 - Comprehensive line statistics (length, angle, intensity profile)
 - Yellow visual styling for high visibility
@@ -51,16 +53,25 @@ This mimics ImageJ's line tool behavior for precise measurements.
 
 Real-time statistics for the line:
 
+**Distance Measurements**:
+- **Length**: Total line length displayed in three units:
+  - Pixels (px) - exact pixel distance
+  - Micrometers (µm) - physical distance (requires pixel_size_um)
+  - Millimeters (mm) - physical distance in millimeters
+- **ΔX**: Horizontal component in all three units
+- **ΔY**: Vertical component in all three units
+
 **Line Geometry**:
 - Start point: (x₁, y₁) coordinates
 - End point: (x₂, y₂) coordinates
-- Length: Euclidean distance in pixels
 - Angle: 0-360° (0° = right, 90° = down)
 
 **Intensity Profile**:
 - Point count: Number of sampled points along the line
 - Min, Max: Intensity range along the line
 - Mean, Std: Statistical measures of the profile
+
+**Note**: Physical distance measurements (µm, mm) require setting the pixel size. If not set, only pixel measurements are shown.
 
 ## Usage
 
@@ -89,8 +100,12 @@ line_manager = LineProfileManager(
     image_view=image_view,
     stats_label=stats_label,
     handle_size=20,
-    line_pen_width=3
+    line_pen_width=3,
+    pixel_size_um=1.3  # Set pixel size for physical distance measurements
 )
+
+# Set or update pixel size
+line_manager.set_pixel_size(1.3)  # 1.3 µm/pixel
 
 # Toggle visibility
 line_manager.toggle(QtCore.Qt.Checked)
@@ -254,6 +269,12 @@ Convention:
 - **Precision**: Sub-pixel positioning supported, rounded for display
 
 ## Use Cases
+
+### Distance Measurement
+- **Measure feature sizes**: Particle diameters, cell dimensions, structural features
+- **Calibrated measurements**: Physical distances in micrometers and millimeters
+- **Component separation**: ΔX and ΔY measurements for dimensional analysis
+- **Multi-scale analysis**: View measurements in pixels, µm, and mm simultaneously
 
 ### Scientific Measurements
 - Measure distance between features

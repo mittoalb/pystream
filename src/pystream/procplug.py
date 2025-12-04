@@ -49,7 +49,6 @@ class ProcessorPipeline:
         return cls(processors_dir, specs, hot_reload=hot_reload)
 
     def _module_path(self, module: str) -> str:
-        # Allow absolute / relative .py path or module name inside processors_dir
         if module.endswith(".py"):
             return module if os.path.isabs(module) else os.path.join(self.processors_dir, module)
         return os.path.join(self.processors_dir, module + ".py")

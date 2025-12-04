@@ -27,23 +27,19 @@ from typing import Optional, Tuple, Dict
 import numpy as np
 import pvaccess as pva
 
-# PyQt5
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 
-# PyQtGraph
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
 
-# Logger
 from .logger import setup_custom_logger, log_exception
 
-# Plugins
 from .plugins.roi import ROIManager
-from .plugins.mosalign import MotorScanDialog
 from .plugins.line import LineProfileManager
 from .plugins.ellipse import EllipseROIManager
 from .plugins.scalebar import ScaleBarManager, ScaleBarDialog
 from .plugins.console import ConsoleDialog
+from .beamlines.bl32ID.mosalign import MotorScanDialog
 
 
 LOGGER: Optional[logging.Logger] = None
@@ -160,8 +156,12 @@ def reshape_ntnda(ntnda) -> Tuple[int, np.ndarray, int, int, Optional[int], int,
         field_key = ntnda.getSelectedUnionFieldName()
         raw = ntnda['value'][0][field_key]
     except Exception:
-        field_key = next(iter(ntnda['value'][0].keys()))
-        raw = ntnda['value'][0][field_key]
+        try:
+            field_key = next(iter(ntnda['value'][0].keys()))
+            raw = ntnda['value'][0][field_key]
+        except (StopIteration, KeyError):
+            # Empty value dictionary - no data available
+            return (image_id, None, None, None, None, color_mode, '')
 
     if nDims == 0:
         return (image_id, None, None, None, None, color_mode, field_key)
@@ -269,12 +269,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         super().__init__()
         
         self.setWindowTitle("NTNDArray PyQtGraph Viewer")
-        
-        # Detect screen size for adaptive UI
+
         screen = QtWidgets.QApplication.desktop().availableGeometry()
         self.is_small_screen = screen.width() < 1600 or screen.height() < 1000
-        
-        # ===== INITIALIZE ALL ATTRIBUTES FIRST =====
+
         self.cfg = _load_config(defaults={"pv_name": pv_name or ""})
         
         self.max_fps = int(max_fps)
@@ -288,10 +286,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.last_draw = 0.0
         self.paused = False
 
-        # Console
         self.console_dialog = None
-        
-        # View/contrast state
+
         self.vmin = 0.0
         self.vmax = 1.0
         self.autoscale_enabled = True
@@ -301,69 +297,56 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.current_uid = -1
         self.fps_ema = None
         self._last_ts = time.time()
-        
-        # Autoscale cadence
+
         self._auto_every = max(1, int(auto_every))
         self._auto_cnt = 0
-        
-        # Flat-field
+
         self.flat = None
         self.apply_flat_enabled = False
         self._last_display_img = None
         self._work_f32 = None
-        
-        # Plugins
+
         self._use_plugins = PIPE is not None
-        
-        # Histogram throttling
+
         self._last_hist_t = 0.0
-        
-        # Crosshair
+
         self.crosshair_enabled = False
         self.crosshair_x = None
         self.crosshair_y = None
-        
-        # Recording
+
         self.recording = False
         self.recorded_frame_count = 0
         self.record_path = ""
         self.record_dir = ""
-        
-        # Initialize manager placeholders
+
         self.motor_scan_dialog = None
         self.roi_manager = None
         self.line_manager = None
 
-        # Scale bar
-        self.scalebar_manager = None  
+        self.scalebar_manager = None
         self.scalebar_dialog = None
 
-        # ===== NOW BUILD UI =====
         viewer_widget = self._build_ui()
         self.setCentralWidget(viewer_widget)
-        
-        # ===== POST-UI INITIALIZATION =====
-        # Initialize ROI manager
+
         self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
         if hasattr(self, 'btn_reset_roi'):
             self.btn_reset_roi.clicked.connect(self.roi_manager.reset)
 
-        # Initialize Ellipse ROI manager
         self.ellipse_roi_manager = EllipseROIManager(
-            self.image_view, 
-            self.lbl_ellipse_info, 
+            self.image_view,
+            self.lbl_ellipse_info,
             logger=LOGGER
         )
         self.chk_ellipse.stateChanged.connect(self.ellipse_roi_manager.toggle)
         if hasattr(self, 'btn_reset_ellipse'):
             self.btn_reset_ellipse.clicked.connect(self.ellipse_roi_manager.reset)
 
-        # Initialize scale bar manager
         self.scalebar_manager = ScaleBarManager(
             self.image_view,
             logger=LOGGER,
-            pixel_size=1.0,  # Default 1.0 nm/px
+            pixel_size=1.0,
             unit="nm",
             position="bottom-right",
             color="white"
@@ -375,33 +358,26 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
         if hasattr(self, 'btn_reset_line'):
             self.btn_reset_line.clicked.connect(self.line_manager.reset)
-        
-        # Connect signal
+
         self.image_ready.connect(self._update_image_slot)
-        
-        # Start queue pump timer
+
         self.pump_timer = QtCore.QTimer()
         self.pump_timer.timeout.connect(self._pump_queue)
         self.pump_timer.start(5)
-        
-        # Apply adaptive window sizing
+
         self._apply_adaptive_sizing(screen)
-        
-        # Auto-connect if PV present
+
         if self.pv_entry.text().strip():
             self._connect_pv()
     
     def _apply_adaptive_sizing(self, screen):
         """Apply window sizing based on screen size"""
-        # Get saved state from config
         saved_geom = self.cfg.get("window_geometry", None)
         saved_maximized = self.cfg.get("window_maximized", False)
-        
+
         if saved_maximized:
-            # User had it maximized last time
             self.showMaximized()
         elif saved_geom and len(saved_geom) == 4:
-            # Restore saved position/size, but ensure it fits on current screen
             x, y, w, h = saved_geom
             w = min(w, screen.width())
             h = min(h, screen.height())
@@ -409,30 +385,24 @@ class PvViewerApp(QtWidgets.QMainWindow):
             y = max(screen.y(), min(y, screen.y() + screen.height() - h))
             self.setGeometry(x, y, w, h)
         else:
-            # First run or no saved state
             if self.is_small_screen:
-                # Small screen - start maximized
                 self.showMaximized()
             else:
-                # Large screen - use 90% of available space, centered
                 width = min(1400, int(screen.width() * 0.9))
                 height = min(900, int(screen.height() * 0.9))
                 x = screen.x() + (screen.width() - width) // 2
                 y = screen.y() + (screen.height() - height) // 2
                 self.setGeometry(x, y, width, height)
-        
-        # Apply compact mode if needed
+
         if self.is_small_screen:
             self._apply_compact_mode()
     
     def _apply_compact_mode(self):
         """Apply compact styling for small screens"""
         try:
-            # Smaller left panel
             if hasattr(self, 'left_panel'):
                 self.left_panel.setMaximumWidth(280)
-            
-            # Smaller histogram
+
             if hasattr(self, 'hist_widget'):
                 self.hist_widget.setMinimumHeight(120)
                 self.hist_widget.setMaximumHeight(150)
@@ -450,7 +420,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Top control bar - simple single row
         top_bar = self._create_top_bar()
         main_layout.addWidget(top_bar)
-        
+
+        # Beamlines toolbar (hidden by default)
+        self.beamlines_bar = self._create_beamlines_bar()
+        self.beamlines_bar.setVisible(False)
+        main_layout.addWidget(self.beamlines_bar)
+
         # Splitter with THREE panels: control panel, left panel, image view
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -548,7 +523,27 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.chk_autoscale.setChecked(True)
         self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
         top_layout.addWidget(self.chk_autoscale)
-        
+
+        btn_reset_view = QtWidgets.QPushButton("Reset View")
+        btn_reset_view.setMaximumWidth(90)
+        btn_reset_view.setToolTip("Reset zoom and pan to fit image")
+        btn_reset_view.clicked.connect(self._reset_view)
+        top_layout.addWidget(btn_reset_view)
+
+        btn_beamlines = QtWidgets.QPushButton("⚡ Beamlines")
+        btn_beamlines.setCheckable(True)
+        btn_beamlines.setMaximumWidth(100)
+        btn_beamlines.setToolTip("Show/hide beamline tools")
+        btn_beamlines.clicked.connect(self._toggle_beamlines_bar)
+        top_layout.addWidget(btn_beamlines)
+        self.btn_beamlines = btn_beamlines
+
+        btn_viewer = QtWidgets.QPushButton("HDF5 Viewer")
+        btn_viewer.setMaximumWidth(100)
+        btn_viewer.setToolTip("Open HDF5 image divider/viewer")
+        btn_viewer.clicked.connect(self._open_viewer)
+        top_layout.addWidget(btn_viewer)
+
         top_layout.addStretch()
         
         # Status labels
@@ -561,7 +556,75 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.lbl_uid)
         
         return top_bar
-    
+
+    def _create_beamlines_bar(self):
+        """Create horizontal beamlines toolbar that auto-discovers plugins"""
+        import importlib
+        import pkgutil
+        from pathlib import Path
+
+        bar = QtWidgets.QWidget()
+        bar.setMaximumHeight(50)
+        bar_layout = QtWidgets.QHBoxLayout(bar)
+        bar_layout.setSpacing(10)
+        bar_layout.setContentsMargins(5, 5, 5, 5)
+
+        try:
+            beamlines_path = Path(__file__).parent / "beamlines"
+            if not beamlines_path.exists():
+                bar_layout.addWidget(QtWidgets.QLabel("No beamlines found"))
+                return bar
+
+            for beamline_dir in sorted(beamlines_path.iterdir()):
+                if not beamline_dir.is_dir() or beamline_dir.name.startswith('_'):
+                    continue
+
+                beamline_name = beamline_dir.name
+                group_label = QtWidgets.QLabel(f"<b>{beamline_name}:</b>")
+                bar_layout.addWidget(group_label)
+
+                for plugin_file in sorted(beamline_dir.glob("*.py")):
+                    if plugin_file.name.startswith('_'):
+                        continue
+
+                    plugin_name = plugin_file.stem
+                    module_path = f".beamlines.{beamline_name}.{plugin_name}"
+
+                    try:
+                        module = importlib.import_module(module_path, package=__package__)
+
+                        btn = QtWidgets.QPushButton(plugin_name.capitalize())
+                        btn.setMaximumWidth(120)
+
+                        if hasattr(module, 'MotorScanDialog'):
+                            btn.clicked.connect(self._open_motor_scan)
+                        else:
+                            btn.setEnabled(False)
+                            btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
+
+                        bar_layout.addWidget(btn)
+
+                    except Exception as e:
+                        if LOGGER:
+                            LOGGER.warning(f"Failed to load beamline plugin {module_path}: {e}")
+
+                bar_layout.addWidget(QtWidgets.QLabel("|"))
+
+        except Exception as e:
+            if LOGGER:
+                LOGGER.error(f"Failed to create beamlines bar: {e}")
+            bar_layout.addWidget(QtWidgets.QLabel("Error loading beamlines"))
+
+        bar_layout.addStretch()
+        return bar
+
+    def _toggle_beamlines_bar(self):
+        """Toggle visibility of beamlines toolbar"""
+        if hasattr(self, 'beamlines_bar'):
+            is_visible = self.beamlines_bar.isVisible()
+            self.beamlines_bar.setVisible(not is_visible)
+            self.btn_beamlines.setChecked(not is_visible)
+
     def _create_control_panel(self):
         """Create collapsible control panel with all settings"""
         panel = QtWidgets.QWidget()
@@ -593,11 +656,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         view_group = QtWidgets.QGroupBox("View")
         view_layout = QtWidgets.QVBoxLayout()
         view_layout.setSpacing(4)
-        
-        btn_home = QtWidgets.QPushButton("Reset View")
-        btn_home.clicked.connect(self._reset_view)
-        view_layout.addWidget(btn_home)
-        
+
         self.chk_crosshair = QtWidgets.QCheckBox("Crosshair")
         self.chk_crosshair.stateChanged.connect(self._toggle_crosshair)
         view_layout.addWidget(self.chk_crosshair)
@@ -692,11 +751,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_console = QtWidgets.QPushButton("Python Console")
         btn_console.clicked.connect(self._open_console)
         processing_layout.addWidget(btn_console)
-        
-        btn_motor_scan = QtWidgets.QPushButton("Mosalign")
-        btn_motor_scan.clicked.connect(self._open_motor_scan)
-        processing_layout.addWidget(btn_motor_scan)
-        
+
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
         
@@ -1570,7 +1625,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.motor_scan_dialog.show()
         self.motor_scan_dialog.raise_()
         self.motor_scan_dialog.activateWindow()
-  
+
+    def _open_viewer(self):
+        """Open a standalone viewer window"""
+        from .plugins.viewer import HDF5ImageDividerDialog
+        viewer_dialog = HDF5ImageDividerDialog(parent=self)
+        viewer_dialog.show()
+        viewer_dialog.raise_()
+        viewer_dialog.activateWindow()
+
     def closeEvent(self, event):
         # Stop recording if active
         if self.recording:

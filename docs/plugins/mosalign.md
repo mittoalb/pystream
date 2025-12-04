@@ -49,7 +49,7 @@ Set EPICS motor process variables:
 ### Scan Parameters
 
 For each axis (X and Y):
-- **Start**: Initial motor position (mm)
+- **Start**: Initial motor position (mm) - where the scan begins
 - **Step Size**: Distance between positions (mm)
 - **Steps**: Number of positions to scan
 
@@ -59,6 +59,8 @@ X: Start=-0.16, Step=4.0, Steps=2
 Y: Start=0.0, Step=1.4, Steps=3
 ```
 Creates a 2×3 grid (6 total positions)
+
+**Note**: The starting position is now properly passed to tomoscan mosaic command via the `--horizontal-start` and `--vertical-start` parameters, ensuring scans begin at the specified positions rather than defaulting to (0,0).
 
 ### Stitching Settings
 
@@ -101,6 +103,18 @@ Creates a 2×3 grid (6 total positions)
 - Triggers tomography acquisition at each grid position
 - Requires tomoscan CLI tool
 - **Tomoscan Prefix**: IOC prefix (e.g., `2bmb:TomoScan:`)
+
+The mosalign tool passes the following parameters to the tomoscan mosaic command:
+1. Horizontal steps
+2. Vertical steps
+3. Horizontal step size (mm)
+4. Vertical step size (mm)
+5. Tomoscan prefix
+6. Tomoscan configuration path
+7. Horizontal start position (mm)
+8. Vertical start position (mm)
+
+This ensures the mosaic scan starts at the correct position as specified in the GUI.
 
 ## Operation
 

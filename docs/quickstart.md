@@ -71,30 +71,59 @@ pystream --pv 2bmSP2:Pva1:Image --max-fps 0 --log-level DEBUG
 
 ---
 
+## User Interface
+
+### Top Toolbar
+
+The top toolbar contains frequently-used controls:
+- **Reset View**: Reset zoom and pan to default view
+- **Beamlines**: Toggle beamline-specific tools (auto-discovers plugins in beamlines folder)
+- **HDF5 Viewer**: Open HDF5 file viewer for offline image analysis
+
+### Beamlines Toolbar
+
+When enabled via the Beamlines button, a horizontal toolbar appears below the main toolbar showing beamline-specific plugins automatically discovered from the `beamlines/` directory. Each beamline (e.g., bl32ID) has its own section with dedicated tools like mosaic alignment.
+
+### Side Panel
+
+The side panel provides image controls and plugin settings for tools like crosshair, line profile, ROI, ellipse, scalebar, metrics, and console.
+
 ## Features
 
 ### Interactive Crosshair
-1. Check **“Crosshair”** in the toolbar  
-2. Click or drag on the image  
-3. X, Y position and pixel value displayed in the left panel  
+1. Check **"Crosshair"** in the side panel
+2. Click or drag on the image
+3. X, Y position and pixel value displayed in the left panel
 
 ### Recording
-1. Choose output directory  
-2. Set filename prefix (default: `frame`)  
-3. Click **Start Recording** → frames saved as `prefix_000001.tiff`, `prefix_000002.tiff`, …  
-4. Click **Stop Recording** to end  
+1. Choose output directory
+2. Set filename prefix (default: `frame`)
+3. Click **Start Recording** → frames saved as `prefix_000001.tiff`, `prefix_000002.tiff`, …
+4. Click **Stop Recording** to end
 
 ### Flat-Field Correction
-- **Capture**: save current frame as flat reference  
-- **Apply Flat**: toggle correction on/off  
-- **Load / Save**: import/export `.npy`  
+- **Capture**: save current frame as flat reference
+- **Apply Flat**: toggle correction on/off
+- **Load / Save**: import/export `.npy`
 - Formula: `I_norm = (I_raw / I_flat) * mean(I_flat)`
 
 ### Image Controls
-- Flip H/V, Transpose  
-- Manual or auto contrast  
-- Pause / Resume streaming  
-- Save single frame (`.npy`, `.png`)  
+- Flip H/V, Transpose
+- Manual or auto contrast
+- Pause / Resume streaming
+- Save single frame (`.npy`, `.png`)
+
+### Processing Plugins
+- **Python Console**: Write custom real-time processing functions with save/load capability
+- **Line Profile**: Distance measurement tool with physical units (px, µm, mm) and intensity profiles
+- **ROI**: Region of interest analysis
+- **Ellipse**: Elliptical region selection and analysis
+- **Scalebar**: Visual scale reference overlay
+- **Metrics**: Image quality and information metrics
+
+### Beamline-Specific Tools
+- **Mosalign** (bl32ID): 2D motor scanning with image stitching and tomoscan integration
+- Additional beamline tools are automatically discovered from the beamlines directory
 
 ---
 
@@ -164,12 +193,13 @@ pystream/
 
 ## Requirements
 
-- Python ≥ 3.8  
-- numpy ≥ 1.21  
-- PyQt5 ≥ 5.15  
-- pyqtgraph ≥ 0.13.0  
-- pvapy ≥ 5.6.0  
-- Pillow ≥ 9.0  
+- Python ≥ 3.8
+- numpy ≥ 1.21
+- PyQt5 ≥ 5.15
+- pyqtgraph ≥ 0.13.0
+- pvapy ≥ 5.6.0
+- Pillow ≥ 9.0
+- h5py ≥ 3.0
 
 ---
 

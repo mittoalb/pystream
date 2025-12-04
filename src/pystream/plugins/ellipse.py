@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets
 
 
 class EllipseROIManager:

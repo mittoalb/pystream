@@ -8,7 +8,7 @@ import logging
 from typing import Optional, Tuple
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 
 
 class LineProfileManager:
@@ -25,6 +25,7 @@ class LineProfileManager:
         *,
         handle_size: int = 20,
         line_pen_width: int = 3,
+        pixel_size_um: float = 1.0,
     ):
         self.image_view = image_view
         self.stats_label = stats_label
@@ -32,19 +33,21 @@ class LineProfileManager:
 
         self.handle_size = max(8, int(handle_size))
         self.line_pen_width = max(1, int(line_pen_width))
+        self.pixel_size_um = pixel_size_um
 
         self.line: Optional[pg.LineSegmentROI] = None
         self.enabled = False
         self._last_image: Optional[np.ndarray] = None
 
-        # For Shift-key snapping
         self._shift_pressed = False
 
-        # For detecting which endpoint is moving
-        self._prev_p0 = None  # QPointF in ROI local coords
-        self._prev_p1 = None  # QPointF in ROI local coords
+        self._prev_p0 = None
+        self._prev_p1 = None
 
-    # ---------- Public API ----------
+    def set_pixel_size(self, pixel_size_um: float):
+        self.pixel_size_um = pixel_size_um
+        if self.enabled:
+            self._update_stats()
 
     def toggle(self, state):
         from PyQt5.QtCore import Qt
@@ -229,20 +232,15 @@ class LineProfileManager:
 
     @staticmethod
     def _handle_pos(h):
-        """Return handle position (QPointF) from dict or object."""
         if isinstance(h, dict):
             return h["pos"]
         return h.pos()
 
     @staticmethod
-    def _handle_item(self, h):
-        """Extract the graphics item from a handle."""
-        # Handle objects ARE the item in newer pyqtgraph
+    def _handle_item(h):
         if hasattr(h, 'item'):
             return h.item
-        else:
-            # Fallback - h IS the item itself
-            return h
+        return h
 
     def _create_line_from_image(self, image: np.ndarray):
         h, w = image.shape[:2]
@@ -254,9 +252,8 @@ class LineProfileManager:
         self._build_line(50, 50, 200, 50)
 
     def _build_line(self, x1, y1, x2, y2):
-        """Create LineSegmentROI with Shift-snap and center handle."""
         img_item = self.image_view.getImageItem()
-        pen = pg.mkPen("y", width=self.line_pen_width)  # Yellow line
+        pen = pg.mkPen("y", width=self.line_pen_width)
         hover_pen = pg.mkPen((255, 255, 0, 220), width=self.line_pen_width + 2)
 
         positions = [[x1, y1], [x2, y2]]
@@ -286,7 +283,6 @@ class LineProfileManager:
             self.logger.info("Line created at (%d, %d) - (%d, %d)", x1, y1, x2, y2)
 
     def _add_center_handle(self):
-        """Add a center handle that allows dragging the entire line."""
         if self.line is None:
             return
 
@@ -328,7 +324,6 @@ class LineProfileManager:
                     self.logger.debug("Handle styling issue: %s", e)
 
     def _install_key_handler(self):
-        """Install event filter to detect Shift key on application level."""
         key_filter = ShiftKeyFilter(self)
 
         app = QtWidgets.QApplication.instance()
@@ -346,10 +341,7 @@ class LineProfileManager:
         if self.line:
             self.line.installEventFilter(key_filter)
 
-    # ---------- Snap logic ----------
-
     def _on_drag_start(self):
-        """Reset motion tracking at the start of a drag."""
         handles = self.line.getHandles() if self.line is not None else []
         if len(handles) >= 2:
             self._prev_p0 = self._handle_pos(handles[0])
@@ -359,12 +351,10 @@ class LineProfileManager:
             self._prev_p1 = None
 
     def _on_drag_finish(self):
-        """Clear motion tracking after drag."""
         self._prev_p0 = None
         self._prev_p1 = None
 
     def _on_region_changed(self):
-        """Called whenever the line region changes (during drag)."""
         if not self.enabled or self.line is None:
             return
 
@@ -372,11 +362,9 @@ class LineProfileManager:
         if len(handles) < 2:
             return
 
-        # Current positions in ROI local coordinates
         p0 = self._handle_pos(handles[0])
         p1 = self._handle_pos(handles[1])
 
-        # If we don't have previous positions yet, just store and exit
         if self._prev_p0 is None or self._prev_p1 is None:
             self._prev_p0 = QtCore.QPointF(p0)
             self._prev_p1 = QtCore.QPointF(p1)
@@ -384,7 +372,6 @@ class LineProfileManager:
             return
 
         if self._shift_pressed:
-            # Decide which endpoint moved more since last frame -> moving endpoint
             d0 = (p0.x() - self._prev_p0.x()) ** 2 + (p0.y() - self._prev_p0.y()) ** 2
             d1 = (p1.x() - self._prev_p1.x()) ** 2 + (p1.y() - self._prev_p1.y()) ** 2
 
@@ -401,40 +388,28 @@ class LineProfileManager:
             dx = mx - ax
             dy = my - ay
 
-            if dx == 0 and dy == 0:
-                # Nothing to snap
-                pass
-            else:
-                # Snap to closest axis through anchor
+            if dx != 0 or dy != 0:
                 if abs(dx) >= abs(dy):
-                    # Horizontal: same y as anchor
                     new_mx, new_my = ax + dx, ay
                 else:
-                    # Vertical: same x as anchor
                     new_mx, new_my = ax, ay + dy
 
-                # Apply only to moving endpoint (in local coords)
                 self.line.blockSignals(True)
                 moving_item = self._handle_item(handles[moving_idx])
                 moving_item.setPos(new_mx, new_my)
                 self.line.blockSignals(False)
 
-                # Update local p0/p1 after snapping
                 if moving_idx == 0:
                     p0 = QtCore.QPointF(new_mx, new_my)
                 else:
                     p1 = QtCore.QPointF(new_mx, new_my)
 
-        # Update previous positions for next callback
         self._prev_p0 = QtCore.QPointF(p0)
         self._prev_p1 = QtCore.QPointF(p1)
 
         self._update_stats()
 
-    # ---------- Stats ----------
-
     def _update_stats(self):
-        """Update statistics label with line info and profile stats."""
         if not self.enabled or self.line is None or self._last_image is None:
             return
 
@@ -446,11 +421,18 @@ class LineProfileManager:
             x1, y1 = coords["x1"], coords["y1"]
             x2, y2 = coords["x2"], coords["y2"]
 
-            length = float(np.hypot(x2 - x1, y2 - y1))
+            length_px = float(np.hypot(x2 - x1, y2 - y1))
+            length_um = length_px * self.pixel_size_um
+            length_mm = length_um / 1000.0
 
             angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
             if angle < 0:
                 angle += 360.0
+
+            dx_px = abs(x2 - x1)
+            dy_px = abs(y2 - y1)
+            dx_um = dx_px * self.pixel_size_um
+            dy_um = dy_px * self.pixel_size_um
 
             profile = self.get_line_profile()
             if profile:
@@ -461,25 +443,29 @@ class LineProfileManager:
                 profile_std = float(np.std(values))
 
                 self.stats_label.setText(
-                    f"Line:\n"
+                    f"Distance Measurement:\n"
+                    f"  Length: {length_px:.1f} px = {length_um:.2f} µm = {length_mm:.4f} mm\n"
+                    f"  ΔX: {dx_px:.1f} px = {dx_um:.2f} µm\n"
+                    f"  ΔY: {dy_px:.1f} px = {dy_um:.2f} µm\n"
+                    f"  Angle: {angle:.1f}°\n"
                     f"  Start: ({x1:.1f}, {y1:.1f})\n"
-                    f"  End: ({x2:.1f}, {y2:.1f})\n"
-                    f"  Length: {length:.1f} px\n"
-                    f"  Angle: {angle:.1f}°\n\n"
+                    f"  End: ({x2:.1f}, {y2:.1f})\n\n"
                     f"Profile:\n"
                     f"  Points: {len(values)}\n"
-                    f"  Min: {profile_min:.2f}\n"
-                    f"  Max: {profile_max:.2f}\n"
-                    f"  Mean: {profile_mean:.2f}\n"
-                    f"  Std: {profile_std:.2f}"
+                    f"  Min: {profile_min:.1f}\n"
+                    f"  Max: {profile_max:.1f}\n"
+                    f"  Mean: {profile_mean:.1f}\n"
+                    f"  Std: {profile_std:.1f}"
                 )
             else:
                 self.stats_label.setText(
-                    f"Line:\n"
+                    f"Distance Measurement:\n"
+                    f"  Length: {length_px:.1f} px = {length_um:.2f} µm = {length_mm:.4f} mm\n"
+                    f"  ΔX: {dx_px:.1f} px = {dx_um:.2f} µm\n"
+                    f"  ΔY: {dy_px:.1f} px = {dy_um:.2f} µm\n"
+                    f"  Angle: {angle:.1f}°\n"
                     f"  Start: ({x1:.1f}, {y1:.1f})\n"
-                    f"  End: ({x2:.1f}, {y2:.1f})\n"
-                    f"  Length: {length:.1f} px\n"
-                    f"  Angle: {angle:.1f}°"
+                    f"  End: ({x2:.1f}, {y2:.1f})"
                 )
 
         except Exception as e:
@@ -489,8 +475,6 @@ class LineProfileManager:
 
 
 class ShiftKeyFilter(QtCore.QObject):
-    """Event filter to detect Shift key press/release."""
-
     def __init__(self, line_manager: LineProfileManager):
         super().__init__()
         self.line_manager = line_manager
@@ -498,14 +482,10 @@ class ShiftKeyFilter(QtCore.QObject):
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.KeyPress:
             if event.key() == QtCore.Qt.Key_Shift:
-                if self.line_manager.logger:
-                    self.line_manager.logger.info("Shift key PRESSED")
                 self.line_manager._shift_pressed = True
 
         elif event.type() == QtCore.QEvent.KeyRelease:
             if event.key() == QtCore.Qt.Key_Shift:
-                if self.line_manager.logger:
-                    self.line_manager.logger.info("Shift key RELEASED")
                 self.line_manager._shift_pressed = False
 
-        return False  # Don't consume the event
+        return False

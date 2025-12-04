@@ -18,6 +18,7 @@ dependencies = [
   "PyQt5-sip>=12.13,<13",
   "pyqtgraph>=0.13.0",
   "Pillow>=9.0",
+  "h5py>=3.0",
 ]
 
 [project.optional-dependencies]

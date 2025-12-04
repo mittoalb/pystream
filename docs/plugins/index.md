@@ -40,9 +40,9 @@ metrics
 mosalign
 ```
 
-- **Python Console** - Interactive Python console for real-time custom image processing
+- **Python Console** - Interactive Python console for real-time custom image processing with save/load capability
 - **Image Metrics** - Real-time monitoring of image information content metrics (entropy, focus, spectral stats)
-- **Mosaic Alignment** - Automated 2D motor scanning with live stitched preview for sample alignment
+- **Mosaic Alignment** - Automated 2D motor scanning with live stitched preview and tomoscan integration
 
 ## Plugin Categories
 
@@ -58,10 +58,10 @@ mosalign
 - [Scale Bar](scalebar.md) - Dual scale bar overlay with automatic scaling
 
 ### Processing
-- [Python Console](console.md) - Real-time custom image processing with Python code
+- [Python Console](console.md) - Real-time custom image processing with Python code and save/load functionality
 
 ### Analysis
 - [Image Metrics](metrics.md) - Live image quality and information content metrics
 
 ### Motor Control
-- [Mosaic Alignment](mosalign.md) - Automated motor scanning with stitched preview
+- [Mosaic Alignment](mosalign.md) - Automated motor scanning with stitched preview and tomoscan integration
