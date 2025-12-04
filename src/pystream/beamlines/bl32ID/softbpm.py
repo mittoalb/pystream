@@ -75,14 +75,42 @@ class SoftBPMDialog(QtWidgets.QDialog):
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
 
-        # Settings table
-        settings_group = QtWidgets.QGroupBox("Settings")
-        settings_layout = QtWidgets.QVBoxLayout()
+        # Create tabs for settings and PV configuration
+        tabs = QtWidgets.QTabWidget()
+        tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 2px solid #cccccc;
+                background: white;
+            }
+            QTabBar::tab {
+                background: #333333;
+                color: white;
+                border: 1px solid #555555;
+                padding: 8px 20px;
+                margin-right: 2px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: #000000;
+                color: white;
+                border-bottom: 2px solid white;
+            }
+            QTabBar::tab:hover {
+                background: #555555;
+                color: white;
+            }
+        """)
 
-        self.settings_table = QtWidgets.QTableWidget(3, 2)
+        # Tab 1: Numeric Settings (all values)
+        settings_tab = QtWidgets.QWidget()
+        settings_tab_layout = QtWidgets.QVBoxLayout(settings_tab)
+
+        self.settings_table = QtWidgets.QTableWidget(5, 2)
         self.settings_table.setHorizontalHeaderLabels(["Parameter", "Value"])
         self.settings_table.horizontalHeader().setStretchLastSection(True)
         self.settings_table.verticalHeader().setVisible(False)
+        self.settings_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.settings_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
         # Row 0: Threshold percentage
         self.settings_table.setItem(0, 0, QtWidgets.QTableWidgetItem("Threshold (%)"))
@@ -99,9 +127,6 @@ class SoftBPMDialog(QtWidgets.QDialog):
         self.test_mode_checkbox.setToolTip("Monitor and plot intensity without moving motors")
         self.settings_table.setCellWidget(1, 1, self.test_mode_checkbox)
 
-        # Expand table for new row
-        self.settings_table.setRowCount(5)
-
         # Row 2: Polling interval
         self.settings_table.setItem(2, 0, QtWidgets.QTableWidgetItem("Poll Interval (s)"))
         self.poll_interval_input = QtWidgets.QDoubleSpinBox()
@@ -110,63 +135,83 @@ class SoftBPMDialog(QtWidgets.QDialog):
         self.poll_interval_input.setSuffix(" s")
         self.settings_table.setCellWidget(2, 1, self.poll_interval_input)
 
-        # Row 3: Image PV (for average calculation)
-        self.settings_table.setItem(3, 0, QtWidgets.QTableWidgetItem("Image PV"))
-        self.image_pv_input = QtWidgets.QLineEdit("32idcPG3:Pva1:Image")
-        self.settings_table.setCellWidget(3, 1, self.image_pv_input)
+        # Row 3: Motor 1 Step
+        self.settings_table.setItem(3, 0, QtWidgets.QTableWidgetItem("Motor 1 Step"))
+        self.motor1_step = QtWidgets.QDoubleSpinBox()
+        self.motor1_step.setRange(-1000.0, 1000.0)
+        self.motor1_step.setValue(0.1)
+        self.motor1_step.setDecimals(4)
+        self.settings_table.setCellWidget(3, 1, self.motor1_step)
 
-        # Row 4: Beam current PV
-        self.settings_table.setItem(4, 0, QtWidgets.QTableWidgetItem("Beam Current PV"))
-        self.beam_current_pv_input = QtWidgets.QLineEdit("S:SRcurrentAI")
-        self.settings_table.setCellWidget(4, 1, self.beam_current_pv_input)
+        # Row 4: Motor 2 Step
+        self.settings_table.setItem(4, 0, QtWidgets.QTableWidgetItem("Motor 2 Step"))
+        self.motor2_step = QtWidgets.QDoubleSpinBox()
+        self.motor2_step.setRange(-1000.0, 1000.0)
+        self.motor2_step.setValue(0.1)
+        self.motor2_step.setDecimals(4)
+        self.settings_table.setCellWidget(4, 1, self.motor2_step)
 
-        settings_layout.addWidget(self.settings_table)
-        settings_group.setLayout(settings_layout)
-        layout.addWidget(settings_group)
+        # Resize table to fit content without scrollbars
+        self.settings_table.resizeRowsToContents()
+        self.settings_table.setFixedHeight(
+            self.settings_table.horizontalHeader().height() +
+            sum(self.settings_table.rowHeight(i) for i in range(self.settings_table.rowCount())) + 2
+        )
 
-        # PV Configuration table
-        pv_group = QtWidgets.QGroupBox("PV Configuration")
-        pv_layout = QtWidgets.QVBoxLayout()
+        settings_tab_layout.addWidget(self.settings_table)
+        settings_tab_layout.addStretch()
+        tabs.addTab(settings_tab, "Settings")
 
-        self.pv_table = QtWidgets.QTableWidget(5, 2)
-        self.pv_table.setHorizontalHeaderLabels(["PV Name", "Value/Step"])
+        # Tab 2: PV Names
+        pv_tab = QtWidgets.QWidget()
+        pv_tab_layout = QtWidgets.QVBoxLayout(pv_tab)
+
+        self.pv_table = QtWidgets.QTableWidget(4, 2)
+        self.pv_table.setHorizontalHeaderLabels(["PV Name", "Value"])
         self.pv_table.horizontalHeader().setStretchLastSection(True)
         self.pv_table.verticalHeader().setVisible(False)
+        self.pv_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.pv_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
         # Row 0: HDF5 Location PV
         self.pv_table.setItem(0, 0, QtWidgets.QTableWidgetItem("HDF5 Location PV"))
         self.hdf5_location_pv = QtWidgets.QLineEdit("32id:TomoScan:HDF5Location")
         self.pv_table.setCellWidget(0, 1, self.hdf5_location_pv)
 
-        # Row 1: Motor 1 PV
-        self.pv_table.setItem(1, 0, QtWidgets.QTableWidgetItem("Motor 1 PV"))
+        # Row 1: Image PV
+        self.pv_table.setItem(1, 0, QtWidgets.QTableWidgetItem("Image PV"))
+        self.image_pv_input = QtWidgets.QLineEdit("32idcPG3:Pva1:Image")
+        self.pv_table.setCellWidget(1, 1, self.image_pv_input)
+
+        # Row 2: Beam current PV
+        self.pv_table.setItem(2, 0, QtWidgets.QTableWidgetItem("Beam Current PV"))
+        self.beam_current_pv_input = QtWidgets.QLineEdit("S:SRcurrentAI")
+        self.pv_table.setCellWidget(2, 1, self.beam_current_pv_input)
+
+        # Row 3: Motor 1 PV
+        self.pv_table.setItem(3, 0, QtWidgets.QTableWidgetItem("Motor 1 PV"))
         self.motor1_pv = QtWidgets.QLineEdit("32idb:m1")
-        self.pv_table.setCellWidget(1, 1, self.motor1_pv)
+        self.pv_table.setCellWidget(3, 1, self.motor1_pv)
 
-        # Row 2: Motor 1 Step
-        self.pv_table.setItem(2, 0, QtWidgets.QTableWidgetItem("Motor 1 Step"))
-        self.motor1_step = QtWidgets.QDoubleSpinBox()
-        self.motor1_step.setRange(-1000.0, 1000.0)
-        self.motor1_step.setValue(0.1)
-        self.motor1_step.setDecimals(4)
-        self.pv_table.setCellWidget(2, 1, self.motor1_step)
-
-        # Row 3: Motor 2 PV
-        self.pv_table.setItem(3, 0, QtWidgets.QTableWidgetItem("Motor 2 PV"))
+        # Row 4: Motor 2 PV
+        self.pv_table.setRowCount(5)
+        self.pv_table.setItem(4, 0, QtWidgets.QTableWidgetItem("Motor 2 PV"))
         self.motor2_pv = QtWidgets.QLineEdit("32idb:m2")
-        self.pv_table.setCellWidget(3, 1, self.motor2_pv)
+        self.pv_table.setCellWidget(4, 1, self.motor2_pv)
 
-        # Row 4: Motor 2 Step
-        self.pv_table.setItem(4, 0, QtWidgets.QTableWidgetItem("Motor 2 Step"))
-        self.motor2_step = QtWidgets.QDoubleSpinBox()
-        self.motor2_step.setRange(-1000.0, 1000.0)
-        self.motor2_step.setValue(0.1)
-        self.motor2_step.setDecimals(4)
-        self.pv_table.setCellWidget(4, 1, self.motor2_step)
+        # Resize table to fit content without scrollbars
+        self.pv_table.resizeRowsToContents()
+        self.pv_table.setFixedHeight(
+            self.pv_table.horizontalHeader().height() +
+            sum(self.pv_table.rowHeight(i) for i in range(self.pv_table.rowCount())) + 2
+        )
 
-        pv_layout.addWidget(self.pv_table)
-        pv_group.setLayout(pv_layout)
-        layout.addWidget(pv_group)
+        pv_tab_layout.addWidget(self.pv_table)
+        pv_tab_layout.addStretch()
+        tabs.addTab(pv_tab, "PV Names")
+
+        # Add tabs widget to main layout
+        layout.addWidget(tabs)
 
         # Log area
         log_group = QtWidgets.QGroupBox("Activity Log")
