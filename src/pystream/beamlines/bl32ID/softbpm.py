@@ -18,6 +18,7 @@ import logging
 import numpy as np
 from typing import Optional
 from PyQt5 import QtWidgets, QtCore
+import pvaccess as pva
 
 
 class SoftBPMDialog(QtWidgets.QDialog):
@@ -444,6 +445,14 @@ class SoftBPMThread(QtCore.QThread):
         self.running = False
         self.logger = logging.getLogger(__name__)
 
+        # Create PVA channel for image data (reuse for performance)
+        self.image_channel = None
+        try:
+            self.image_channel = pva.Channel(self.image_pv)
+            self.logger.info(f"PVA channel created for {self.image_pv}")
+        except Exception as e:
+            self.logger.warning(f"Failed to create PVA channel: {e}, will use fallback")
+
     def run(self):
         """Main monitoring loop."""
         self.running = True
@@ -571,39 +580,34 @@ class SoftBPMThread(QtCore.QThread):
     def _get_image_average(self) -> Optional[float]:
         """Get average intensity from image PV by actively fetching fresh data."""
         try:
-            # Method 1: Try to use pvget for PVA (PV Access) image
-            # This is the preferred method for image PVs
-            result = subprocess.run(
-                ['pvget', '-t', self.image_pv],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            # Method 1: Use pvaccess to get fresh image data from PV
+            # This actively fetches the current image from the PV
+            if self.image_channel is not None:
+                try:
+                    pv_data = self.image_channel.get()
 
-            if result.returncode == 0 and result.stdout:
-                # Parse the image data from pvget output
-                # Format depends on PV structure, may need adjustment
-                output = result.stdout.strip()
-                if output:
-                    # Try to extract numeric values and compute mean
-                    # This is a simplified parser - may need refinement
-                    try:
-                        import re
-                        numbers = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', output)
-                        if numbers:
-                            values = [float(n) for n in numbers]
-                            if len(values) > 10:  # Sanity check - should be image-sized array
-                                return float(np.mean(values))
-                    except (ValueError, TypeError) as e:
-                        self.logger.debug(f"Failed to parse pvget output: {e}")
+                    # Extract image array from NTNDArray structure
+                    if 'value' in pv_data:
+                        # Get the image data array
+                        image_data = pv_data['value']
+                        if isinstance(image_data, np.ndarray) and image_data.size > 0:
+                            mean_intensity = float(np.mean(image_data))
+                            self.logger.debug(f"Fresh PV data: mean={mean_intensity:.2f}, shape={image_data.shape}")
+                            return mean_intensity
+                    else:
+                        self.logger.debug(f"PV data structure: {pv_data.getStructureDict()}")
+
+                except Exception as pva_error:
+                    self.logger.debug(f"PVA fetch failed: {pva_error}")
 
             # Method 2: Fallback to parent viewer's cached image
-            # This ensures we still work if pvget fails
+            # This ensures we still work if PVA fails
             if self.parent_dialog is not None:
                 parent_viewer = self.parent_dialog.parent()
                 if hasattr(parent_viewer, 'current_image'):
                     image = parent_viewer.current_image
                     if image is not None and isinstance(image, np.ndarray):
+                        self.logger.debug("Using cached image from parent viewer")
                         return float(np.mean(image))
 
                 # Also check for image_view attribute
@@ -612,14 +616,12 @@ class SoftBPMThread(QtCore.QThread):
                     if image_item is not None:
                         image = image_item.image
                         if image is not None and isinstance(image, np.ndarray):
+                            self.logger.debug("Using cached image from image_view")
                             return float(np.mean(image))
 
             self.logger.warning("Unable to access fresh image data via PV or parent viewer")
             return None
 
-        except subprocess.TimeoutExpired:
-            self.logger.warning(f"Timeout fetching image from {self.image_pv}")
-            return None
         except Exception as e:
             self.logger.error(f"Error calculating image average: {e}")
             return None
