@@ -447,6 +447,7 @@ class SoftBPMThread(QtCore.QThread):
 
         # Create PVA channel for image data (reuse for performance)
         self.image_channel = None
+        self.last_image_id = None  # Track last processed image ID to avoid reprocessing
         try:
             self.image_channel = pva.Channel(self.image_pv)
             self.logger.info(f"PVA channel created for {self.image_pv}")
@@ -474,10 +475,19 @@ class SoftBPMThread(QtCore.QThread):
                         self.log_message.emit("Warning: Invalid beam current, skipping measurement")
                         continue
 
-                    # Get current image average
-                    raw_intensity = self._get_image_average()
+                    # Get current image average and ID
+                    image_id, raw_intensity = self._get_image_average()
+
+                    # Skip if this is the same image as last time (no new data from camera)
+                    if image_id is not None and image_id == self.last_image_id:
+                        self.logger.debug(f"Skipping duplicate image (id={image_id})")
+                        time.sleep(self.poll_interval)
+                        continue
 
                     if raw_intensity is not None:
+                        # Update last image ID
+                        if image_id is not None:
+                            self.last_image_id = image_id
                         # Normalize by beam current
                         normalized_intensity = raw_intensity / beam_current
 
@@ -577,54 +587,89 @@ class SoftBPMThread(QtCore.QThread):
             self.logger.error(f"Error getting beam current: {e}")
             return None
 
-    def _get_image_average(self) -> Optional[float]:
-        """Get average intensity from image PV by actively fetching fresh data."""
+    def _get_image_average(self) -> tuple[Optional[int], Optional[float]]:
+        """Get average intensity from image PV by actively fetching fresh data.
+
+        Returns:
+            tuple: (image_id, mean_intensity) or (None, None) if no data
+        """
         try:
             # Method 1: Use pvaccess to get fresh image data from PV
-            # This actively fetches the current image from the PV
+            # This actively fetches the current image from the PV every time
             if self.image_channel is not None:
                 try:
+                    # Get data from PV - note this returns the LAST PUBLISHED image
+                    # which may be the same as last time if camera hasn't published new data
                     pv_data = self.image_channel.get()
 
+                    # Get unique image ID to detect new images
+                    image_id = None
+                    if 'uniqueId' in pv_data:
+                        image_id = int(pv_data['uniqueId'])
+                    elif 'timeStamp' in pv_data:
+                        # Use timestamp as fallback unique ID
+                        ts = pv_data['timeStamp']
+                        image_id = ts.get('secondsPastEpoch', 0) * 1000000000 + ts.get('nanoSeconds', 0)
+
                     # Extract image array from NTNDArray structure
-                    if 'value' in pv_data:
-                        # Get the image data array
-                        image_data = pv_data['value']
-                        if isinstance(image_data, np.ndarray) and image_data.size > 0:
-                            mean_intensity = float(np.mean(image_data))
-                            self.logger.debug(f"Fresh PV data: mean={mean_intensity:.2f}, shape={image_data.shape}")
-                            return mean_intensity
-                    else:
-                        self.logger.debug(f"PV data structure: {pv_data.getStructureDict()}")
+                    # Based on how pystream.py handles NTNDArray data
+                    if 'value' in pv_data and 'dimension' in pv_data:
+                        dims = pv_data['dimension']
+                        nDims = len(dims)
+
+                        if nDims >= 2:
+                            # Get the raw data from the union field
+                            try:
+                                field_key = pv_data.getSelectedUnionFieldName()
+                                raw = pv_data['value'][0][field_key]
+                            except Exception:
+                                try:
+                                    field_key = next(iter(pv_data['value'][0].keys()))
+                                    raw = pv_data['value'][0][field_key]
+                                except (StopIteration, KeyError):
+                                    self.logger.debug("Empty value dictionary - no data available")
+                                    raise ValueError("No image data")
+
+                            # Convert to numpy array
+                            image_data = np.asarray(raw)
+
+                            if image_data.size > 0:
+                                mean_intensity = float(np.mean(image_data))
+                                shape_str = f"{dims[0]['size']}x{dims[1]['size']}" if nDims >= 2 else "unknown"
+                                self.logger.debug(f"Fresh PV data: mean={mean_intensity:.2f}, dims={shape_str}, id={image_id}")
+                                return (image_id, mean_intensity)
 
                 except Exception as pva_error:
                     self.logger.debug(f"PVA fetch failed: {pva_error}")
 
             # Method 2: Fallback to parent viewer's cached image
             # This ensures we still work if PVA fails
+            # Note: this doesn't provide an image ID, so returns None for ID
             if self.parent_dialog is not None:
                 parent_viewer = self.parent_dialog.parent()
-                if hasattr(parent_viewer, 'current_image'):
-                    image = parent_viewer.current_image
-                    if image is not None and isinstance(image, np.ndarray):
-                        self.logger.debug("Using cached image from parent viewer")
-                        return float(np.mean(image))
 
-                # Also check for image_view attribute
+                # Check for image_view attribute (most reliable)
                 if hasattr(parent_viewer, 'image_view'):
                     image_item = parent_viewer.image_view.getImageItem()
                     if image_item is not None:
                         image = image_item.image
-                        if image is not None and isinstance(image, np.ndarray):
+                        if image is not None and isinstance(image, np.ndarray) and image.size > 0:
                             self.logger.debug("Using cached image from image_view")
-                            return float(np.mean(image))
+                            return (None, float(np.mean(image)))
+
+                # Alternative: check current_image attribute
+                if hasattr(parent_viewer, 'current_image'):
+                    image = parent_viewer.current_image
+                    if image is not None and isinstance(image, np.ndarray) and image.size > 0:
+                        self.logger.debug("Using cached image from parent viewer")
+                        return (None, float(np.mean(image)))
 
             self.logger.warning("Unable to access fresh image data via PV or parent viewer")
-            return None
+            return (None, None)
 
         except Exception as e:
             self.logger.error(f"Error calculating image average: {e}")
-            return None
+            return (None, None)
 
     def _move_motors(self, change_percent: float):
         """
