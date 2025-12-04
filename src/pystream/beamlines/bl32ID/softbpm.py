@@ -9,6 +9,7 @@ Features:
 - Detects intensity drops exceeding configurable threshold
 - Moves motors to restore and maximize beam intensity
 - Continuous monitoring during /exchange/data_white acquisition
+- Test mode for safe observation without motor movements
 """
 
 import time
