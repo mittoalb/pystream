@@ -485,6 +485,14 @@ class SoftBPMThread(QtCore.QThread):
                             change_percent = ((normalized_intensity - self.last_normalized_intensity) /
                                             self.last_normalized_intensity * 100.0)
 
+                            # Skip images with intensity below 70% of reference (likely empty/first images)
+                            if change_percent < -30.0:  # Less than 70% of reference
+                                self.log_message.emit(
+                                    f"Skipping low intensity image: {change_percent:+.2f}% "
+                                    f"(below 70% threshold, likely empty image)"
+                                )
+                                continue
+
                             self.intensity_update.emit(
                                 self.last_normalized_intensity,
                                 normalized_intensity,
