@@ -478,11 +478,16 @@ class SoftBPMThread(QtCore.QThread):
                     # Get current image average and ID
                     image_id, raw_intensity = self._get_image_average()
 
+                    # Log image ID for debugging
+                    self.log_message.emit(f"DEBUG: image_id={image_id}, raw_intensity={raw_intensity}")
+
                     # Skip if this is the same image as last time (no new data from camera)
                     if image_id is not None and image_id == self.last_image_id:
-                        self.logger.debug(f"Skipping duplicate image (id={image_id})")
+                        self.log_message.emit(f"Skipping duplicate image (id={image_id})")
                         time.sleep(self.poll_interval)
                         continue
+                    elif image_id is None:
+                        self.log_message.emit("WARNING: No image ID - using cached/fallback data (may be stale)")
 
                     if raw_intensity is not None:
                         # Update last image ID
@@ -636,11 +641,11 @@ class SoftBPMThread(QtCore.QThread):
                             if image_data.size > 0:
                                 mean_intensity = float(np.mean(image_data))
                                 shape_str = f"{dims[0]['size']}x{dims[1]['size']}" if nDims >= 2 else "unknown"
-                                self.logger.debug(f"Fresh PV data: mean={mean_intensity:.2f}, dims={shape_str}, id={image_id}")
+                                self.logger.info(f"✓ Fresh PV data: mean={mean_intensity:.2f}, dims={shape_str}, id={image_id}")
                                 return (image_id, mean_intensity)
 
                 except Exception as pva_error:
-                    self.logger.debug(f"PVA fetch failed: {pva_error}")
+                    self.logger.warning(f"PVA fetch failed: {pva_error}")
 
             # Method 2: Fallback to parent viewer's cached image
             # This ensures we still work if PVA fails
@@ -654,7 +659,7 @@ class SoftBPMThread(QtCore.QThread):
                     if image_item is not None:
                         image = image_item.image
                         if image is not None and isinstance(image, np.ndarray) and image.size > 0:
-                            self.logger.debug("Using cached image from image_view")
+                            self.logger.warning("⚠ Using cached image from image_view (FALLBACK - may be stale!)")
                             return (None, float(np.mean(image)))
 
                 # Alternative: check current_image attribute
