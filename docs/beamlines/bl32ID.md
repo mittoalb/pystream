@@ -77,6 +77,7 @@ Monitors beam-normalized image intensity during data acquisition and automatical
 
 ### Features
 
+- **Event-Driven Synchronization**: Directly synchronized with viewer updates (no polling)
 - **Beam Normalization**: Normalizes image intensity by storage ring beam current
 - **Automatic Motor Adjustment**: Moves motors to restore beam intensity
 - **Threshold Detection**: Configurable drop threshold for triggering adjustments
@@ -101,7 +102,7 @@ Monitors beam-normalized image intensity during data acquisition and automatical
 |---|---|---|
 | Threshold (%) | 10.0% | Intensity drop threshold to trigger adjustment |
 | Test Mode | Off | If enabled, monitors without moving motors |
-| Poll Interval | 1.0 s | How often to check for new images |
+| Poll Interval | 1.0 s | Not used - kept for UI compatibility (event-driven) |
 | Motor 1 Step | 0.1 | Step size for motor 1 |
 | Motor 2 Step | 0.1 | Step size for motor 2 |
 
@@ -118,8 +119,7 @@ Monitors beam-normalized image intensity during data acquisition and automatical
    - Once triggered, establishes reference intensity
 
 3. **Automatic Operation**
-   - Polls image PV every interval (default 1s)
-   - Skips duplicate images (same uniqueId)
+   - Processes each new image as viewer updates (event-driven)
    - Skips empty images (< 70% of reference)
    - If intensity drops > threshold, adjusts motors
    - Updates reference intensity after adjustment
@@ -131,17 +131,17 @@ Monitors beam-normalized image intensity during data acquisition and automatical
 ### How It Works
 
 ```
-1. Check HDF5Location PV every poll interval
-2. If location == "/exchange/data_white":
-   a. Fetch image from camera PV (via PVAccess)
-   b. Check uniqueId - skip if duplicate
-   c. Calculate mean intensity
-   d. Normalize by beam current (I_norm = I_raw / I_beam)
-   e. If no reference, establish reference
-   f. Calculate change: Δ = (I_norm - I_ref) / I_ref × 100%
-   g. If Δ < -70%: skip (empty frame)
-   h. If Δ < -threshold: move motors to restore intensity
-   i. Update plot
+1. Connect to viewer's image_ready signal (event-driven)
+2. On each new image from viewer:
+   a. Check HDF5Location PV
+   b. If location == "/exchange/data_white":
+      - Calculate mean intensity from image
+      - Normalize by beam current (I_norm = I_raw / I_beam)
+      - If no reference, establish reference
+      - Calculate change: Δ = (I_norm - I_ref) / I_ref × 100%
+      - If Δ < -70%: skip (empty frame)
+      - If Δ < -threshold: move motors to restore intensity
+      - Update plot
 ```
 
 ### Motor Adjustment Algorithm
@@ -157,8 +157,8 @@ The algorithm performs simple gradient ascent to find the intensity maximum.
 
 ### Notes
 
-- **Image ID tracking**: Uses uniqueId from NTNDArray to detect new images
-- **Prevents reprocessing**: Skips images that haven't changed since last check
+- **Event-driven architecture**: No polling - directly synchronized with viewer's image updates
+- **Real-time response**: Processes each frame as viewer displays it
 - **Beam current normalization**: Accounts for storage ring current variations
 - **Empty frame filtering**: Automatically skips first/empty frames in acquisition sequences
 - **Test mode recommended**: Always test with motors disabled before enabling automatic adjustment
@@ -208,14 +208,10 @@ All bl32ID plugins are automatically discovered and loaded by PyStream. No addit
 ### SoftBPM
 
 **No data updating:**
-- Verify image PV is publishing data
+- Verify viewer is receiving and displaying images
 - Check HDF5Location PV is set to `/exchange/data_white`
-- Enable debug logging to see PVA fetch attempts
 - Verify beam current PV is readable
-
-**Intensity declining artificially:**
-- Fixed in latest version by using PVA channel.get() with uniqueId tracking
-- If still occurring, check that uniqueId is incrementing with new images
+- Check log for connection errors
 
 **Empty frames triggering adjustment:**
 - Plugin automatically skips frames < 70% of reference

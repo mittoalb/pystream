@@ -282,7 +282,7 @@ class SoftBPMDialog(QtWidgets.QDialog):
         self.log_text.append(f"[{timestamp}] {message}")
 
     def _start_monitoring(self):
-        """Start the monitoring thread."""
+        """Start the event-driven monitor."""
         if self.is_monitoring:
             return
 
@@ -312,16 +312,16 @@ class SoftBPMDialog(QtWidgets.QDialog):
         self.monitor_thread.status_update.connect(self._update_status)
         self.monitor_thread.intensity_update.connect(self._update_intensity)
         self.monitor_thread.log_message.connect(self._log_message)
-        self.monitor_thread.start()
+        self.monitor_thread.start()  # No longer QThread.start(), just activates monitoring
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.status_label.setText("Status: Monitoring")
         self.status_label.setStyleSheet("font-weight: bold; color: green;")
-        self._log_message("Monitoring started")
+        self._log_message("Monitoring started (synchronized with viewer)")
 
     def _stop_monitoring(self):
-        """Stop the monitoring thread."""
+        """Stop the event-driven monitor."""
         if not self.is_monitoring:
             return
 
@@ -329,7 +329,6 @@ class SoftBPMDialog(QtWidgets.QDialog):
 
         if self.monitor_thread:
             self.monitor_thread.stop()
-            self.monitor_thread.wait()
             self.monitor_thread = None
 
         self.start_button.setEnabled(True)
@@ -414,8 +413,8 @@ class SoftBPMDialog(QtWidgets.QDialog):
             event.accept()
 
 
-class SoftBPMThread(QtCore.QThread):
-    """Background thread for monitoring intensity and controlling motors."""
+class SoftBPMThread(QtCore.QObject):
+    """Event-driven monitor for intensity and motor control - synchronized with viewer updates."""
 
     status_update = QtCore.pyqtSignal(str)
     intensity_update = QtCore.pyqtSignal(object, float, float, float)  # last, current, change%, beam_current
@@ -436,7 +435,7 @@ class SoftBPMThread(QtCore.QThread):
         self.motor2_pv = motor2_pv
         self.motor2_step = motor2_step
         self.threshold_percent = threshold_percent
-        self.poll_interval = poll_interval
+        self.poll_interval = poll_interval  # Kept for compatibility but not used
         self.test_mode = test_mode
         self.parent_dialog = parent_dialog
 
@@ -444,96 +443,108 @@ class SoftBPMThread(QtCore.QThread):
         self.running = False
         self.logger = logging.getLogger(__name__)
 
-    def run(self):
-        """Main monitoring loop."""
+        # Connect to viewer's image_ready signal
+        if self.parent_dialog is not None:
+            parent_viewer = self.parent_dialog.parent()
+            if hasattr(parent_viewer, 'image_ready'):
+                parent_viewer.image_ready.connect(self._on_image_ready)
+
+    def start(self):
+        """Start monitoring - activates event-driven image processing."""
         self.running = True
         mode_str = "[TEST MODE - Motors disabled]" if self.test_mode else "[ACTIVE - Motors enabled]"
-        self.log_message.emit(f"Starting monitoring loop {mode_str}")
+        self.log_message.emit(f"Monitoring started (synchronized with viewer) {mode_str}")
+        self.status_update.emit("Monitoring - waiting for images")
 
-        while self.running:
-            try:
-                # Check HDF5 location
-                location = self._get_pv_value(self.hdf5_location_pv)
+    @QtCore.pyqtSlot(int, np.ndarray, float)
+    def _on_image_ready(self, uid: int, img: np.ndarray, ts: float):  # noqa: uid and ts unused but required by signal
+        """Handle new image from viewer - called on each viewer update."""
+        if not self.running:
+            return
 
-                if location and location.strip() == "/exchange/data_white":
-                    mode_indicator = " [TEST MODE]" if self.test_mode else ""
-                    self.status_update.emit(f"Monitoring (HDF5 at /exchange/data_white){mode_indicator}")
+        try:
+            # Check HDF5 location
+            location = self._get_pv_value(self.hdf5_location_pv)
 
-                    # Get beam current for normalization
-                    beam_current = self._get_beam_current()
-                    if beam_current is None or beam_current <= 0:
-                        self.log_message.emit("Warning: Invalid beam current, skipping measurement")
-                        continue
+            if location and location.strip() == "/exchange/data_white":
+                mode_indicator = " [TEST MODE]" if self.test_mode else ""
+                self.status_update.emit(f"Monitoring (HDF5 at /exchange/data_white){mode_indicator}")
 
-                    # Get current image average from viewer
-                    raw_intensity = self._get_image_average()
+                # Get beam current for normalization
+                beam_current = self._get_beam_current()
+                if beam_current is None or beam_current <= 0:
+                    self.log_message.emit("Warning: Invalid beam current, skipping measurement")
+                    return
 
-                    if raw_intensity is not None:
-                        # Normalize by beam current
-                        normalized_intensity = raw_intensity / beam_current
+                # Calculate raw intensity directly from image
+                if img is not None and isinstance(img, np.ndarray) and img.size > 0:
+                    raw_intensity = float(np.mean(img))
+                else:
+                    self.log_message.emit("No valid image data")
+                    return
 
-                        if self.last_normalized_intensity is None:
-                            # First measurement - establish reference
-                            self.last_normalized_intensity = normalized_intensity
-                            self.intensity_update.emit(None, normalized_intensity, 0.0, beam_current)
+                # Normalize by beam current
+                normalized_intensity = raw_intensity / beam_current
+
+                if self.last_normalized_intensity is None:
+                    # First measurement - establish reference
+                    self.last_normalized_intensity = normalized_intensity
+                    self.intensity_update.emit(None, normalized_intensity, 0.0, beam_current)
+                    self.log_message.emit(
+                        f"Reference intensity established: {normalized_intensity:.2f} "
+                        f"(raw: {raw_intensity:.1f}, current: {beam_current:.3f} mA)"
+                    )
+                else:
+                    # Calculate change percentage
+                    change_percent = ((normalized_intensity - self.last_normalized_intensity) /
+                                    self.last_normalized_intensity * 100.0)
+
+                    # Skip images with intensity below 70% of reference (likely empty/first images)
+                    if change_percent < -30.0:  # Less than 70% of reference
+                        self.log_message.emit(
+                            f"Skipping low intensity image: {change_percent:+.2f}% "
+                            f"(below 70% threshold, likely empty image)"
+                        )
+                        return
+
+                    self.intensity_update.emit(
+                        self.last_normalized_intensity,
+                        normalized_intensity,
+                        change_percent,
+                        beam_current
+                    )
+
+                    # Check if intensity dropped beyond threshold (optimization needed)
+                    if change_percent < -self.threshold_percent:
+                        if self.test_mode:
+                            # Test mode: only log, don't move motors
                             self.log_message.emit(
-                                f"Reference intensity established: {normalized_intensity:.2f} "
-                                f"(raw: {raw_intensity:.1f}, current: {beam_current:.3f} mA)"
+                                f"[TEST MODE] Intensity dropped! Change: {change_percent:+.2f}% "
+                                f"(threshold: -{self.threshold_percent}%) - Motors NOT moved"
                             )
                         else:
-                            # Calculate change percentage
-                            change_percent = ((normalized_intensity - self.last_normalized_intensity) /
-                                            self.last_normalized_intensity * 100.0)
-
-                            # Skip images with intensity below 70% of reference (likely empty/first images)
-                            if change_percent < -30.0:  # Less than 70% of reference
-                                self.log_message.emit(
-                                    f"Skipping low intensity image: {change_percent:+.2f}% "
-                                    f"(below 70% threshold, likely empty image)"
-                                )
-                                continue
-
-                            self.intensity_update.emit(
-                                self.last_normalized_intensity,
-                                normalized_intensity,
-                                change_percent,
-                                beam_current
+                            # Production mode: move motors
+                            self.log_message.emit(
+                                f"Intensity dropped! Change: {change_percent:+.2f}% "
+                                f"(threshold: -{self.threshold_percent}%)"
                             )
 
-                            # Check if intensity dropped beyond threshold (optimization needed)
-                            if change_percent < -self.threshold_percent:
-                                if self.test_mode:
-                                    # Test mode: only log, don't move motors
-                                    self.log_message.emit(
-                                        f"[TEST MODE] Intensity dropped! Change: {change_percent:+.2f}% "
-                                        f"(threshold: -{self.threshold_percent}%) - Motors NOT moved"
-                                    )
-                                else:
-                                    # Production mode: move motors
-                                    self.log_message.emit(
-                                        f"Intensity dropped! Change: {change_percent:+.2f}% "
-                                        f"(threshold: -{self.threshold_percent}%)"
-                                    )
+                            # Move motors to maximize intensity (climb the gradient)
+                            # Negative change means we moved away from optimum, reverse direction
+                            self._move_motors(change_percent)
 
-                                    # Move motors to maximize intensity (climb the gradient)
-                                    # Negative change means we moved away from optimum, reverse direction
-                                    self._move_motors(change_percent)
+                            # Update reference intensity to new value
+                            self.last_normalized_intensity = normalized_intensity
+                            self.log_message.emit(
+                                f"Adjusted motors. New reference: {normalized_intensity:.2f}"
+                            )
 
-                                    # Update reference intensity to new value
-                                    self.last_normalized_intensity = normalized_intensity
-                                    self.log_message.emit(
-                                        f"Adjusted motors. New reference: {normalized_intensity:.2f}"
-                                    )
+            else:
+                self.status_update.emit(f"Waiting (HDF5 at: {location})")
 
-                else:
-                    self.status_update.emit(f"Waiting (HDF5 at: {location})")
-
-            except Exception as e:
-                self.logger.error(f"Error in monitoring loop: {e}")
-                self.log_message.emit(f"Error: {str(e)}")
-
-            # Wait before next poll
-            time.sleep(self.poll_interval)
+        except Exception as e:
+            self.logger.error(f"Error processing image: {e}")
+            self.log_message.emit(f"Error: {str(e)}")
 
     def stop(self):
         """Stop the monitoring thread."""
@@ -568,37 +579,6 @@ class SoftBPMThread(QtCore.QThread):
             self.logger.error(f"Error getting beam current: {e}")
             return None
 
-    def _get_image_average(self) -> Optional[float]:
-        """Get average intensity from the current viewer image.
-
-        Returns:
-            float: mean intensity or None if no image available
-        """
-        try:
-            # Get image from parent viewer
-            if self.parent_dialog is not None:
-                parent_viewer = self.parent_dialog.parent()
-
-                # Check for image_view attribute
-                if hasattr(parent_viewer, 'image_view'):
-                    image_item = parent_viewer.image_view.getImageItem()
-                    if image_item is not None:
-                        image = image_item.image
-                        if image is not None and isinstance(image, np.ndarray) and image.size > 0:
-                            return float(np.mean(image))
-
-                # Alternative: check current_image attribute
-                if hasattr(parent_viewer, 'current_image'):
-                    image = parent_viewer.current_image
-                    if image is not None and isinstance(image, np.ndarray) and image.size > 0:
-                        return float(np.mean(image))
-
-            self.logger.warning("Unable to access image data from viewer")
-            return None
-
-        except Exception as e:
-            self.logger.error(f"Error calculating image average: {e}")
-            return None
 
     def _move_motors(self, change_percent: float):
         """
