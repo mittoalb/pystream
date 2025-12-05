@@ -104,6 +104,12 @@ This approach ensures:
 - Isolated plugin environments
 - Graceful handling of import errors
 
+## Adding External GUI Launchers
+
+For standalone Python GUI scripts (Tkinter, PyQt, etc.) that you want to launch from PyStream, use the simple launcher template instead of writing a full plugin.
+
+See the [Launcher Guide](launcher_guide.md) for a quick 3-step process to add launcher buttons for your external GUIs.
+
 ## Plugin Development Guidelines
 
 ### Naming Conventions
