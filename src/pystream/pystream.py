@@ -602,6 +602,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
                             btn.clicked.connect(lambda _, m=module: self._open_softbpm(m))
                         elif hasattr(module, 'DetectorControlDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_detector_control(m))
+                        elif hasattr(module, 'XANESGuiDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_xanes_gui(m))
+                        elif hasattr(module, 'OpticsCalcDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_optics_calc(m))
                         else:
                             btn.setEnabled(False)
                             btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
@@ -1645,6 +1649,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.detector_control_dialog.show()
         self.detector_control_dialog.raise_()
         self.detector_control_dialog.activateWindow()
+
+    def _open_xanes_gui(self, module):
+        """Launch the XANES GUI (runs immediately, no dialog)"""
+        # Create launcher - it executes immediately and closes itself
+        module.XANESGuiDialog(parent=self, logger=LOGGER)
+
+    def _open_optics_calc(self, module):
+        """Launch the Optics Calculator (runs immediately, no dialog)"""
+        # Create launcher - it executes immediately and closes itself
+        module.OpticsCalcDialog(parent=self, logger=LOGGER)
 
     def _open_viewer(self):
         """Open a standalone viewer window"""

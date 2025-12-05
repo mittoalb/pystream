@@ -106,9 +106,32 @@ This approach ensures:
 
 ## Adding External GUI Launchers
 
+PyStream supports **optional external GUI tools** that users can choose to install separately. These tools appear as launcher buttons in the beamlines toolbar but run as independent processes.
+
+### Key Concepts
+
+- **Optional Installation**: External tools are separate packages that users install only if needed
+- **No PyStream Dependencies**: External GUIs can use any framework (Tkinter, PyQt, etc.) without conflicts
+- **Launcher Integration**: Simple launcher buttons in PyStream provide easy access to external tools
+- **Modular Architecture**: Each tool is versioned and maintained independently
+
+### For Users
+
+External beamline tools are **optional**. To use them:
+
+1. Check the beamlines toolbar for available tools
+2. If a tool shows "File Not Found", install it following the instructions in the launcher dialog
+3. Once installed, the tool will launch from the PyStream toolbar
+
+### For Developers
+
 For standalone Python GUI scripts (Tkinter, PyQt, etc.) that you want to launch from PyStream, use the simple launcher template instead of writing a full plugin.
 
-See the [Launcher Guide](launcher_guide.md) for a quick 3-step process to add launcher buttons for your external GUIs.
+See the [Launcher Guide](launcher_guide.md) for:
+- How to create launcher buttons for external GUIs
+- How users install optional tools
+- Deployment workflow for beamline developers
+- Best practices for optional dependencies
 
 ## Plugin Development Guidelines
 
@@ -202,3 +225,12 @@ Potential future improvements to the beamlines system:
 2. Test PV access with `caget` command
 3. Check network connectivity to IOCs
 4. Verify PV names in tool configuration
+
+## Detailed Documentation
+
+```{toctree}
+:maxdepth: 2
+
+bl32ID
+launcher_guide
+```

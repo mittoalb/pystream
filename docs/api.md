@@ -2,15 +2,6 @@
 
 ## Plugins
 
-### Mosaic Alignment
-
-```{eval-rst}
-.. automodule:: pystream.plugins.mosalign
-   :members:
-   :undoc-members:
-   :no-index:
-```
-
 ### ROI Manager
 
 ```{eval-rst}
@@ -25,6 +16,35 @@
 .. automodule:: pystream.plugins.line
    :members:
    :undoc-members:
+```
+
+## Beamline Modules
+
+### bl32ID - Mosaic Alignment
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.mosalign
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
+### bl32ID - SoftBPM
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.softbpm
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
+### bl32ID - Detector Control
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.detectorcontrol
+   :members:
+   :undoc-members:
+   :no-index:
 ```
 
 ## Note

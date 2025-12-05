@@ -4,11 +4,20 @@ Advanced Photon Source beamline 32-ID specialized tools for tomography and imagi
 
 ## Overview
 
-The bl32ID beamline package provides three specialized tools for detector control, beam position monitoring, and motor alignment:
+The bl32ID beamline package provides built-in tools and launchers for optional external GUIs:
+
+### Built-in Tools (Always Available)
 
 - **Detector Control**: Manage camera binning and ROI settings
 - **SoftBPM**: Software beam position monitor with automatic motor adjustment
 - **Mosalign**: 2D motor scanning with image stitching
+
+### Optional External Tools (Install Separately)
+
+- **XANES GUI**: Energy calibration and XANES scanning control
+- **Optics Calculator**: TXM optics parameter calculator
+
+External tools are optional packages installed separately. Click the button to launch - if not installed, you'll see installation instructions.
 
 ## Detector Control
 
