@@ -50,7 +50,9 @@ ENV/
 *.tiff
 *.h5
 *.hdf5
-*.json
+# Config files (but not pipeline definitions)
+motor_scan_config.json
+*_config.json
 *.yaml
 *.yml
 *.cfg

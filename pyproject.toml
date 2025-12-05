@@ -30,7 +30,7 @@ dev = ["black", "flake8", "pytest"]
 [project.scripts]
 pystream = "pystream.pystream:main"
 viewer = "pystream.plugins.viewer:main"
-mosalign = "pystream.plugins.mosalign:main"
+mosalign = "pystream.beamlines.bl32ID.mosalign:main"
 metrics = "pystream.plugins.metrics:main"
 
 [tool.setuptools]
@@ -41,4 +41,4 @@ where = ["src"]
 include = ["pystream*"]
 
 [tool.setuptools.package-data]
-pystream = ["pipelines/*.json"]
+pystream = ["pipelines/*.json", "beamlines/bl32ID/*.sh"]

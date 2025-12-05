@@ -251,11 +251,15 @@ class MotorScanDialog(QtWidgets.QDialog):
 
     def _load_config(self):
         """Load settings from config file"""
-        import os
         import json
+        from pathlib import Path
 
-        config_file = "motor_scan_config.json"
-        if os.path.exists(config_file):
+        # Create config directory in user's home
+        config_dir = Path.home() / '.pystream' / 'config'
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        config_file = config_dir / 'motor_scan_config.json'
+        if config_file.exists():
             try:
                 with open(config_file, 'r') as f:
                     config = json.load(f)
@@ -299,6 +303,11 @@ class MotorScanDialog(QtWidgets.QDialog):
     def _save_config(self):
         """Save current settings to config file"""
         import json
+        from pathlib import Path
+
+        # Create config directory in user's home
+        config_dir = Path.home() / '.pystream' / 'config'
+        config_dir.mkdir(parents=True, exist_ok=True)
 
         config = {
             'motor1_pv': self.motor1_pv.text(),
@@ -318,9 +327,10 @@ class MotorScanDialog(QtWidgets.QDialog):
         }
 
         try:
-            with open("motor_scan_config.json", 'w') as f:
+            config_file = config_dir / 'motor_scan_config.json'
+            with open(config_file, 'w') as f:
                 json.dump(config, f, indent=2)
-            self._log("✓ Settings saved")
+            self._log(f"✓ Settings saved to {config_file}")
         except Exception as e:
             self._log(f"Failed to save config: {e}")
 
@@ -856,59 +866,6 @@ class ScanWorker(QtCore.QThread):
             self.dialog.stitched_image[start_y:end_y, start_x:end_x] = sub
         finally:
             self.dialog.stitched_lock.unlock()
-
-    def _run_tomoscan_at_position(self, x_pos, y_pos, motor1_pv, motor2_pv):
-        """Run tomoscan at current position"""
-        prefix = self.dialog.tomoscan_prefix.text().strip()
-        tomoscan_cmd = self.dialog.tomoscan_path.text().strip()
-
-        full_cmd = f"{tomoscan_cmd} single --tomoscan-prefix {prefix}"
-
-        self.log_signal.emit(f"  Starting tomoscan at ({x_pos:.3f}, {y_pos:.3f})...")
-        self.log_signal.emit(f"  Command: {full_cmd}")
-
-        try:
-            abs_x_pos = x_pos
-            abs_y_pos = y_pos
-
-            if self.dialog.test_mode:
-                self.log_signal.emit(f"  [MOCK MODE - not actually running]")
-                time.sleep(0.5)
-                result_returncode = 0
-            else:
-                result = subprocess.run(
-                    [tomoscan_cmd, 'single', '--tomoscan-prefix', prefix],
-                    capture_output=True,
-                    text=True,
-                    timeout=300
-                )
-                result_returncode = result.returncode
-
-            if result_returncode == 0:
-                self.log_signal.emit("  ✓ Tomoscan completed")
-                self.log_signal.emit("  (Projection capture skipped - data saved by tomoscan)")
-
-                self.log_signal.emit(f"  Restoring motors to grid position X={abs_x_pos:.3f}, Y={abs_y_pos:.3f}")
-                if self.dialog.test_mode:
-                    self.log_signal.emit(f"  [MOCK MODE - not actually moving motors]")
-                else:
-                    subprocess.run(['caput', motor1_pv, str(abs_x_pos)],
-                                   capture_output=True, timeout=5)
-                    subprocess.run(['caput', motor2_pv, str(abs_y_pos)],
-                                   capture_output=True, timeout=5)
-                    self.log_signal.emit(f"  ✓ Motors restored")
-
-                self.log_signal.emit(f"  (Camera stream stopped - will restart at next tomoscan)")
-                time.sleep(0.2)
-
-            else:
-                if not self.dialog.test_mode:
-                    self.log_signal.emit("  ✗ Tomoscan failed")
-
-        except subprocess.TimeoutExpired:
-            self.log_signal.emit("  ✗ Tomoscan timeout")
-        except Exception as e:
-            self.log_signal.emit(f"  ✗ Tomoscan error: {e}")
 
 
 def main():
