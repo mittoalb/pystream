@@ -4,7 +4,8 @@
       "Bash(find:*)",
       "Bash(python3:*)",
       "Bash(pip show:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(make:*)"
     ],
     "deny": [],
     "ask": []
