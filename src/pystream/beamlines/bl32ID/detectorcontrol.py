@@ -3,7 +3,7 @@ Detector Control Plugin for bl32ID
 
 Controls detector binning and ROI by:
 - Setting BinX/BinY which automatically updates SizeX/SizeY
-- Drawing an ROI on the image that sets MinX/MinY/SizeX/SizeY
+- Drawing an ROI on the image that sets CropLeft/Right/Top/Bottom and applies via Crop PV
 """
 
 import subprocess
@@ -52,6 +52,9 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.pv_prefix_input = QtWidgets.QLineEdit("32idbSP1:cam1")
         prefix_layout.addRow("Camera PV Prefix:", self.pv_prefix_input)
 
+        self.crop_prefix_input = QtWidgets.QLineEdit("32id:TXMOptics")
+        prefix_layout.addRow("Crop PV Prefix:", self.crop_prefix_input)
+
         prefix_group.setLayout(prefix_layout)
         layout.addWidget(prefix_group)
 
@@ -89,7 +92,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
         roi_desc = QtWidgets.QLabel(
             "Draw an ROI on the image to set detector region.\n"
-            "ROI sets MinX, MinY, SizeX, SizeY on the detector."
+            "ROI sets CropLeft, CropRight, CropTop, CropBottom and applies via Crop PV."
         )
         roi_desc.setWordWrap(True)
         roi_layout.addWidget(roi_desc)
@@ -250,20 +253,20 @@ class DetectorControlDialog(QtWidgets.QDialog):
             )
 
     def _read_roi(self):
-        """Read current ROI values from detector."""
-        prefix = self.pv_prefix_input.text()
+        """Read current ROI values from crop PVs."""
+        crop_prefix = self.crop_prefix_input.text()
 
-        minx = self._get_pv_value(f"{prefix}:MinX")
-        miny = self._get_pv_value(f"{prefix}:MinY")
-        sizex = self._get_pv_value(f"{prefix}:SizeX")
-        sizey = self._get_pv_value(f"{prefix}:SizeY")
+        crop_left = self._get_pv_value(f"{crop_prefix}:CropLeft")
+        crop_right = self._get_pv_value(f"{crop_prefix}:CropRight")
+        crop_top = self._get_pv_value(f"{crop_prefix}:CropTop")
+        crop_bottom = self._get_pv_value(f"{crop_prefix}:CropBottom")
 
-        if all([minx, miny, sizex, sizey]):
+        if all([crop_left, crop_right, crop_top, crop_bottom]):
             self.roi_info_label.setText(
-                f"Current ROI: MinX={minx}, MinY={miny}, "
-                f"SizeX={sizex}, SizeY={sizey}"
+                f"Current Crop: Left={crop_left}, Right={crop_right}, "
+                f"Top={crop_top}, Bottom={crop_bottom}"
             )
-            self._log_message(f"Read ROI: MinX={minx}, MinY={miny}, SizeX={sizex}, SizeY={sizey}")
+            self._log_message(f"Read Crop: Left={crop_left}, Right={crop_right}, Top={crop_top}, Bottom={crop_bottom}")
 
     def _toggle_roi(self, checked: bool):
         """Toggle ROI drawing on the image."""
@@ -353,7 +356,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
             )
 
     def _apply_roi(self):
-        """Apply the drawn ROI to detector PVs."""
+        """Apply the drawn ROI to crop PVs."""
         if not self.roi:
             QtWidgets.QMessageBox.warning(
                 self, "No ROI",
@@ -361,34 +364,71 @@ class DetectorControlDialog(QtWidgets.QDialog):
             )
             return
 
+        # Get the ROI position and size
         pos = self.roi.pos()
         size = self.roi.size()
 
-        minx = int(pos[0])
-        miny = int(pos[1])
-        sizex = int(size[0])
-        sizey = int(size[1])
+        x = int(pos[0])
+        y = int(pos[1])
+        w = int(size[0])
+        h = int(size[1])
 
-        # Apply to detector
-        prefix = self.pv_prefix_input.text()
+        # Get image dimensions to calculate crop values
+        parent_viewer = self.parent()
+        if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "Cannot access image view to determine image dimensions."
+            )
+            return
+
+        image_view = parent_viewer.image_view
+        image_item = image_view.getImageItem()
+        if image_item is None or image_item.image is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "No image available to determine dimensions."
+            )
+            return
+
+        image = image_item.image
+        img_h, img_w = image.shape[:2]
+
+        # Convert ROI rectangle to crop values (pixels from each edge)
+        crop_left = x
+        crop_right = img_w - (x + w)
+        crop_top = y
+        crop_bottom = img_h - (y + h)
+
+        # Apply to crop PVs
+        crop_prefix = self.crop_prefix_input.text()
         success = True
 
-        if not self._set_pv_value(f"{prefix}:MinX", minx):
+        if not self._set_pv_value(f"{crop_prefix}:CropLeft", crop_left):
             success = False
-        if not self._set_pv_value(f"{prefix}:MinY", miny):
+        if not self._set_pv_value(f"{crop_prefix}:CropRight", crop_right):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeX", sizex):
+        if not self._set_pv_value(f"{crop_prefix}:CropTop", crop_top):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeY", sizey):
+        if not self._set_pv_value(f"{crop_prefix}:CropBottom", crop_bottom):
             success = False
 
+        # Apply the crop
         if success:
-            self._log_message(f"Applied ROI: MinX={minx}, MinY={miny}, SizeX={sizex}, SizeY={sizey}")
+            if not self._set_pv_value(f"{crop_prefix}:Crop", 1):
+                success = False
+
+        if success:
+            self._log_message(
+                f"Applied ROI: Left={crop_left}, Right={crop_right}, "
+                f"Top={crop_top}, Bottom={crop_bottom}"
+            )
             QtWidgets.QMessageBox.information(
                 self, "Success",
                 f"ROI applied to detector:\n"
-                f"MinX={minx}, MinY={miny}\n"
-                f"SizeX={sizex}, SizeY={sizey}"
+                f"CropLeft={crop_left}, CropRight={crop_right}\n"
+                f"CropTop={crop_top}, CropBottom={crop_bottom}\n"
+                f"ROI region: ({x},{y}) size {w}×{h}"
             )
         else:
             QtWidgets.QMessageBox.warning(

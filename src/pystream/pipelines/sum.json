@@ -1,0 +1,11 @@
+{
+  "processors": [
+    {
+      "name": "SumFrames",
+      "module": "sum",
+      "class": "SumFrames",
+      "kwargs": { "preview_sum": true }
+    }
+  ]
+}
+
