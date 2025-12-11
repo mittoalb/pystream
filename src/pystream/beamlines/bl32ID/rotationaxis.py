@@ -282,10 +282,10 @@ class RotationAxisDialog(QtWidgets.QDialog):
 
     def _detect_rotation_axis(self) -> tuple[Optional[float], float]:
         """
-        Detect rotation axis using sinogram symmetry analysis.
+        Detect rotation axis by finding where image intensity variance is minimum.
 
-        For tomography, we analyze horizontal line profiles across multiple angles.
-        The rotation axis is where the sinogram is most symmetric when mirrored.
+        For tomography: features at the rotation axis don't move, so they have
+        low variance across angles. Features far from axis move a lot = high variance.
 
         The axis can be outside the field of view (negative or beyond width).
 
@@ -294,181 +294,77 @@ class RotationAxisDialog(QtWidgets.QDialog):
                    (can be negative or > width if outside FOV)
                    and confidence is between 0 and 1
         """
-        if len(self.image_buffer) < 2:
+        if len(self.image_buffer) < 3:
             return None, 0.0
 
         num_images = len(self.image_buffer)
-        if num_images < 2:
-            return None, 0.0
-
-        # Get image dimensions
         height, width = self.image_buffer[0].shape[:2]
 
-        # Use middle rows for analysis (avoid edges)
+        # Stack all images into 3D array (angles × height × width)
+        image_stack = np.array(self.image_buffer[:num_images])
+
+        # Use middle rows for robust analysis
         row_start = height // 4
         row_end = 3 * height // 4
-        rows_to_use = list(range(row_start, row_end, max(1, (row_end - row_start) // 20)))
 
-        # Try different possible axis positions
-        # Search range: allow axis to be outside FOV
-        search_range = np.linspace(-width * 0.5, width * 1.5, 200)
+        # Compute variance along angle dimension for each pixel column
+        # For each column x, calculate how much the vertical profile varies across angles
+        variance_map = np.var(image_stack[:, row_start:row_end, :], axis=0)
 
-        symmetry_scores = []
+        # Average variance across vertical dimension to get 1D variance profile
+        # variance_profile[x] = how much column x varies across angles
+        variance_profile = np.mean(variance_map, axis=0)
 
-        for axis_candidate in search_range:
-            score = 0.0
-            count = 0
+        # Smooth to reduce noise
+        if len(variance_profile) > 10:
+            kernel_size = min(11, len(variance_profile) // 10)
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            kernel = np.ones(kernel_size) / kernel_size
+            variance_profile = np.convolve(variance_profile, kernel, mode='same')
 
-            # For each row, check symmetry across all image pairs
-            for row_idx in rows_to_use:
-                sinogram_line = []
+        # The rotation axis should be at the MINIMUM variance
+        # But axis might be outside FOV, so we need to extrapolate
 
-                # Build sinogram line from all images
-                for img in self.image_buffer:
-                    if row_idx < img.shape[0]:
-                        sinogram_line.append(img[row_idx, :])
+        # Find the general trend: variance should increase away from axis
+        # Fit a parabola to find the minimum
+        x_coords = np.arange(width)
 
-                if len(sinogram_line) < 2:
-                    continue
+        # Try to fit parabola: variance = a*(x - x_axis)^2 + c
+        # This works even if axis is outside [0, width]
+        try:
+            # Parabolic fit
+            coeffs = np.polyfit(x_coords, variance_profile, 2)
+            a, b, c = coeffs
 
-                # Stack into 2D sinogram (angles × detector_columns)
-                sino = np.array(sinogram_line)
+            if abs(a) > 1e-10:
+                # Minimum of parabola ax^2 + bx + c is at x = -b/(2a)
+                axis_x = -b / (2 * a)
 
-                # Measure symmetry for this axis position
-                row_score = self._measure_sinogram_symmetry(sino, axis_candidate, width)
-                if row_score > 0:
-                    score += row_score
-                    count += 1
+                # Confidence based on how well the parabola fits
+                fitted_curve = np.polyval(coeffs, x_coords)
+                residuals = variance_profile - fitted_curve
+                r_squared = 1 - (np.sum(residuals**2) / np.sum((variance_profile - np.mean(variance_profile))**2))
+                confidence = max(0.0, min(1.0, r_squared))
 
-            if count > 0:
-                symmetry_scores.append(score / count)
+                # Also check that parabola opens upward (a > 0)
+                if a <= 0:
+                    # Parabola opens downward - not what we expect
+                    # Fall back to simple minimum
+                    axis_x = float(np.argmin(variance_profile))
+                    confidence = 0.3
             else:
-                symmetry_scores.append(0.0)
+                # Not really a parabola, just find minimum
+                axis_x = float(np.argmin(variance_profile))
+                confidence = 0.3
 
-        # Find axis position with best symmetry (maximum score)
-        symmetry_scores = np.array(symmetry_scores)
-
-        if np.max(symmetry_scores) == 0:
-            return None, 0.0
-
-        best_idx = np.argmax(symmetry_scores)
-        axis_x = search_range[best_idx]
-
-        # Refine using parabolic fit around peak
-        if 0 < best_idx < len(symmetry_scores) - 1:
-            y1 = symmetry_scores[best_idx - 1]
-            y2 = symmetry_scores[best_idx]
-            y3 = symmetry_scores[best_idx + 1]
-
-            denom = 2 * (y1 - 2*y2 + y3)
-            if abs(denom) > 1e-10:
-                dx = (y1 - y3) / denom
-                axis_x = search_range[best_idx] + dx * (search_range[1] - search_range[0])
-
-        # Confidence based on peak sharpness
-        peak_value = np.max(symmetry_scores)
-        mean_value = np.mean(symmetry_scores)
-        std_value = np.std(symmetry_scores)
-
-        if std_value > 1e-10:
-            confidence = (peak_value - mean_value) / (peak_value + 1e-10)
-            confidence = min(1.0, max(0.0, confidence))
-        else:
-            confidence = 0.0
+        except Exception:
+            # Fit failed, use simple minimum
+            axis_x = float(np.argmin(variance_profile))
+            confidence = 0.3
 
         # DO NOT clamp axis position - allow outside FOV
         return float(axis_x), float(confidence)
-
-    def _measure_sinogram_symmetry(self, sino: np.ndarray, axis_pos: float, width: int) -> float:
-        """
-        Measure symmetry of sinogram when mirrored around a candidate axis position.
-
-        For correct rotation axis, the sinogram should be symmetric when we compare
-        pixels equidistant from the axis.
-
-        Args:
-            sino: 2D sinogram (angles × detector_columns)
-            axis_pos: Candidate axis position in pixels
-            width: Image width in pixels
-
-        Returns:
-            Symmetry score (higher = more symmetric)
-        """
-        num_angles = sino.shape[0]
-        if num_angles < 2:
-            return 0.0
-
-        # For 180-degree opposed angles, compare mirrored profiles
-        # Use first and last images (should be ~180 degrees apart in tomography)
-        proj_0 = sino[0, :]
-        proj_180 = sino[-1, :]
-
-        # Flip the 180-degree projection around the axis
-        flipped_180 = self._flip_around_axis(proj_180, axis_pos, width)
-
-        # Compare correlation between proj_0 and flipped proj_180
-        # High correlation = correct axis
-        score = self._compute_correlation(proj_0, flipped_180)
-
-        return score
-
-    def _flip_around_axis(self, profile: np.ndarray, axis_pos: float, width: int) -> np.ndarray:
-        """
-        Flip a 1D profile around an axis position.
-
-        Args:
-            profile: 1D intensity profile
-            axis_pos: Axis position in pixels (can be outside [0, width])
-            width: Profile width
-
-        Returns:
-            Flipped profile
-        """
-        # Create output array
-        flipped = np.zeros_like(profile)
-
-        for i in range(width):
-            # Mirror position around axis
-            mirror_i = 2 * axis_pos - i
-
-            # Interpolate if mirror position is valid
-            if 0 <= mirror_i < width - 1:
-                # Linear interpolation
-                i_low = int(np.floor(mirror_i))
-                i_high = int(np.ceil(mirror_i))
-                frac = mirror_i - i_low
-
-                if i_high < width:
-                    flipped[i] = profile[i_low] * (1 - frac) + profile[i_high] * frac
-            elif 0 <= int(mirror_i) < width:
-                flipped[i] = profile[int(mirror_i)]
-
-        return flipped
-
-    def _compute_correlation(self, arr1: np.ndarray, arr2: np.ndarray) -> float:
-        """
-        Compute normalized correlation between two arrays.
-
-        Returns:
-            Correlation coefficient (0 to 1)
-        """
-        if len(arr1) != len(arr2) or len(arr1) == 0:
-            return 0.0
-
-        # Normalize
-        a1 = arr1 - np.mean(arr1)
-        a2 = arr2 - np.mean(arr2)
-
-        std1 = np.std(a1)
-        std2 = np.std(a2)
-
-        if std1 < 1e-10 or std2 < 1e-10:
-            return 0.0
-
-        # Pearson correlation
-        corr = np.sum(a1 * a2) / (len(arr1) * std1 * std2)
-
-        return max(0.0, min(1.0, corr))
 
     def _compute_shift(self, img1: np.ndarray, img2: np.ndarray) -> tuple[Optional[float], float]:
         """
