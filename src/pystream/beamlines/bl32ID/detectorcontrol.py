@@ -117,6 +117,10 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.apply_roi_btn.setEnabled(False)
         roi_apply_layout.addWidget(self.apply_roi_btn)
 
+        self.remove_roi_btn = QtWidgets.QPushButton("Remove ROI (Full Frame)")
+        self.remove_roi_btn.clicked.connect(self._remove_roi)
+        roi_apply_layout.addWidget(self.remove_roi_btn)
+
         self.read_roi_btn = QtWidgets.QPushButton("Read Current ROI")
         self.read_roi_btn.clicked.connect(self._read_roi)
         roi_apply_layout.addWidget(self.read_roi_btn)
@@ -177,8 +181,14 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self._log_message(f"Error getting PV {pv_name}: {e}")
             return None
 
-    def _set_pv_value(self, pv_name: str, value) -> bool:
-        """Set PV value using caput."""
+    def _set_pv_value(self, pv_name: str, value, force_process: bool = False) -> bool:
+        """Set PV value using caput.
+
+        Args:
+            pv_name: PV name to set
+            value: Value to set
+            force_process: If True, also trigger the .PROC field to force processing
+        """
         try:
             result = subprocess.run(
                 ['caput', pv_name, str(value)],
@@ -187,6 +197,18 @@ class DetectorControlDialog(QtWidgets.QDialog):
                 timeout=5
             )
             if result.returncode == 0:
+                # Force processing if requested by setting .PROC to 1
+                if force_process:
+                    # Extract base PV name (remove field if present)
+                    base_pv = pv_name.split('.')[0] if '.' in pv_name else pv_name
+                    proc_result = subprocess.run(
+                        ['caput', f"{base_pv}.PROC", '1'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if proc_result.returncode != 0:
+                        self._log_message(f"Warning: Failed to process {base_pv}.PROC")
                 return True
             else:
                 self._log_message(f"Failed to set PV {pv_name}: {result.stderr}")
@@ -358,17 +380,17 @@ class DetectorControlDialog(QtWidgets.QDialog):
         sizex = int(size[0])
         sizey = int(size[1])
 
-        # Apply to detector
+        # Apply to detector with force processing
         prefix = self.pv_prefix_input.text()
         success = True
 
-        if not self._set_pv_value(f"{prefix}:MinX", minx):
+        if not self._set_pv_value(f"{prefix}:MinX", minx, force_process=True):
             success = False
-        if not self._set_pv_value(f"{prefix}:MinY", miny):
+        if not self._set_pv_value(f"{prefix}:MinY", miny, force_process=True):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeX", sizex):
+        if not self._set_pv_value(f"{prefix}:SizeX", sizex, force_process=True):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeY", sizey):
+        if not self._set_pv_value(f"{prefix}:SizeY", sizey, force_process=True):
             success = False
 
         if success:
@@ -383,6 +405,48 @@ class DetectorControlDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(
                 self, "Error",
                 "Failed to apply ROI. Check log for details."
+            )
+
+    def _remove_roi(self):
+        """Remove ROI from detector (reset to full frame)."""
+        prefix = self.pv_prefix_input.text()
+
+        # Get the full detector size
+        max_sizex = self._get_pv_value(f"{prefix}:MaxSizeX_RBV")
+        max_sizey = self._get_pv_value(f"{prefix}:MaxSizeY_RBV")
+
+        if not max_sizex or not max_sizey:
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "Could not read detector maximum size.\n"
+                "Make sure the PV prefix is correct."
+            )
+            return
+
+        # Set ROI to full frame: MinX=0, MinY=0, SizeX=Max, SizeY=Max
+        success = True
+        if not self._set_pv_value(f"{prefix}:MinX", 0, force_process=True):
+            success = False
+        if not self._set_pv_value(f"{prefix}:MinY", 0, force_process=True):
+            success = False
+        if not self._set_pv_value(f"{prefix}:SizeX", max_sizex, force_process=True):
+            success = False
+        if not self._set_pv_value(f"{prefix}:SizeY", max_sizey, force_process=True):
+            success = False
+
+        if success:
+            self._log_message(f"Removed ROI: Reset to full frame {max_sizex}×{max_sizey}")
+            QtWidgets.QMessageBox.information(
+                self, "Success",
+                f"ROI removed. Detector reset to full frame:\n"
+                f"{max_sizex}×{max_sizey}"
+            )
+            # Update the display
+            self._read_roi()
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "Failed to remove ROI. Check log for details."
             )
 
     def closeEvent(self, event):
