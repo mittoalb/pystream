@@ -1108,6 +1108,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
     
     @QtCore.pyqtSlot(int, np.ndarray, float)
     def _update_image_slot(self, uid: int, img: np.ndarray, ts: float):
+        # Store original shape before any transformations
+        original_shape = img.shape
+
         img = self._apply_view_ops(img)
         self._last_display_img = img
         self.current_uid = uid
@@ -1168,10 +1171,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         self.lbl_uid.setText(f"UID: {uid}")
         self.lbl_fps.setText(f"FPS: {self.fps_ema:4.1f}")
-        
-        # Update image info
+
+        # Update image info - show original shape before binning
         self.lbl_info.setText(
-            f"Shape: {img.shape}\n"
+            f"Shape: {original_shape}\n"
             f"Dtype: {img.dtype}\n"
             f"Min: {img.min():.2f}\n"
             f"Max: {img.max():.2f}\n"
