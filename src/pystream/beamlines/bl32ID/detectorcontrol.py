@@ -181,34 +181,23 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self._log_message(f"Error getting PV {pv_name}: {e}")
             return None
 
-    def _set_pv_value(self, pv_name: str, value, force_process: bool = False) -> bool:
-        """Set PV value using caput.
+    def _set_pv_value(self, pv_name: str, value) -> bool:
+        """Set PV value using caput with -c flag to wait for callback.
 
         Args:
             pv_name: PV name to set
             value: Value to set
-            force_process: If True, also trigger the .PROC field to force processing
         """
         try:
+            # Use caput -c to wait for callback completion
+            # This ensures the value is processed before returning
             result = subprocess.run(
-                ['caput', pv_name, str(value)],
+                ['caput', '-c', pv_name, str(value)],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=10
             )
             if result.returncode == 0:
-                # Force processing if requested by setting .PROC to 1
-                if force_process:
-                    # Extract base PV name (remove field if present)
-                    base_pv = pv_name.split('.')[0] if '.' in pv_name else pv_name
-                    proc_result = subprocess.run(
-                        ['caput', f"{base_pv}.PROC", '1'],
-                        capture_output=True,
-                        text=True,
-                        timeout=5
-                    )
-                    if proc_result.returncode != 0:
-                        self._log_message(f"Warning: Failed to process {base_pv}.PROC")
                 return True
             else:
                 self._log_message(f"Failed to set PV {pv_name}: {result.stderr}")
@@ -380,17 +369,17 @@ class DetectorControlDialog(QtWidgets.QDialog):
         sizex = int(size[0])
         sizey = int(size[1])
 
-        # Apply to detector with force processing
+        # Apply to detector
         prefix = self.pv_prefix_input.text()
         success = True
 
-        if not self._set_pv_value(f"{prefix}:MinX", minx, force_process=True):
+        if not self._set_pv_value(f"{prefix}:MinX", minx):
             success = False
-        if not self._set_pv_value(f"{prefix}:MinY", miny, force_process=True):
+        if not self._set_pv_value(f"{prefix}:MinY", miny):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeX", sizex, force_process=True):
+        if not self._set_pv_value(f"{prefix}:SizeX", sizex):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeY", sizey, force_process=True):
+        if not self._set_pv_value(f"{prefix}:SizeY", sizey):
             success = False
 
         if success:
@@ -425,13 +414,13 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
         # Set ROI to full frame: MinX=0, MinY=0, SizeX=Max, SizeY=Max
         success = True
-        if not self._set_pv_value(f"{prefix}:MinX", 0, force_process=True):
+        if not self._set_pv_value(f"{prefix}:MinX", 0):
             success = False
-        if not self._set_pv_value(f"{prefix}:MinY", 0, force_process=True):
+        if not self._set_pv_value(f"{prefix}:MinY", 0):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeX", max_sizex, force_process=True):
+        if not self._set_pv_value(f"{prefix}:SizeX", max_sizex):
             success = False
-        if not self._set_pv_value(f"{prefix}:SizeY", max_sizey, force_process=True):
+        if not self._set_pv_value(f"{prefix}:SizeY", max_sizey):
             success = False
 
         if success:
