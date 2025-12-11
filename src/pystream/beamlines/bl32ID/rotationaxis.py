@@ -282,7 +282,12 @@ class RotationAxisDialog(QtWidgets.QDialog):
 
     def _detect_rotation_axis(self) -> tuple[Optional[float], float]:
         """
-        Detect rotation axis using image correlation method.
+        Detect rotation axis using phase correlation on image pairs.
+
+        Uses the principle that for a rotation around axis at position x_c:
+        - Features at distance r from axis appear to shift by ±r*sin(θ) ≈ ±r*θ
+        - The axis itself (r=0) doesn't shift
+        - By analyzing shifts across multiple pairs, we find where shift → 0
 
         The axis can be outside the field of view (negative or beyond width).
 
@@ -291,47 +296,112 @@ class RotationAxisDialog(QtWidgets.QDialog):
                    (can be negative or > width if outside FOV)
                    and confidence is between 0 and 1
         """
-        if len(self.image_buffer) < 2:
+        if len(self.image_buffer) < 3:
             return None, 0.0
 
-        # Get the two most recent images
-        img1 = self.image_buffer[-2]
-        img2 = self.image_buffer[-1]
+        # Use all available image pairs
+        num_images = len(self.image_buffer)
+        width = self.image_buffer[0].shape[1]
 
-        # Ensure same shape
-        if img1.shape != img2.shape:
+        # Collect shifts from multiple image pairs
+        shifts = []
+        weights = []
+
+        for i in range(num_images - 1):
+            img1 = self.image_buffer[i]
+            img2 = self.image_buffer[i + 1]
+
+            if img1.shape != img2.shape:
+                continue
+
+            # Compute horizontal shift using phase correlation
+            shift, confidence = self._compute_shift(img1, img2)
+
+            if shift is not None and confidence > 0.1:  # Only use reliable shifts
+                shifts.append(shift)
+                weights.append(confidence)
+
+        if len(shifts) < 1:
             return None, 0.0
 
-        height, width = img1.shape
+        # Weighted average of shifts
+        shifts = np.array(shifts)
+        weights = np.array(weights)
+        avg_shift = np.average(shifts, weights=weights)
 
-        # Compute vertical projections (sum along vertical axis)
+        # For small angle rotations, the shift is approximately proportional to
+        # the distance from the rotation axis. The axis is where shift = 0.
+        # If we observe shift 's' at the image center (width/2), then:
+        # s = (width/2 - x_axis) * θ
+        # Solving for x_axis: x_axis = width/2 - s/θ
+        # For small θ, we approximate: x_axis ≈ width/2 - s
+
+        axis_x = width / 2.0 - avg_shift
+
+        # Confidence based on consistency of shift measurements
+        if len(shifts) > 1:
+            shift_std = np.std(shifts)
+            shift_range = np.ptp(shifts) if len(shifts) > 1 else 0
+            # Lower variance = higher confidence
+            confidence = np.mean(weights) * np.exp(-shift_std / (width * 0.1))
+        else:
+            confidence = weights[0]
+
+        confidence = min(1.0, max(0.0, confidence))
+
+        # DO NOT clamp - allow axis outside field of view
+        return float(axis_x), float(confidence)
+
+    def _compute_shift(self, img1: np.ndarray, img2: np.ndarray) -> tuple[Optional[float], float]:
+        """
+        Compute horizontal shift between two images using projection correlation.
+
+        Returns:
+            tuple: (shift_in_pixels, confidence)
+        """
+        # Compute vertical projections (collapse to 1D)
         proj1 = np.sum(img1, axis=0)
         proj2 = np.sum(img2, axis=0)
 
-        # Normalize projections
+        # Normalize
         proj1 = (proj1 - np.mean(proj1)) / (np.std(proj1) + 1e-8)
         proj2 = (proj2 - np.mean(proj2)) / (np.std(proj2) + 1e-8)
 
-        # Cross-correlation to find shift
-        correlation = np.correlate(proj1, proj2, mode='same')
+        # Cross-correlation
+        correlation = np.correlate(proj1, proj2, mode='full')
 
-        # Find peak correlation position
-        max_corr_idx = np.argmax(correlation)
-        shift = max_corr_idx - width // 2
+        # Find peak
+        max_idx = np.argmax(correlation)
+        width = len(proj1)
 
-        # Estimate rotation axis as center minus half the shift
-        # (rotation axis is the point that doesn't move)
-        axis_x = width / 2.0 - shift / 2.0
+        # Convert to shift (positive = rightward shift)
+        shift = max_idx - (width - 1)
 
-        # Confidence based on correlation peak sharpness
-        corr_max = correlation[max_corr_idx]
+        # Refine shift using parabolic interpolation around peak
+        if 0 < max_idx < len(correlation) - 1:
+            y1 = correlation[max_idx - 1]
+            y2 = correlation[max_idx]
+            y3 = correlation[max_idx + 1]
+
+            # Parabolic fit for sub-pixel accuracy
+            denom = 2 * (y1 - 2*y2 + y3)
+            if abs(denom) > 1e-10:
+                shift_correction = (y1 - y3) / denom
+                shift += shift_correction
+
+        # Confidence from correlation peak quality
+        corr_max = correlation[max_idx]
         corr_mean = np.mean(correlation)
-        confidence = min(1.0, (corr_max - corr_mean) / (np.max(correlation) + 1e-8))
+        corr_std = np.std(correlation)
 
-        # DO NOT clamp - allow axis outside field of view
-        # This is valid for tomography where rotation center may be off-detector
+        if corr_std > 1e-10:
+            # Signal-to-noise ratio
+            confidence = (corr_max - corr_mean) / corr_std
+            confidence = min(1.0, confidence / 10.0)  # Normalize
+        else:
+            confidence = 0.0
 
-        return float(axis_x), float(confidence)
+        return float(shift), float(confidence)
 
     def _show_axis_line(self):
         """Show the detected axis as a vertical line on the image."""
