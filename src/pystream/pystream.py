@@ -602,6 +602,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
                             btn.clicked.connect(lambda _, m=module: self._open_softbpm(m))
                         elif hasattr(module, 'DetectorControlDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_detector_control(m))
+                        elif hasattr(module, 'RotationAxisDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_rotation_axis(m))
                         elif hasattr(module, 'XANESGuiDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_xanes_gui(m))
                         elif hasattr(module, 'OpticsCalcDialog'):
@@ -1652,6 +1654,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.detector_control_dialog.show()
         self.detector_control_dialog.raise_()
         self.detector_control_dialog.activateWindow()
+
+    def _open_rotation_axis(self, module):
+        """Open the Rotation Axis Detection dialog"""
+        if not hasattr(self, 'rotation_axis_dialog') or self.rotation_axis_dialog is None:
+            self.rotation_axis_dialog = module.RotationAxisDialog(parent=self, logger=LOGGER)
+        self.rotation_axis_dialog.show()
+        self.rotation_axis_dialog.raise_()
+        self.rotation_axis_dialog.activateWindow()
 
     def _open_xanes_gui(self, module):
         """Launch the XANES GUI (runs immediately, no dialog)"""

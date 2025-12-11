@@ -5,5 +5,6 @@ from .softbpm import SoftBPMDialog
 from .detectorcontrol import DetectorControlDialog
 from .xanesgui import XANESGuiDialog
 from .opticscalc import OpticsCalcDialog
+from .rotationaxis import RotationAxisDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'OpticsCalcDialog']
+__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'OpticsCalcDialog', 'RotationAxisDialog']
