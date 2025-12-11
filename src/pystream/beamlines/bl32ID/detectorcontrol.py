@@ -55,6 +55,9 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.crop_prefix_input = QtWidgets.QLineEdit("32id:TXMOptics")
         prefix_layout.addRow("Crop PV Prefix:", self.crop_prefix_input)
 
+        self.vertical_flip_check = QtWidgets.QCheckBox("Vertical Flip (swap top/bottom)")
+        prefix_layout.addRow("Image Orientation:", self.vertical_flip_check)
+
         prefix_group.setLayout(prefix_layout)
         layout.addWidget(prefix_group)
 
@@ -399,6 +402,11 @@ class DetectorControlDialog(QtWidgets.QDialog):
         crop_right = img_w - (x + w)
         crop_top = y
         crop_bottom = img_h - (y + h)
+
+        # Apply vertical flip if enabled (swap top and bottom)
+        if self.vertical_flip_check.isChecked():
+            crop_top, crop_bottom = crop_bottom, crop_top
+            self._log_message("Vertical flip enabled: swapping top and bottom")
 
         # Apply to crop PVs
         crop_prefix = self.crop_prefix_input.text()
