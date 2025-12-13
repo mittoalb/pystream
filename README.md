@@ -22,6 +22,20 @@ pip install pystream
 pystream --pv YOUR:NTNDARRAY:PV
 ```
 
+## Beamline Configuration
+
+PyStream supports configurable beamline-specific plugins. Edit `src/pystream/beamline_config.py` to choose your beamline:
+
+```python
+# Load your beamline plugins
+ACTIVE_BEAMLINE = 'bl32ID'
+
+# Or disable beamline plugins
+ACTIVE_BEAMLINE = None
+```
+
+See [BEAMLINE_CONFIG.md](BEAMLINE_CONFIG.md) for detailed configuration and creating custom beamlines.
+
 ## Recent Updates
 
 ### Enhanced Line Profile Tool

@@ -9,13 +9,15 @@ Controls detector binning and ROI by:
 import subprocess
 import logging
 from typing import Optional
-import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets
 
 
 class DetectorControlDialog(QtWidgets.QDialog):
     """Dialog for controlling detector binning and ROI."""
+
+    BUTTON_TEXT = "Detector"
+    HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)

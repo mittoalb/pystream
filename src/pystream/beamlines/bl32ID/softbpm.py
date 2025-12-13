@@ -23,6 +23,9 @@ from PyQt5 import QtWidgets, QtCore
 class SoftBPMDialog(QtWidgets.QDialog):
     """Dialog for monitoring image intensity and controlling motors."""
 
+    BUTTON_TEXT = "SoftBPM"
+    HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
+
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)
         self.logger = logger

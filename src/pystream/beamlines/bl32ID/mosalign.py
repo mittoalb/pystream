@@ -26,6 +26,9 @@ pg.setConfigOptions(imageAxisOrder='row-major')
 class MotorScanDialog(QtWidgets.QDialog):
     """Dialog for configuring and running 2D motor scans"""
 
+    BUTTON_TEXT = "Mosalign"
+    HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
+
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)
         self.logger = logger

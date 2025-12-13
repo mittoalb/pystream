@@ -19,6 +19,7 @@ class QGMaxDialog(QtWidgets.QDialog):
     """Dialog for optimizing image mean by adjusting two motors."""
 
     BUTTON_TEXT = "QGMax"
+    HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)
@@ -38,7 +39,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         # Title
-        title = QtWidgets.QLabel("QGMax - Quantum Gain Maximizer")
+        title = QtWidgets.QLabel("QGMax - Beam Intensity")
         title.setStyleSheet("font-size: 16pt; font-weight: bold;")
         layout.addWidget(title)
 

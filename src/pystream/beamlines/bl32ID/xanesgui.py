@@ -10,12 +10,14 @@ import sys
 from PyQt5 import QtWidgets
 
 
-SCRIPT_PATH = "/home/beams/AMITTONE/Software/xanes_gui/xanes_gui.py"
-BUTTON_TEXT = "XANES GUI"
+SCRIPT_PATH = "/home/beams/AMITTONE/Software/xanes_gui/xanes_gui/gui.py"
 
 
 class XANESGuiDialog(QtWidgets.QDialog):
-    """Simple launcher for XANES GUI - no dialog shown."""
+    """Launcher for XANES GUI - no dialog shown."""
+
+    BUTTON_TEXT = "XANES GUI"
+    HANDLER_TYPE = 'launcher'  # Execute immediately and close
 
     def __init__(self, parent=None, logger=None):
         super().__init__(parent)
@@ -31,9 +33,9 @@ class XANESGuiDialog(QtWidgets.QDialog):
         """Launch the XANES GUI script."""
         # Try multiple possible locations
         possible_paths = [
-            "/home/beams/AMITTONE/Software/xanes_gui/xanes_gui.py",
-            "/home/beams0/AMITTONE/Software/xanes_gui/xanes_gui.py",
-            os.path.expanduser("~/Software/xanes_gui/xanes_gui.py"),
+            "/home/beams/AMITTONE/Software/xanes_gui/xanes_gui/gui.py",
+            "/home/beams0/AMITTONE/Software/xanes_gui/xanes_gui/gui.py",
+            os.path.expanduser("~/Software/xanes_gui/xanes_gui/gui.py"),
         ]
 
         script_path = None

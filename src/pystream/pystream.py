@@ -486,7 +486,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Toggle sidebar button
         btn_toggle_sidebar = QtWidgets.QPushButton("☰ Menu")
-        btn_toggle_sidebar.setMaximumWidth(80)
+        btn_toggle_sidebar.setMaximumWidth(100)
         btn_toggle_sidebar.setToolTip("Toggle control panel")
         btn_toggle_sidebar.clicked.connect(self._toggle_control_panel)
         top_layout.addWidget(btn_toggle_sidebar)
@@ -500,7 +500,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.pv_entry)
         
         btn_connect = QtWidgets.QPushButton("Connect")
-        btn_connect.setMaximumWidth(80)
+        btn_connect.setMaximumWidth(100)
         btn_connect.clicked.connect(self._connect_pv)
         top_layout.addWidget(btn_connect)
         
@@ -525,7 +525,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.chk_autoscale)
 
         btn_reset_view = QtWidgets.QPushButton("Reset View")
-        btn_reset_view.setMaximumWidth(90)
+        btn_reset_view.setMaximumWidth(120)
         btn_reset_view.setToolTip("Reset zoom and pan to fit image")
         btn_reset_view.clicked.connect(self._reset_view)
         top_layout.addWidget(btn_reset_view)
@@ -539,7 +539,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.btn_beamlines = btn_beamlines
 
         btn_viewer = QtWidgets.QPushButton("HDF5 Viewer")
-        btn_viewer.setMaximumWidth(100)
+        btn_viewer.setMaximumWidth(150)
         btn_viewer.setToolTip("Open HDF5 image divider/viewer")
         btn_viewer.clicked.connect(self._open_viewer)
         top_layout.addWidget(btn_viewer)
@@ -558,9 +558,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         return top_bar
 
     def _create_beamlines_bar(self):
-        """Create horizontal beamlines toolbar that auto-discovers plugins"""
+        """Create horizontal beamlines toolbar that auto-discovers plugins from configured beamline"""
         import importlib
-        import pkgutil
         from pathlib import Path
 
         bar = QtWidgets.QWidget()
@@ -570,57 +569,84 @@ class PvViewerApp(QtWidgets.QMainWindow):
         bar_layout.setContentsMargins(5, 5, 5, 5)
 
         try:
-            beamlines_path = Path(__file__).parent / "beamlines"
-            if not beamlines_path.exists():
-                bar_layout.addWidget(QtWidgets.QLabel("No beamlines found"))
+            # Load beamline configuration
+            try:
+                from . import beamline_config
+                active_beamline = beamline_config.ACTIVE_BEAMLINE
+                enabled_plugins = beamline_config.ENABLED_PLUGINS
+            except ImportError:
+                # Fallback to default if config file doesn't exist
+                active_beamline = 'bl32ID'
+                enabled_plugins = None
+                if LOGGER:
+                    LOGGER.warning("beamline_config.py not found, using default beamline: bl32ID")
+
+            # If no beamline is configured, show message and return empty bar
+            if active_beamline is None or active_beamline == 'None':
+                bar_layout.addWidget(QtWidgets.QLabel("No beamline configured (edit beamline_config.py)"))
+                bar_layout.addStretch()
                 return bar
 
-            for beamline_dir in sorted(beamlines_path.iterdir()):
-                if not beamline_dir.is_dir() or beamline_dir.name.startswith('_'):
-                    continue
+            beamlines_path = Path(__file__).parent / "beamlines" / active_beamline
+            if not beamlines_path.exists():
+                bar_layout.addWidget(QtWidgets.QLabel(f"Beamline '{active_beamline}' not found"))
+                bar_layout.addStretch()
+                return bar
 
-                beamline_name = beamline_dir.name
-                group_label = QtWidgets.QLabel(f"<b>{beamline_name}:</b>")
-                bar_layout.addWidget(group_label)
+            # Load the beamline module
+            try:
+                beamline_module = importlib.import_module(f".beamlines.{active_beamline}", package=__package__)
+            except ImportError as e:
+                if LOGGER:
+                    LOGGER.error(f"Failed to load beamline module {active_beamline}: {e}")
+                bar_layout.addWidget(QtWidgets.QLabel(f"Error loading {active_beamline}"))
+                bar_layout.addStretch()
+                return bar
 
-                for plugin_file in sorted(beamline_dir.glob("*.py")):
-                    if plugin_file.name.startswith('_'):
-                        continue
+            # Get all exported dialog classes
+            if hasattr(beamline_module, '__all__'):
+                dialog_classes = beamline_module.__all__
+            else:
+                # Fallback: find all *Dialog classes
+                dialog_classes = [name for name in dir(beamline_module) if name.endswith('Dialog')]
 
-                    plugin_name = plugin_file.stem
-                    module_path = f".beamlines.{beamline_name}.{plugin_name}"
+            # Filter by enabled plugins if specified
+            if enabled_plugins is not None:
+                dialog_classes = [cls for cls in dialog_classes if cls in enabled_plugins]
 
-                    try:
-                        module = importlib.import_module(module_path, package=__package__)
+            # If no plugins available, show message
+            if not dialog_classes:
+                bar_layout.addWidget(QtWidgets.QLabel(f"No plugins in {active_beamline}"))
+                bar_layout.addStretch()
+                return bar
 
-                        btn = QtWidgets.QPushButton(plugin_name.capitalize())
-                        btn.setMaximumWidth(120)
+            # Add beamline label
+            group_label = QtWidgets.QLabel(f"<b>{active_beamline}:</b>")
+            bar_layout.addWidget(group_label)
 
-                        if hasattr(module, 'MotorScanDialog'):
-                            btn.clicked.connect(self._open_motor_scan)
-                        elif hasattr(module, 'SoftBPMDialog'):
-                            btn.clicked.connect(lambda _, m=module: self._open_softbpm(m))
-                        elif hasattr(module, 'DetectorControlDialog'):
-                            btn.clicked.connect(lambda _, m=module: self._open_detector_control(m))
-                        elif hasattr(module, 'RotationAxisDialog'):
-                            btn.clicked.connect(lambda _, m=module: self._open_rotation_axis(m))
-                        elif hasattr(module, 'XANESGuiDialog'):
-                            btn.clicked.connect(lambda _, m=module: self._open_xanes_gui(m))
-                        elif hasattr(module, 'OpticsCalcDialog'):
-                            btn.clicked.connect(lambda _, m=module: self._open_optics_calc(m))
-                        elif hasattr(module, 'QGMaxDialog'):
-                            btn.clicked.connect(lambda _, m=module: self._open_qgmax(m))
-                        else:
-                            btn.setEnabled(False)
-                            btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
+            # Create button for each dialog class
+            for dialog_class_name in dialog_classes:
+                try:
+                    dialog_class = getattr(beamline_module, dialog_class_name)
 
-                        bar_layout.addWidget(btn)
+                    # Get button text from class attribute or use class name
+                    if hasattr(dialog_class, 'BUTTON_TEXT'):
+                        btn_text = dialog_class.BUTTON_TEXT
+                    else:
+                        # Convert ClassName to Class Name
+                        btn_text = dialog_class_name.replace('Dialog', '').replace('_', ' ').title()
 
-                    except Exception as e:
-                        if LOGGER:
-                            LOGGER.warning(f"Failed to load beamline plugin {module_path}: {e}")
+                    btn = QtWidgets.QPushButton(btn_text)
+                    btn.setMaximumWidth(120)
 
-                bar_layout.addWidget(QtWidgets.QLabel("|"))
+                    # Connect to appropriate handler based on class name
+                    self._connect_beamline_button(btn, dialog_class_name, beamline_module)
+
+                    bar_layout.addWidget(btn)
+
+                except Exception as e:
+                    if LOGGER:
+                        LOGGER.warning(f"Failed to create button for {dialog_class_name}: {e}")
 
         except Exception as e:
             if LOGGER:
@@ -629,6 +655,53 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         bar_layout.addStretch()
         return bar
+
+    def _connect_beamline_button(self, btn, dialog_class_name, module):
+        """
+        Connect a beamline button to its appropriate handler.
+
+        Uses plugin-defined behavior if available, otherwise falls back to generic handling.
+        """
+        dialog_class = getattr(module, dialog_class_name)
+
+        # Check if plugin defines its own handler type
+        if hasattr(dialog_class, 'HANDLER_TYPE'):
+            handler_type = dialog_class.HANDLER_TYPE
+        else:
+            # Auto-detect handler type based on class attributes
+            handler_type = 'singleton'  # Default to singleton
+
+        # Create appropriate handler based on type
+        if handler_type == 'launcher':
+            # Launcher plugins: execute immediately and close
+            def handler():
+                dialog_class(parent=self, logger=LOGGER)
+            btn.clicked.connect(handler)
+
+        elif handler_type == 'singleton':
+            # Singleton plugins: keep one instance, show/hide it
+            def handler():
+                attr_name = f'{dialog_class_name.lower()}_instance'
+                if not hasattr(self, attr_name) or getattr(self, attr_name) is None:
+                    setattr(self, attr_name, dialog_class(parent=self, logger=LOGGER))
+                dialog = getattr(self, attr_name)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+            btn.clicked.connect(handler)
+
+        elif handler_type == 'multi-instance':
+            # Multi-instance plugins: create new instance each time
+            def handler():
+                dialog = dialog_class(parent=self, logger=LOGGER)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+            btn.clicked.connect(handler)
+
+        else:
+            btn.setEnabled(False)
+            btn.setToolTip(f"Unknown handler type '{handler_type}' for '{dialog_class_name}'")
 
     def _toggle_beamlines_bar(self):
         """Toggle visibility of beamlines toolbar"""
