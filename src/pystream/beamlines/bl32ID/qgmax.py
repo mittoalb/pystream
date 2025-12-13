@@ -31,8 +31,40 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.optimization_timer = QtCore.QTimer()
         self.optimization_timer.timeout.connect(self._run_optimization_cycle)
 
+        # State for synchronized optimization
+        self.optimization_active = False
+        self.current_motor = None  # 'motor1' or 'motor2'
+        self.motor_direction = {}  # {motor_name: +1 or -1}
+        self.motor_consecutive_decreases = {}  # Track consecutive decreases
+        self.motor_last_mean = {}  # Last mean value for each motor
+        self.motor_max_mean = {}  # Best mean seen for each motor
+        self.motor_max_position = {}  # Position with best mean
+        self.steps_taken = 0
+        self.waiting_for_image = False
+
         self._init_ui()
         self._load_current_values()
+        self._connect_to_image_stream()
+
+    def _connect_to_image_stream(self):
+        """Connect to the parent viewer's image update signal."""
+        if self.parent() and hasattr(self.parent(), 'new_image_for_plugins'):
+            self.parent().new_image_for_plugins.connect(self._on_new_image)
+            if self.logger:
+                self.logger.info("QGMax: Connected to image stream")
+
+    def _on_new_image(self, uid: int, img: np.ndarray, ts: float):
+        """Called when a new image arrives from the stream."""
+        if not self.optimization_active or not self.waiting_for_image:
+            return
+
+        # Calculate mean of new image
+        mean_value = float(np.mean(img))
+
+        # Process the new data point
+        self._process_optimization_step(mean_value)
+
+        self.waiting_for_image = False
 
     def _init_ui(self):
         """Initialize the user interface."""
@@ -328,154 +360,186 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.status_label.setText("Status: Idle")
 
     def _run_optimization_cycle(self):
-        """Run one optimization cycle to maximize the mean value."""
+        """Start a new optimization cycle synchronized with image stream."""
+        if self.optimization_active:
+            self._log_message("Optimization already running")
+            return
+
         self._log_message("=== Starting optimization cycle ===")
 
-        motor1_pv = self.motor1_pv_input.text()
-        motor2_pv = self.motor2_pv_input.text()
-        motor1_step = self.motor1_step_input.value()
-        motor2_step = self.motor2_step_input.value()
-        max_iterations = self.max_iterations_input.value()
-        convergence_threshold = self.convergence_threshold_input.value() / 100.0
+        # Reset state
+        self.optimization_active = True
+        self.motor_direction = {}
+        self.motor_consecutive_decreases = {'motor1': 0, 'motor2': 0}
+        self.motor_last_mean = {}
+        self.motor_max_mean = {}
+        self.motor_max_position = {}
 
-        # Get initial state
+        # Get initial mean from current image
         initial_mean = self._get_image_mean()
         if initial_mean is None:
             self._log_message("ERROR: Cannot get image mean")
-            return
-
-        motor1_pos = self._get_pv_value(motor1_pv)
-        motor2_pos = self._get_pv_value(motor2_pv)
-
-        if motor1_pos is None or motor2_pos is None:
-            self._log_message("ERROR: Cannot read motor positions")
+            self.optimization_active = False
             return
 
         self._log_message(f"Initial mean: {initial_mean:.2f}")
-        self._log_message(f"Initial positions: M1={motor1_pos:.4f}, M2={motor2_pos:.4f}")
 
-        best_mean = initial_mean
-        best_m1 = motor1_pos
-        best_m2 = motor2_pos
+        # Initialize for both motors
+        for motor_name in ['motor1', 'motor2']:
+            self.motor_last_mean[motor_name] = initial_mean
+            self.motor_max_mean[motor_name] = initial_mean
+            pv = self._get_motor_pv(motor_name)
+            pos = self._get_pv_value(pv)
+            if pos is not None:
+                self.motor_max_position[motor_name] = pos
+                self._log_message(f"{motor_name}: Initial position = {pos:.4f}")
 
-        # Determine gradient direction for each motor
-        # Try small step in each direction for each motor
-        m1_direction = self._find_gradient_direction(motor1_pv, motor1_step, initial_mean)
-        m2_direction = self._find_gradient_direction(motor2_pv, motor2_step, initial_mean)
+        # Start with motor 1, direction +1 (will be set properly after first step)
+        self.current_motor = 'motor1'
+        self.motor_direction['motor1'] = +1
+        self.steps_taken = 0
 
-        if m1_direction == 0 and m2_direction == 0:
-            self._log_message("Already at local maximum")
-            self._update_status_display()
+        # Take first step
+        self._take_next_step()
+
+    def _take_next_step(self):
+        """Move the current motor by 2 steps and wait for next image."""
+        if not self.optimization_active:
             return
 
-        # Iterative optimization
-        for iteration in range(max_iterations):
-            improved = False
+        motor_name = self.current_motor
+        pv = self._get_motor_pv(motor_name)
+        step_size = self._get_motor_step(motor_name)
 
-            # Try moving motor 1
-            if m1_direction != 0:
-                new_m1 = motor1_pos + (m1_direction * motor1_step)
-                if self._set_pv_value(motor1_pv, new_m1):
-                    time.sleep(0.5)  # Wait for motor to settle
-                    new_mean = self._get_image_mean()
+        # Get current position
+        current_pos = self._get_pv_value(pv)
+        if current_pos is None:
+            self._log_message(f"ERROR: Cannot read {motor_name} position")
+            self._finish_optimization()
+            return
 
-                    if new_mean is not None and new_mean > best_mean:
-                        improvement = ((new_mean - best_mean) / best_mean) * 100
-                        self._log_message(
-                            f"Iter {iteration+1}: M1 step improved mean: "
-                            f"{best_mean:.2f} → {new_mean:.2f} (+{improvement:.2f}%)"
-                        )
-                        best_mean = new_mean
-                        motor1_pos = new_m1
-                        best_m1 = new_m1
-                        improved = True
-                    else:
-                        # Revert
-                        self._set_pv_value(motor1_pv, motor1_pos)
-                        time.sleep(0.3)
+        # Determine direction (initialize to +1 if first time)
+        if motor_name not in self.motor_direction:
+            self.motor_direction[motor_name] = +1
 
-            # Try moving motor 2
-            if m2_direction != 0:
-                new_m2 = motor2_pos + (m2_direction * motor2_step)
-                if self._set_pv_value(motor2_pv, new_m2):
-                    time.sleep(0.5)  # Wait for motor to settle
-                    new_mean = self._get_image_mean()
+        direction = self.motor_direction[motor_name]
 
-                    if new_mean is not None and new_mean > best_mean:
-                        improvement = ((new_mean - best_mean) / best_mean) * 100
-                        self._log_message(
-                            f"Iter {iteration+1}: M2 step improved mean: "
-                            f"{best_mean:.2f} → {new_mean:.2f} (+{improvement:.2f}%)"
-                        )
-                        best_mean = new_mean
-                        motor2_pos = new_m2
-                        best_m2 = new_m2
-                        improved = True
-                    else:
-                        # Revert
-                        self._set_pv_value(motor2_pv, motor2_pos)
-                        time.sleep(0.3)
+        # Move by 4 steps
+        new_pos = current_pos + (direction * 4 * step_size)
 
-            # Check convergence
-            if not improved:
-                self._log_message(f"Converged after {iteration+1} iterations (no improvement)")
-                break
+        self._log_message(f"{motor_name}: Moving {direction * 4 * step_size:+.4f} → {new_pos:.4f}")
 
-            improvement_pct = ((best_mean - initial_mean) / initial_mean) * 100
-            if improvement_pct < convergence_threshold:
-                self._log_message(
-                    f"Converged after {iteration+1} iterations "
-                    f"(improvement {improvement_pct:.2f}% < threshold {convergence_threshold*100:.1f}%)"
-                )
-                break
+        if self._set_pv_value(pv, new_pos):
+            # Wait for next image to arrive
+            self.waiting_for_image = True
+            self.steps_taken += 1
+        else:
+            self._log_message(f"ERROR: Failed to move {motor_name}")
+            self._finish_optimization()
 
-        # Final report
-        total_improvement = ((best_mean - initial_mean) / initial_mean) * 100
+    def _process_optimization_step(self, new_mean: float):
+        """Process the mean value from the new image after a motor move."""
+        motor_name = self.current_motor
+        last_mean = self.motor_last_mean.get(motor_name, new_mean)
+        max_mean = self.motor_max_mean.get(motor_name, new_mean)
+
+        self._log_message(f"{motor_name}: Mean {last_mean:.2f} → {new_mean:.2f}")
+
+        # Check if mean increased or decreased
+        if new_mean > last_mean:
+            # INCREASING - good! Continue in same direction
+            self._log_message(f"{motor_name}: Increasing (+{new_mean - last_mean:.2f}) - Continue")
+            self.motor_consecutive_decreases[motor_name] = 0
+
+            # Update max if this is the best
+            if new_mean > max_mean:
+                self.motor_max_mean[motor_name] = new_mean
+                pv = self._get_motor_pv(motor_name)
+                pos = self._get_pv_value(pv)
+                if pos is not None:
+                    self.motor_max_position[motor_name] = pos
+
+            self.motor_last_mean[motor_name] = new_mean
+
+            # Take another step in same direction
+            self._take_next_step()
+
+        else:
+            # DECREASING - need to check what to do
+            decrease = last_mean - new_mean
+            self._log_message(f"{motor_name}: Decreasing (-{decrease:.2f})")
+
+            self.motor_consecutive_decreases[motor_name] += 1
+
+            if self.motor_consecutive_decreases[motor_name] == 1:
+                # First decrease - reverse direction and try
+                self._log_message(f"{motor_name}: First decrease - Reversing direction")
+                self.motor_direction[motor_name] *= -1
+                self.motor_last_mean[motor_name] = new_mean
+
+                # Take step in reversed direction
+                self._take_next_step()
+
+            elif self.motor_consecutive_decreases[motor_name] >= 2:
+                # Second consecutive decrease - go back to max and finish this motor
+                self._log_message(f"{motor_name}: 2nd decrease - Going back to max")
+
+                # Move back to best position
+                pv = self._get_motor_pv(motor_name)
+                best_pos = self.motor_max_position.get(motor_name)
+                if best_pos is not None:
+                    self._set_pv_value(pv, best_pos)
+                    self._log_message(f"{motor_name}: Returned to best position {best_pos:.4f}")
+
+                # Move to next motor
+                self._switch_to_next_motor()
+
+    def _switch_to_next_motor(self):
+        """Switch to optimizing the next motor or finish."""
+        if self.current_motor == 'motor1':
+            # Switch to motor 2
+            self._log_message("--- Switching to Motor 2 ---")
+            self.current_motor = 'motor2'
+            self.motor_direction['motor2'] = +1  # Start with positive direction
+            self.steps_taken = 0
+
+            # Take first step for motor 2
+            self._take_next_step()
+
+        else:
+            # Both motors done
+            self._finish_optimization()
+
+    def _finish_optimization(self):
+        """Complete the optimization cycle."""
+        self.optimization_active = False
+        self.waiting_for_image = False
+
+        # Report final results
+        motor1_improvement = self.motor_max_mean.get('motor1', 0) - self.motor_last_mean.get('motor1', 0)
+        motor2_improvement = self.motor_max_mean.get('motor2', 0) - self.motor_last_mean.get('motor2', 0)
+
         self._log_message(
-            f"=== Optimization complete: {initial_mean:.2f} → {best_mean:.2f} "
-            f"(+{total_improvement:.2f}%) ==="
+            f"=== Optimization Complete ==="
         )
+        self._log_message(f"Motor 1: Best mean = {self.motor_max_mean.get('motor1', 0):.2f}")
+        self._log_message(f"Motor 2: Best mean = {self.motor_max_mean.get('motor2', 0):.2f}")
 
         self._update_status_display()
 
-    def _find_gradient_direction(self, motor_pv: str, step: float, current_mean: float) -> int:
-        """
-        Find the gradient direction for a motor.
-        Returns: +1 for positive direction, -1 for negative, 0 for no improvement.
-        """
-        original_pos = self._get_pv_value(motor_pv)
-        if original_pos is None:
-            return 0
+    def _get_motor_pv(self, motor_name: str) -> str:
+        """Get PV name for a motor."""
+        if motor_name == 'motor1':
+            return self.motor1_pv_input.text()
+        else:
+            return self.motor2_pv_input.text()
 
-        # Try positive direction
-        if self._set_pv_value(motor_pv, original_pos + step):
-            time.sleep(0.5)
-            mean_pos = self._get_image_mean()
-
-            # Try negative direction
-            if self._set_pv_value(motor_pv, original_pos - step):
-                time.sleep(0.5)
-                mean_neg = self._get_image_mean()
-
-                # Restore original position
-                self._set_pv_value(motor_pv, original_pos)
-                time.sleep(0.3)
-
-                if mean_pos is None or mean_neg is None:
-                    return 0
-
-                # Determine best direction
-                if mean_pos > current_mean and mean_pos > mean_neg:
-                    self._log_message(f"{motor_pv}: Gradient direction = POSITIVE")
-                    return +1
-                elif mean_neg > current_mean and mean_neg > mean_pos:
-                    self._log_message(f"{motor_pv}: Gradient direction = NEGATIVE")
-                    return -1
-                else:
-                    self._log_message(f"{motor_pv}: No clear gradient direction")
-                    return 0
-
-        return 0
+    def _get_motor_step(self, motor_name: str) -> float:
+        """Get step size for a motor."""
+        if motor_name == 'motor1':
+            return self.motor1_step_input.value()
+        else:
+            return self.motor2_step_input.value()
 
     def closeEvent(self, event):
         """Handle dialog close event."""
