@@ -40,8 +40,12 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.motor_max_mean = {}  # Best mean seen for each motor
         self.motor_max_position = {}  # Position with best mean
         self.motor_step_count = {}  # Count steps per motor
+        self.motor_stage = {}  # 'coarse' or 'fine' stage
         self.waiting_for_image = False
-        self.max_steps_per_motor = 10  # Maximum steps before stopping
+        self.max_steps_coarse = 10  # Maximum steps for coarse stage
+        self.max_steps_fine = 5  # Maximum steps for fine stage
+        self.coarse_multiplier = 5.0  # Coarse step = step_size * 5
+        self.fine_multiplier = 1.0  # Fine step = step_size * 1
 
         self._init_ui()
         self._load_current_values()
@@ -355,6 +359,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.motor_max_mean = {}
         self.motor_max_position = {}
         self.motor_step_count = {'motor1': 0, 'motor2': 0}
+        self.motor_stage = {'motor1': 'coarse', 'motor2': 'coarse'}
 
         # Get initial mean from current image
         initial_mean = self._get_image_mean()
@@ -375,32 +380,61 @@ class QGMaxDialog(QtWidgets.QDialog):
                 self.motor_max_position[motor_name] = pos
                 self._log_message(f"{motor_name}: Initial position = {pos:.4f}")
 
-        # Start with motor 1, direction +1 (will be set properly after first step)
+        # Start with motor 1, coarse stage, direction +1
         self.current_motor = 'motor1'
         self.motor_direction['motor1'] = +1
+        self._log_message("=== Motor 1: COARSE stage ===")
 
         # Take first step
         self._take_next_step()
 
     def _take_next_step(self):
-        """Move the current motor by 4 steps and check mean."""
+        """Move the current motor and check mean."""
         if not self.optimization_active:
             return
 
         motor_name = self.current_motor
+        stage = self.motor_stage.get(motor_name, 'coarse')
 
-        # Check if exceeded max steps for this motor
-        if self.motor_step_count.get(motor_name, 0) >= self.max_steps_per_motor:
-            self._log_message(f"{motor_name}: Reached max {self.max_steps_per_motor} steps - going to max")
-            # Go back to best position
-            pv = self._get_motor_pv(motor_name)
-            best_pos = self.motor_max_position.get(motor_name)
-            if best_pos is not None:
-                self._set_pv_value(pv, best_pos)
-                self._log_message(f"{motor_name}: Returned to best position {best_pos:.4f}")
-            # Move to next motor
-            self._switch_to_next_motor()
-            return
+        # Determine max steps and multiplier based on stage
+        if stage == 'coarse':
+            max_steps = self.max_steps_coarse
+            multiplier = self.coarse_multiplier
+        else:  # fine
+            max_steps = self.max_steps_fine
+            multiplier = self.fine_multiplier
+
+        # Check if exceeded max steps for current stage
+        if self.motor_step_count.get(motor_name, 0) >= max_steps:
+            if stage == 'coarse':
+                # Coarse stage done - go to best position and start fine stage
+                self._log_message(f"{motor_name}: COARSE stage complete - switching to FINE")
+                pv = self._get_motor_pv(motor_name)
+                best_pos = self.motor_max_position.get(motor_name)
+                if best_pos is not None:
+                    self._set_pv_value(pv, best_pos)
+                    self._log_message(f"{motor_name}: At best position {best_pos:.4f}")
+
+                # Switch to fine stage
+                self.motor_stage[motor_name] = 'fine'
+                self.motor_step_count[motor_name] = 0
+                self.motor_consecutive_decreases[motor_name] = 0
+                self.motor_direction[motor_name] = +1
+                self._log_message(f"=== {motor_name}: FINE stage ===")
+
+                # Start fine optimization
+                QtCore.QTimer.singleShot(1000, self._take_next_step)
+                return
+            else:
+                # Fine stage done - go to best and move to next motor
+                self._log_message(f"{motor_name}: FINE stage complete")
+                pv = self._get_motor_pv(motor_name)
+                best_pos = self.motor_max_position.get(motor_name)
+                if best_pos is not None:
+                    self._set_pv_value(pv, best_pos)
+                    self._log_message(f"{motor_name}: Final best position {best_pos:.4f}")
+                self._switch_to_next_motor()
+                return
 
         pv = self._get_motor_pv(motor_name)
         step_size = self._get_motor_step(motor_name)
@@ -418,10 +452,12 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         direction = self.motor_direction[motor_name]
 
-        # Move by 4 steps
-        new_pos = current_pos + (direction * 4 * step_size)
+        # Calculate step based on stage
+        actual_step = direction * step_size * multiplier
+        new_pos = current_pos + actual_step
 
-        self._log_message(f"{motor_name}: Moving {direction * 4 * step_size:+.4f} → {new_pos:.4f} (step {self.motor_step_count.get(motor_name, 0) + 1}/{self.max_steps_per_motor})")
+        stage_label = "COARSE" if stage == 'coarse' else "FINE"
+        self._log_message(f"{motor_name} [{stage_label}]: Moving {actual_step:+.4f} → {new_pos:.4f} (step {self.motor_step_count.get(motor_name, 0) + 1}/{max_steps})")
 
         if self._set_pv_value(pv, new_pos):
             self.motor_step_count[motor_name] = self.motor_step_count.get(motor_name, 0) + 1
@@ -507,7 +543,10 @@ class QGMaxDialog(QtWidgets.QDialog):
             # Switch to motor 2
             self._log_message("--- Switching to Motor 2 ---")
             self.current_motor = 'motor2'
-            self.motor_direction['motor2'] = +1  # Start with positive direction
+            self.motor_direction['motor2'] = +1
+            self.motor_stage['motor2'] = 'coarse'
+            self.motor_step_count['motor2'] = 0
+            self._log_message("=== Motor 2: COARSE stage ===")
 
             # Take first step for motor 2
             self._take_next_step()
