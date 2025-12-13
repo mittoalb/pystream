@@ -602,10 +602,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
                             btn.clicked.connect(lambda _, m=module: self._open_softbpm(m))
                         elif hasattr(module, 'DetectorControlDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_detector_control(m))
+                        elif hasattr(module, 'RotationAxisDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_rotation_axis(m))
                         elif hasattr(module, 'XANESGuiDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_xanes_gui(m))
                         elif hasattr(module, 'OpticsCalcDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_optics_calc(m))
+                        elif hasattr(module, 'QGMaxDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_qgmax(m))
                         else:
                             btn.setEnabled(False)
                             btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
@@ -1108,6 +1112,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
     
     @QtCore.pyqtSlot(int, np.ndarray, float)
     def _update_image_slot(self, uid: int, img: np.ndarray, ts: float):
+        # Store original shape before any transformations
+        original_shape = img.shape
+
         img = self._apply_view_ops(img)
         self._last_display_img = img
         self.current_uid = uid
@@ -1168,10 +1175,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         self.lbl_uid.setText(f"UID: {uid}")
         self.lbl_fps.setText(f"FPS: {self.fps_ema:4.1f}")
-        
-        # Update image info
+
+        # Update image info - show original shape before binning
         self.lbl_info.setText(
-            f"Shape: {img.shape}\n"
+            f"Shape: {original_shape}\n"
             f"Dtype: {img.dtype}\n"
             f"Min: {img.min():.2f}\n"
             f"Max: {img.max():.2f}\n"
@@ -1650,6 +1657,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.detector_control_dialog.raise_()
         self.detector_control_dialog.activateWindow()
 
+    def _open_rotation_axis(self, module):
+        """Open the Rotation Axis Detection dialog"""
+        if not hasattr(self, 'rotation_axis_dialog') or self.rotation_axis_dialog is None:
+            self.rotation_axis_dialog = module.RotationAxisDialog(parent=self, logger=LOGGER)
+        self.rotation_axis_dialog.show()
+        self.rotation_axis_dialog.raise_()
+        self.rotation_axis_dialog.activateWindow()
+
     def _open_xanes_gui(self, module):
         """Launch the XANES GUI (runs immediately, no dialog)"""
         # Create launcher - it executes immediately and closes itself
@@ -1659,6 +1674,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         """Launch the Optics Calculator (runs immediately, no dialog)"""
         # Create launcher - it executes immediately and closes itself
         module.OpticsCalcDialog(parent=self, logger=LOGGER)
+
+    def _open_qgmax(self, module):
+        """Open the QGMax dialog"""
+        if not hasattr(self, 'qgmax_dialog') or self.qgmax_dialog is None:
+            self.qgmax_dialog = module.QGMaxDialog(parent=self, logger=LOGGER)
+        self.qgmax_dialog.show()
+        self.qgmax_dialog.raise_()
+        self.qgmax_dialog.activateWindow()
 
     def _open_viewer(self):
         """Open a standalone viewer window"""

@@ -55,6 +55,9 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.crop_prefix_input = QtWidgets.QLineEdit("32id:TXMOptics")
         prefix_layout.addRow("Crop PV Prefix:", self.crop_prefix_input)
 
+        self.vertical_flip_check = QtWidgets.QCheckBox("Vertical Flip (swap top/bottom)")
+        prefix_layout.addRow("Image Orientation:", self.vertical_flip_check)
+
         prefix_group.setLayout(prefix_layout)
         layout.addWidget(prefix_group)
 
@@ -120,6 +123,10 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.apply_roi_btn.setEnabled(False)
         roi_apply_layout.addWidget(self.apply_roi_btn)
 
+        self.remove_roi_btn = QtWidgets.QPushButton("Remove ROI (Full Frame)")
+        self.remove_roi_btn.clicked.connect(self._remove_roi)
+        roi_apply_layout.addWidget(self.remove_roi_btn)
+
         self.read_roi_btn = QtWidgets.QPushButton("Read Current ROI")
         self.read_roi_btn.clicked.connect(self._read_roi)
         roi_apply_layout.addWidget(self.read_roi_btn)
@@ -181,13 +188,20 @@ class DetectorControlDialog(QtWidgets.QDialog):
             return None
 
     def _set_pv_value(self, pv_name: str, value) -> bool:
-        """Set PV value using caput."""
+        """Set PV value using caput with -c flag to wait for callback.
+
+        Args:
+            pv_name: PV name to set
+            value: Value to set
+        """
         try:
+            # Use caput -c to wait for callback completion
+            # This ensures the value is processed before returning
             result = subprocess.run(
-                ['caput', pv_name, str(value)],
+                ['caput', '-c', pv_name, str(value)],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=10
             )
             if result.returncode == 0:
                 return True
@@ -389,6 +403,11 @@ class DetectorControlDialog(QtWidgets.QDialog):
         crop_top = y
         crop_bottom = img_h - (y + h)
 
+        # Apply vertical flip if enabled (swap top and bottom)
+        if self.vertical_flip_check.isChecked():
+            crop_top, crop_bottom = crop_bottom, crop_top
+            self._log_message("Vertical flip enabled: swapping top and bottom")
+
         # Apply to crop PVs
         crop_prefix = self.crop_prefix_input.text()
         success = True
@@ -423,6 +442,48 @@ class DetectorControlDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(
                 self, "Error",
                 "Failed to apply ROI. Check log for details."
+            )
+
+    def _remove_roi(self):
+        """Remove ROI from detector (reset to full frame)."""
+        prefix = self.pv_prefix_input.text()
+
+        # Get the full detector size
+        max_sizex = self._get_pv_value(f"{prefix}:MaxSizeX_RBV")
+        max_sizey = self._get_pv_value(f"{prefix}:MaxSizeY_RBV")
+
+        if not max_sizex or not max_sizey:
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "Could not read detector maximum size.\n"
+                "Make sure the PV prefix is correct."
+            )
+            return
+
+        # Set ROI to full frame: MinX=0, MinY=0, SizeX=Max, SizeY=Max
+        success = True
+        if not self._set_pv_value(f"{prefix}:MinX", 0):
+            success = False
+        if not self._set_pv_value(f"{prefix}:MinY", 0):
+            success = False
+        if not self._set_pv_value(f"{prefix}:SizeX", max_sizex):
+            success = False
+        if not self._set_pv_value(f"{prefix}:SizeY", max_sizey):
+            success = False
+
+        if success:
+            self._log_message(f"Removed ROI: Reset to full frame {max_sizex}×{max_sizey}")
+            QtWidgets.QMessageBox.information(
+                self, "Success",
+                f"ROI removed. Detector reset to full frame:\n"
+                f"{max_sizex}×{max_sizey}"
+            )
+            # Update the display
+            self._read_roi()
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "Failed to remove ROI. Check log for details."
             )
 
     def closeEvent(self, event):
