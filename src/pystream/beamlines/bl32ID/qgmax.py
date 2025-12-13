@@ -50,13 +50,23 @@ class QGMaxDialog(QtWidgets.QDialog):
         """Connect to the parent viewer's image update signal."""
         if self.parent() and hasattr(self.parent(), 'new_image_for_plugins'):
             self.parent().new_image_for_plugins.connect(self._on_new_image)
+            self._log_message("Connected to image stream")
             if self.logger:
                 self.logger.info("QGMax: Connected to image stream")
+        else:
+            self._log_message("WARNING: Could not connect to image stream!")
+            if self.logger:
+                self.logger.warning("QGMax: Failed to connect to image stream")
 
     def _on_new_image(self, uid: int, img: np.ndarray, ts: float):
         """Called when a new image arrives from the stream."""
-        if not self.optimization_active or not self.waiting_for_image:
+        if not self.optimization_active:
             return
+
+        if not self.waiting_for_image:
+            return
+
+        self._log_message(f"New image received (UID: {uid})")
 
         # Calculate mean of new image
         mean_value = float(np.mean(img))
@@ -433,6 +443,7 @@ class QGMaxDialog(QtWidgets.QDialog):
             # Wait for next image to arrive
             self.waiting_for_image = True
             self.steps_taken += 1
+            self._log_message(f"{motor_name}: Waiting for next image...")
         else:
             self._log_message(f"ERROR: Failed to move {motor_name}")
             self._finish_optimization()
