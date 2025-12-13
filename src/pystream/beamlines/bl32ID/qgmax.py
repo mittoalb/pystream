@@ -39,8 +39,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.motor_last_mean = {}  # Last mean value for each motor
         self.motor_max_mean = {}  # Best mean seen for each motor
         self.motor_max_position = {}  # Position with best mean
-        self.steps_taken = 0
+        self.motor_step_count = {}  # Count steps per motor
         self.waiting_for_image = False
+        self.max_steps_per_motor = 10  # Maximum steps before stopping
 
         self._init_ui()
         self._load_current_values()
@@ -353,6 +354,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.motor_last_mean = {}
         self.motor_max_mean = {}
         self.motor_max_position = {}
+        self.motor_step_count = {'motor1': 0, 'motor2': 0}
 
         # Get initial mean from current image
         initial_mean = self._get_image_mean()
@@ -376,7 +378,6 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Start with motor 1, direction +1 (will be set properly after first step)
         self.current_motor = 'motor1'
         self.motor_direction['motor1'] = +1
-        self.steps_taken = 0
 
         # Take first step
         self._take_next_step()
@@ -387,6 +388,20 @@ class QGMaxDialog(QtWidgets.QDialog):
             return
 
         motor_name = self.current_motor
+
+        # Check if exceeded max steps for this motor
+        if self.motor_step_count.get(motor_name, 0) >= self.max_steps_per_motor:
+            self._log_message(f"{motor_name}: Reached max {self.max_steps_per_motor} steps - going to max")
+            # Go back to best position
+            pv = self._get_motor_pv(motor_name)
+            best_pos = self.motor_max_position.get(motor_name)
+            if best_pos is not None:
+                self._set_pv_value(pv, best_pos)
+                self._log_message(f"{motor_name}: Returned to best position {best_pos:.4f}")
+            # Move to next motor
+            self._switch_to_next_motor()
+            return
+
         pv = self._get_motor_pv(motor_name)
         step_size = self._get_motor_step(motor_name)
 
@@ -406,10 +421,10 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Move by 4 steps
         new_pos = current_pos + (direction * 4 * step_size)
 
-        self._log_message(f"{motor_name}: Moving {direction * 4 * step_size:+.4f} → {new_pos:.4f}")
+        self._log_message(f"{motor_name}: Moving {direction * 4 * step_size:+.4f} → {new_pos:.4f} (step {self.motor_step_count.get(motor_name, 0) + 1}/{self.max_steps_per_motor})")
 
         if self._set_pv_value(pv, new_pos):
-            self.steps_taken += 1
+            self.motor_step_count[motor_name] = self.motor_step_count.get(motor_name, 0) + 1
             # Wait for motor to settle and new image to arrive
             QtCore.QTimer.singleShot(1000, self._check_new_mean)
         else:
@@ -493,7 +508,6 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._log_message("--- Switching to Motor 2 ---")
             self.current_motor = 'motor2'
             self.motor_direction['motor2'] = +1  # Start with positive direction
-            self.steps_taken = 0
 
             # Take first step for motor 2
             self._take_next_step()
