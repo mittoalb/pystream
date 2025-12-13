@@ -532,7 +532,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         btn_beamlines = QtWidgets.QPushButton("⚡ Beamlines")
         btn_beamlines.setCheckable(True)
-        btn_beamlines.setMaximumWidth(100)
+        btn_beamlines.setMaximumWidth(140)
         btn_beamlines.setToolTip("Show/hide beamline tools")
         btn_beamlines.clicked.connect(self._toggle_beamlines_bar)
         top_layout.addWidget(btn_beamlines)
