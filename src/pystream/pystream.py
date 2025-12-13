@@ -608,6 +608,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
                             btn.clicked.connect(lambda _, m=module: self._open_xanes_gui(m))
                         elif hasattr(module, 'OpticsCalcDialog'):
                             btn.clicked.connect(lambda _, m=module: self._open_optics_calc(m))
+                        elif hasattr(module, 'QGMaxDialog'):
+                            btn.clicked.connect(lambda _, m=module: self._open_qgmax(m))
                         else:
                             btn.setEnabled(False)
                             btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
@@ -1672,6 +1674,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         """Launch the Optics Calculator (runs immediately, no dialog)"""
         # Create launcher - it executes immediately and closes itself
         module.OpticsCalcDialog(parent=self, logger=LOGGER)
+
+    def _open_qgmax(self, module):
+        """Open the QGMax dialog"""
+        if not hasattr(self, 'qgmax_dialog') or self.qgmax_dialog is None:
+            self.qgmax_dialog = module.QGMaxDialog(parent=self, logger=LOGGER)
+        self.qgmax_dialog.show()
+        self.qgmax_dialog.raise_()
+        self.qgmax_dialog.activateWindow()
 
     def _open_viewer(self):
         """Open a standalone viewer window"""

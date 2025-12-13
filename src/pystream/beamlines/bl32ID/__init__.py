@@ -6,5 +6,6 @@ from .detectorcontrol import DetectorControlDialog
 from .xanesgui import XANESGuiDialog
 from .opticscalc import OpticsCalcDialog
 from .rotationaxis import RotationAxisDialog
+from .qgmax import QGMaxDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'OpticsCalcDialog', 'RotationAxisDialog']
+__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog']
