@@ -44,37 +44,6 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         self._init_ui()
         self._load_current_values()
-        self._connect_to_image_stream()
-
-    def _connect_to_image_stream(self):
-        """Connect to the parent viewer's image update signal."""
-        if self.parent() and hasattr(self.parent(), 'new_image_for_plugins'):
-            self.parent().new_image_for_plugins.connect(self._on_new_image)
-            self._log_message("Connected to image stream")
-            if self.logger:
-                self.logger.info("QGMax: Connected to image stream")
-        else:
-            self._log_message("WARNING: Could not connect to image stream!")
-            if self.logger:
-                self.logger.warning("QGMax: Failed to connect to image stream")
-
-    def _on_new_image(self, uid: int, img: np.ndarray, ts: float):
-        """Called when a new image arrives from the stream."""
-        if not self.optimization_active:
-            return
-
-        if not self.waiting_for_image:
-            return
-
-        self._log_message(f"New image received (UID: {uid})")
-
-        # Calculate mean of new image
-        mean_value = float(np.mean(img))
-
-        # Process the new data point
-        self._process_optimization_step(mean_value)
-
-        self.waiting_for_image = False
 
     def _init_ui(self):
         """Initialize the user interface."""
@@ -413,7 +382,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         self._take_next_step()
 
     def _take_next_step(self):
-        """Move the current motor by 2 steps and wait for next image."""
+        """Move the current motor by 4 steps and check mean."""
         if not self.optimization_active:
             return
 
@@ -440,13 +409,25 @@ class QGMaxDialog(QtWidgets.QDialog):
         self._log_message(f"{motor_name}: Moving {direction * 4 * step_size:+.4f} → {new_pos:.4f}")
 
         if self._set_pv_value(pv, new_pos):
-            # Wait for next image to arrive
-            self.waiting_for_image = True
             self.steps_taken += 1
-            self._log_message(f"{motor_name}: Waiting for next image...")
+            # Wait for motor to settle and new image to arrive
+            QtCore.QTimer.singleShot(1000, self._check_new_mean)
         else:
             self._log_message(f"ERROR: Failed to move {motor_name}")
             self._finish_optimization()
+
+    def _check_new_mean(self):
+        """Get the mean from current image and process."""
+        if not self.optimization_active:
+            return
+
+        new_mean = self._get_image_mean()
+        if new_mean is None:
+            self._log_message("ERROR: Cannot get image mean")
+            self._finish_optimization()
+            return
+
+        self._process_optimization_step(new_mean)
 
     def _process_optimization_step(self, new_mean: float):
         """Process the mean value from the new image after a motor move."""
