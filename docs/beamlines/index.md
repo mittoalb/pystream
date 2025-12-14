@@ -35,8 +35,9 @@ See the [Configuration Guide](configuration.md) for complete details on configur
 src/pystream/beamlines/
 ├── bl32ID/
 │   ├── __init__.py
-│   ├── mosalign.py
-│   └── mosaic.sh
+│   ├── mosalign.py (launcher)
+│   ├── xanesgui.py (launcher)
+│   └── ... (other plugins)
 ├── bl02BM/
 │   └── ... (beamline-specific tools)
 └── ... (additional beamlines)

@@ -44,4 +44,4 @@ where = ["src"]
 include = ["pystream*"]
 
 [tool.setuptools.package-data]
-pystream = ["pipelines/*.json", "beamlines/bl32ID/*.sh"]
+pystream = ["pipelines/*.json"]
