@@ -8,7 +8,9 @@
       "Bash(make:*)",
       "Bash(ls:*)",
       "Bash(grep:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(mosalign:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []
