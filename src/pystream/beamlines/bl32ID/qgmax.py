@@ -367,8 +367,8 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         self._log_message("=== Starting optimization cycle ===")
 
-        # Set status PV to RUN
-        self._set_status_pv("RUN")
+        # Set status PV to Busy
+        self._set_status_pv("Busy")
 
         # Reset state
         self.optimization_active = True
@@ -385,7 +385,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         if initial_mean is None:
             self._log_message("ERROR: Cannot get image mean")
             self.optimization_active = False
-            self._set_status_pv("STOP")
+            self._set_status_pv("Done")
             return
 
         self._log_message(f"Initial mean: {initial_mean:.2f}")
@@ -580,8 +580,8 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.optimization_active = False
         self.waiting_for_image = False
 
-        # Set status PV to STOP
-        self._set_status_pv("STOP")
+        # Set status PV to Done
+        self._set_status_pv("Done")
 
         # Report final results
         motor1_improvement = self.motor_max_mean.get('motor1', 0) - self.motor_last_mean.get('motor1', 0)
@@ -611,6 +611,9 @@ class QGMaxDialog(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         """Handle dialog close event."""
+        # Set status PV to Done when closing
+        self._set_status_pv("Done")
+
         # Stop optimization if running
         if self.is_running:
             self.optimization_timer.stop()
