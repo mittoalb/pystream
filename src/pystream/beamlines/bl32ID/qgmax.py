@@ -31,6 +31,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.optimization_timer = QtCore.QTimer()
         self.optimization_timer.timeout.connect(self._run_optimization_cycle)
 
+        # Status PV for external monitoring
+        self.status_pv = "32id:pystream:qgmax"
+
         # State for synchronized optimization
         self.optimization_active = False
         self.current_motor = None  # 'motor1' or 'motor2'
@@ -256,6 +259,19 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._log_message(f"Error setting PV {pv_name}: {e}")
             return False
 
+    def _set_status_pv(self, status: str):
+        """Set the status PV to RUN or STOP."""
+        try:
+            subprocess.run(
+                ['caput', self.status_pv, status],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+        except Exception:
+            # Don't log PV errors to avoid spam, just fail silently
+            pass
+
     def _get_image_mean(self) -> Optional[float]:
         """Get the current mean value of the image."""
         parent_viewer = self.parent()
@@ -351,6 +367,9 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         self._log_message("=== Starting optimization cycle ===")
 
+        # Set status PV to RUN
+        self._set_status_pv("RUN")
+
         # Reset state
         self.optimization_active = True
         self.motor_direction = {}
@@ -366,6 +385,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         if initial_mean is None:
             self._log_message("ERROR: Cannot get image mean")
             self.optimization_active = False
+            self._set_status_pv("STOP")
             return
 
         self._log_message(f"Initial mean: {initial_mean:.2f}")
@@ -559,6 +579,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         """Complete the optimization cycle."""
         self.optimization_active = False
         self.waiting_for_image = False
+
+        # Set status PV to STOP
+        self._set_status_pv("STOP")
 
         # Report final results
         motor1_improvement = self.motor_max_mean.get('motor1', 0) - self.motor_last_mean.get('motor1', 0)
