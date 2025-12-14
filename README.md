@@ -1,74 +1,34 @@
-# pystream - High-performance viewer for EPICS PVAccess NTNDArray data
+# PyStream
 
-Real-time image streaming and analysis from EPICS area detectors with PyQtGraph rendering.
+Real-time image viewer for EPICS PVAccess NTNDArray data with beamline-specific tools.
 
-## Key Features
+## Features
 
-- **Real-time Streaming**: Live image visualization from EPICS PVs
-- **Distance Measurement**: Calibrated measurements in pixels, micrometers, and millimeters
-- **Beamline Tools**: Auto-discovering plugins for facility-specific workflows
-- **Image Analysis**: Metrics, ROI analysis, intensity profiles, and quality assessment
-- **Motor Control**: Automated mosaic scanning with real-time stitching
+- **Real-time Streaming**: Live EPICS area detector visualization
+- **Beamline Plugins**: Configurable facility-specific tools
+- **Image Analysis**: Metrics, ROI, profiles, and measurements
 - **Plugin Architecture**: Extensible processing pipeline
 
-## Documentation
-
-**Full documentation available at:** https://pystream.readthedocs.io/en/latest/index.html
-
-## Quick Start
+## Installation
 
 ```bash
 # Basic installation
 pip install pystream
-pystream --pv YOUR:NTNDARRAY:PV
 
-# Install with beamline-specific tools (e.g., bl32ID)
+# With beamline tools (e.g., bl32ID)
 pip install pystream[bl32ID]
 ```
 
-## Beamline Configuration
+## Quick Start
 
-PyStream supports configurable beamline-specific plugins. Edit `src/pystream/beamline_config.py` to choose your beamline:
-
-```python
-# Load your beamline plugins
-ACTIVE_BEAMLINE = 'bl32ID'
-
-# Or disable beamline plugins
-ACTIVE_BEAMLINE = None
-```
-
-### Installing Beamline Dependencies
-
-For beamline 32-ID, install standalone tools:
 ```bash
-pip install pystream[bl32ID]
+pystream --pv YOUR:NTNDARRAY:PV
 ```
 
-This installs:
-- **xanes-gui**: XANES spectroscopy energy calibration tool
-- **mosalign**: Motor scanning and alignment with live stitching
+## Documentation
 
-See the [documentation](https://pystream.readthedocs.io) for detailed configuration and creating custom beamlines.
+**📚 Full documentation:** https://pystream.readthedocs.io
 
-## Recent Updates
+## License
 
-### Enhanced Line Profile Tool
-- Distance measurements in multiple units (px, µm, mm)
-- ΔX and ΔY component measurements
-- Calibrated physical distances with configurable pixel size
-
-### Beamlines Plugin System
-- Automatic discovery of beamline-specific tools
-- Horizontal toolbar for easy access
-- Modular architecture for facility customization
-
-### UI Improvements
-- Reset View, Beamlines, and HDF5 Viewer in top toolbar
-- Improved layout for frequently-used controls
-- Cleaner, more intuitive interface
-
-### Bug Fixes
-- Fixed mosalign starting position parameters
-- Resolved NTNDArray empty value handling
-- Corrected static method signatures
+MIT License - Copyright (c) 2025 Alberto Mittone
