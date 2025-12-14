@@ -11,11 +11,13 @@ from PyQt5 import QtWidgets
 
 
 SCRIPT_PATH = "/home/beams/USERTXM/Software/txm_calc/optics_calc.py"
-BUTTON_TEXT = "Optics Calculator"
 
 
 class OpticsCalcDialog(QtWidgets.QDialog):
     """Simple launcher for Optics Calculator - no dialog shown."""
+
+    BUTTON_TEXT = "TXM Optics"
+    HANDLER_TYPE = 'launcher'  # Execute immediately and close
 
     def __init__(self, parent=None, logger=None):
         super().__init__(parent)
@@ -61,12 +63,12 @@ class OpticsCalcDialog(QtWidgets.QDialog):
             )
 
             if self.logger:
-                self.logger.info(f"Launched Optics Calculator from {script_path}")
+                self.logger.info(f"Launched TXM Optics Calculator from {script_path}")
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self.parent(), "Launch Failed",
-                f"Failed to launch Optics Calculator:\n{str(e)}"
+                f"Failed to launch TXM Optics Calculator:\n{str(e)}"
             )
             if self.logger:
                 self.logger.error(f"Launch failed: {e}")

@@ -178,7 +178,7 @@ class MetadataViewer(QtWidgets.QWidget):
         self.metadata_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.metadata_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
         self.metadata_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
-        self.metadata_table.setAlternatingRowColors(True)
+        self.metadata_table.setAlternatingRowColors(False)  # Disabled for better readability
         self.metadata_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.metadata_table.setSortingEnabled(True)
         metadata_layout.addWidget(self.metadata_table)
@@ -360,12 +360,13 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         self.hdf5_file = None
         self.data_dataset = None
         self.data_white_dataset = None
-        
+
         # Current state
         self.current_index = 0
         self.shift_x = 0
         self.shift_y = 0
         self.normalization_enabled = True
+        self.last_directory = ""  # Remember last directory for file dialog
         
         # Cached images
         self.current_data = None
@@ -607,12 +608,20 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     
     def _load_file(self):
         """Open file dialog and load HDF5 file"""
+        import os
+
+        # Use last directory or home directory as starting point
+        start_dir = self.last_directory if self.last_directory else os.path.expanduser("~")
+
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open HDF5 File", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)"
+            self, "Open HDF5 File", start_dir, "HDF5 Files (*.h5 *.hdf5);;All Files (*)"
         )
 
         if not filename:
             return
+
+        # Remember the directory for next time
+        self.last_directory = os.path.dirname(filename)
 
         try:
             if self.hdf5_file is not None:
@@ -850,9 +859,15 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     
     def closeEvent(self, event):
         """Clean up when closing"""
-        if self.hdf5_file is not None:
-            self.hdf5_file.close()
-        super().closeEvent(event)
+        try:
+            if self.hdf5_file is not None:
+                self.hdf5_file.close()
+                self.hdf5_file = None
+        except Exception as e:
+            print(f"Warning: Error closing HDF5 file: {e}")
+
+        # Accept the event immediately to prevent hanging
+        event.accept()
 
 
 # ==================== Standalone Mode ====================

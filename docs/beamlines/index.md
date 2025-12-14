@@ -1,10 +1,26 @@
 # Beamlines Plugin System
 
-PyStream includes an extensible beamlines plugin system that automatically discovers and loads beamline-specific tools.
+PyStream includes a configurable beamlines plugin system that allows users to load only the plugins relevant to their facility.
 
 ## Overview
 
-The beamlines system allows each beamline facility to have its own set of specialized tools that appear in a dedicated toolbar. This enables customization for different experimental setups without modifying the core PyStream application.
+The beamlines system allows each beamline facility to have its own set of specialized tools that appear in a dedicated toolbar. Users configure which beamline to load via a simple configuration file, enabling customization without modifying PyStream's core code.
+
+## Configuration
+
+**New in this version**: PyStream now uses a configuration file to control which beamline plugins are loaded.
+
+Edit `src/pystream/beamline_config.py` to choose your beamline:
+
+```python
+# Load bl32ID plugins
+ACTIVE_BEAMLINE = 'bl32ID'
+
+# Or disable beamline plugins
+ACTIVE_BEAMLINE = None
+```
+
+See the [Configuration Guide](configuration.md) for complete details on configuring beamlines.
 
 ## Features
 
@@ -231,6 +247,7 @@ Potential future improvements to the beamlines system:
 ```{toctree}
 :maxdepth: 2
 
+configuration
 bl32ID
 launcher_guide
 ```

@@ -17,6 +17,9 @@ import pyqtgraph as pg
 class RotationAxisDialog(QtWidgets.QDialog):
     """Dialog for detecting and displaying rotation axis position."""
 
+    BUTTON_TEXT = "AutoROT"
+    HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
+
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)
         self.logger = logger

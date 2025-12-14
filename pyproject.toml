@@ -24,13 +24,16 @@ dependencies = [
 [project.optional-dependencies]
 vispy = ["vispy>=0.14.0"]
 docs = ["sphinx>=6.0", "sphinx-rtd-theme", "myst-parser>=3.0"]
+bl32ID = [
+  "xanes-gui @ git+https://github.com/mittoalb/xanes_gui.git",
+  "mosalign @ git+https://github.com/mittoalb/mosalign.git",
+]
 all = ["vispy>=0.14.0"]
 dev = ["black", "flake8", "pytest"]
 
 [project.scripts]
 pystream = "pystream.pystream:main"
 viewer = "pystream.plugins.viewer:main"
-mosalign = "pystream.beamlines.bl32ID.mosalign:main"
 metrics = "pystream.plugins.metrics:main"
 
 [tool.setuptools]
