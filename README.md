@@ -18,8 +18,12 @@ Real-time image streaming and analysis from EPICS area detectors with PyQtGraph 
 ## Quick Start
 
 ```bash
+# Basic installation
 pip install pystream
 pystream --pv YOUR:NTNDARRAY:PV
+
+# Install with beamline-specific tools (e.g., bl32ID)
+pip install pystream[bl32ID]
 ```
 
 ## Beamline Configuration
@@ -34,7 +38,18 @@ ACTIVE_BEAMLINE = 'bl32ID'
 ACTIVE_BEAMLINE = None
 ```
 
-See [BEAMLINE_CONFIG.md](BEAMLINE_CONFIG.md) for detailed configuration and creating custom beamlines.
+### Installing Beamline Dependencies
+
+For beamline 32-ID, install standalone tools:
+```bash
+pip install pystream[bl32ID]
+```
+
+This installs:
+- **xanes-gui**: XANES spectroscopy energy calibration tool
+- **mosalign**: Motor scanning and alignment with live stitching
+
+See the [documentation](https://pystream.readthedocs.io) for detailed configuration and creating custom beamlines.
 
 ## Recent Updates
 
