@@ -7,6 +7,8 @@ Launches the standalone Mosalign tool when clicked.
 """
 
 import subprocess
+import os
+import sys
 from PyQt5 import QtWidgets
 
 
@@ -28,26 +30,42 @@ class MotorScanDialog(QtWidgets.QDialog):
 
     def _launch(self):
         """Launch the Mosalign standalone application."""
+        # Try multiple possible locations
+        possible_paths = [
+            "/home/beams/AMITTONE/Software/mosalign/mosalign/gui.py",
+            "/home/beams0/AMITTONE/Software/mosalign/mosalign/gui.py",
+            os.path.expanduser("~/Software/mosalign/mosalign/gui.py"),
+        ]
+
+        script_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                script_path = path
+                break
+
+        if not script_path:
+            QtWidgets.QMessageBox.critical(
+                self.parent(), "File Not Found",
+                "Mosalign script not found.\n\nTried:\n" +
+                "\n".join(f"  - {p}" for p in possible_paths) +
+                "\n\nPlease install:\n" +
+                "  cd /home/beams0/AMITTONE/Software/mosalign\n" +
+                "  pip install -e .\n"
+            )
+            if self.logger:
+                self.logger.error("mosalign script not found")
+            return
+
         try:
-            # Launch mosalign command
             subprocess.Popen(
-                ['mosalign'],
+                [sys.executable, script_path],
+                cwd=os.path.dirname(script_path),
                 start_new_session=True
             )
 
             if self.logger:
-                self.logger.info("Launched Mosalign standalone application")
+                self.logger.info(f"Launched Mosalign from {script_path}")
 
-        except FileNotFoundError:
-            QtWidgets.QMessageBox.critical(
-                self.parent(), "Command Not Found",
-                "Mosalign command not found.\n\n"
-                "Please install mosalign:\n\n"
-                "  cd /home/beams0/AMITTONE/Software/mosalign\n"
-                "  pip install -e .\n"
-            )
-            if self.logger:
-                self.logger.error("mosalign command not found")
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self.parent(), "Launch Failed",
