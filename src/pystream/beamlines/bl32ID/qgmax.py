@@ -40,7 +40,8 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.hdf5_location_monitor_timer.timeout.connect(self._check_hdf5_location)
         self.last_hdf5_location = None
         self.hdf5_location_trigger_count = 0
-        self.hdf5_location_run_every = 1  # Run every N times HDF5Location = data_white
+        self.hdf5_location_run_every = 1  # Run every N times HDF5Location = /exchange/data
+        self.waiting_for_pause_location = False  # Flag to indicate we're waiting for /exchange/Pause
 
         # State for synchronized optimization
         self.optimization_active = False
@@ -243,7 +244,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.run_every_input.setRange(1, 100)
         self.run_every_input.setValue(1)
         self.run_every_input.valueChanged.connect(self._update_run_every)
-        auto_settings_layout.addRow("Run Every N /exchange/Pause:", self.run_every_input)
+        auto_settings_layout.addRow("Run Every N /exchange/data:", self.run_every_input)
 
         auto_settings_group.setLayout(auto_settings_layout)
         settings_layout.addWidget(auto_settings_group)
@@ -372,11 +373,12 @@ class QGMaxDialog(QtWidgets.QDialog):
             # Reset counter
             self.hdf5_location_trigger_count = 0
             self.last_hdf5_location = None
+            self.waiting_for_pause_location = False
 
             # Start monitoring HDF5Location PV every 2 seconds
             self.hdf5_location_monitor_timer.start(2000)
 
-            self._log_message(f"Automated mode enabled (will run every {self.hdf5_location_run_every} /exchange/Pause)")
+            self._log_message(f"Automated mode enabled (will run every {self.hdf5_location_run_every} /exchange/data)")
         else:
             # Disable automated mode
             self.auto_mode_btn.setText("Enable Automated Mode")
@@ -392,7 +394,7 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._log_message("Automated mode disabled")
 
     def _check_hdf5_location(self):
-        """Check HDF5Location PV and trigger optimization if it equals '/exchange/Pause'."""
+        """Check HDF5Location PV for automated optimization trigger."""
         if not self.auto_mode_enabled or self.optimization_active:
             return
 
@@ -411,16 +413,29 @@ class QGMaxDialog(QtWidgets.QDialog):
 
             current_value = result.stdout.strip()
 
-            # Check if it changed to /exchange/Pause
-            if current_value == "/exchange/Pause" and self.last_hdf5_location != "/exchange/Pause":
-                self.hdf5_location_trigger_count += 1
-                self._log_message(f"Detected /exchange/Pause ({self.hdf5_location_trigger_count}/{self.hdf5_location_run_every})")
+            # State machine logic:
+            # 1. Count /exchange/data occurrences
+            # 2. When count reaches threshold, set TomoScan to Pause and wait for /exchange/Pause
+            # 3. When /exchange/Pause detected, start optimization
 
-                # Check if we should run optimization
-                if self.hdf5_location_trigger_count >= self.hdf5_location_run_every:
-                    self._log_message("Triggering automated optimization")
-                    self.hdf5_location_trigger_count = 0  # Reset counter
-                    self._run_automated_optimization()
+            if self.waiting_for_pause_location:
+                # We're waiting for TomoScan to reach /exchange/Pause after we paused it
+                if current_value == "/exchange/Pause":
+                    self._log_message("Detected /exchange/Pause - starting optimization")
+                    self.waiting_for_pause_location = False
+                    self.status_label.setText("Status: Optimizing (Automated)")
+                    self._run_optimization_cycle()
+            else:
+                # Normal mode: count /exchange/data occurrences
+                if current_value == "/exchange/data" and self.last_hdf5_location != "/exchange/data":
+                    self.hdf5_location_trigger_count += 1
+                    self._log_message(f"Detected /exchange/data ({self.hdf5_location_trigger_count}/{self.hdf5_location_run_every})")
+
+                    # Check if we should trigger pause
+                    if self.hdf5_location_trigger_count >= self.hdf5_location_run_every:
+                        self._log_message("Threshold reached - pausing TomoScan")
+                        self.hdf5_location_trigger_count = 0  # Reset counter
+                        self._pause_tomoscan()
 
             self.last_hdf5_location = current_value
 
@@ -428,27 +443,26 @@ class QGMaxDialog(QtWidgets.QDialog):
             # Silently ignore errors to avoid spam
             pass
 
-    def _run_automated_optimization(self):
-        """Run optimization in automated mode with TomoScan pause control."""
-        if self.optimization_active:
-            return
-
-        # Set TomoScan to Pause
+    def _pause_tomoscan(self):
+        """Set TomoScan to Pause and wait for /exchange/Pause location."""
+        # Set TomoScan to Pause to stop the scan
         tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ['caput', tomoscan_pause_pv, 'Pause'],
                 capture_output=True,
                 text=True,
                 timeout=2
             )
-            self._log_message("Set TomoScan:Pause = Pause")
+            if result.returncode == 0:
+                self._log_message("Set TomoScan:Pause = Pause")
+                # Set flag to wait for /exchange/Pause location
+                self.waiting_for_pause_location = True
+                self.status_label.setText("Status: Waiting for TomoScan to pause")
+            else:
+                self._log_message(f"Warning: Failed to set TomoScan:Pause = Pause: {result.stderr}")
         except Exception as e:
             self._log_message(f"Warning: Failed to pause TomoScan: {e}")
-
-        # Run optimization
-        self.status_label.setText("Status: Optimizing (Automated)")
-        self._run_optimization_cycle()
 
     def _toggle_optimization(self, checked: bool):
         """Toggle continuous optimization on/off."""
@@ -721,15 +735,28 @@ class QGMaxDialog(QtWidgets.QDialog):
         if self.auto_mode_enabled:
             tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ['caput', tomoscan_pause_pv, 'Go'],
                     capture_output=True,
                     text=True,
                     timeout=2
                 )
-                self._log_message("Set TomoScan:Pause = Go")
-            except Exception:
-                self._log_message("Warning: Failed to resume TomoScan")
+                if result.returncode == 0:
+                    self._log_message("Set TomoScan:Pause = Go")
+                    # Verify the value was set
+                    verify_result = subprocess.run(
+                        ['caget', '-t', tomoscan_pause_pv],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                    if verify_result.returncode == 0:
+                        actual_value = verify_result.stdout.strip()
+                        self._log_message(f"Verified TomoScan:Pause = {actual_value}")
+                else:
+                    self._log_message(f"Warning: Failed to set TomoScan:Pause = Go: {result.stderr}")
+            except Exception as e:
+                self._log_message(f"Warning: Failed to resume TomoScan: {e}")
 
         # Report final results
         motor1_improvement = self.motor_max_mean.get('motor1', 0) - self.motor_last_mean.get('motor1', 0)
