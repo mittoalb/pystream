@@ -449,7 +449,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
         try:
             result = subprocess.run(
-                ['caput', tomoscan_pause_pv, 'Pause'],
+                ['caput', tomoscan_pause_pv, 'PAUSE'],
                 capture_output=True,
                 text=True,
                 timeout=2
@@ -736,7 +736,7 @@ class QGMaxDialog(QtWidgets.QDialog):
             tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
             try:
                 result = subprocess.run(
-                    ['caput', tomoscan_pause_pv, 'Go'],
+                    ['caput', tomoscan_pause_pv, 'GO'],
                     capture_output=True,
                     text=True,
                     timeout=2
