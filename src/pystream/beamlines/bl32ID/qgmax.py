@@ -24,7 +24,7 @@ class QGMaxDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
         super().__init__(parent)
         self.logger = logger
-        self.setWindowTitle("QGMax - bl32ID")
+        self.setWindowTitle("QGMax")
         self.resize(600, 700)
 
         self.is_running = False
@@ -33,6 +33,14 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         # Status PV for external monitoring
         self.status_pv = "32id:pystream:qgmax"
+
+        # Automated mode monitoring
+        self.auto_mode_enabled = False
+        self.hdf5_location_monitor_timer = QtCore.QTimer()
+        self.hdf5_location_monitor_timer.timeout.connect(self._check_hdf5_location)
+        self.last_hdf5_location = None
+        self.hdf5_location_trigger_count = 0
+        self.hdf5_location_run_every = 1  # Run every N times HDF5Location = data_white
 
         # State for synchronized optimization
         self.optimization_active = False
@@ -95,6 +103,15 @@ class QGMaxDialog(QtWidgets.QDialog):
         control_group = QtWidgets.QGroupBox("Control")
         control_group_layout = QtWidgets.QVBoxLayout()
 
+        # Automated mode toggle
+        self.auto_mode_btn = QtWidgets.QPushButton("Enable Automated Mode")
+        self.auto_mode_btn.setCheckable(True)
+        self.auto_mode_btn.clicked.connect(self._toggle_auto_mode)
+        self.auto_mode_btn.setStyleSheet(
+            "QPushButton { font-size: 12pt; padding: 10px; }"
+        )
+        control_group_layout.addWidget(self.auto_mode_btn)
+
         # Start/Stop button
         self.toggle_btn = QtWidgets.QPushButton("Start Continuous Optimization")
         self.toggle_btn.setCheckable(True)
@@ -120,15 +137,15 @@ class QGMaxDialog(QtWidgets.QDialog):
         status_layout = QtWidgets.QVBoxLayout()
 
         self.status_label = QtWidgets.QLabel("Status: Idle")
-        self.status_label.setStyleSheet("padding: 5px; background: #f0f0f0; font-weight: bold;")
+        self.status_label.setStyleSheet("padding: 5px; font-weight: bold;")
         status_layout.addWidget(self.status_label)
 
         self.current_mean_label = QtWidgets.QLabel("Current Mean: --")
-        self.current_mean_label.setStyleSheet("padding: 5px; background: #f0f0f0;")
+        self.current_mean_label.setStyleSheet("padding: 5px;")
         status_layout.addWidget(self.current_mean_label)
 
         self.motor_positions_label = QtWidgets.QLabel("Motor Positions: --")
-        self.motor_positions_label.setStyleSheet("padding: 5px; background: #f0f0f0;")
+        self.motor_positions_label.setStyleSheet("padding: 5px;")
         status_layout.addWidget(self.motor_positions_label)
 
         status_group.setLayout(status_layout)
@@ -211,6 +228,25 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         opt_settings_group.setLayout(opt_settings_layout)
         settings_layout.addWidget(opt_settings_group)
+
+        # Automated Mode Settings
+        auto_settings_group = QtWidgets.QGroupBox("Automated Mode Settings")
+        auto_settings_layout = QtWidgets.QFormLayout()
+
+        self.hdf5_location_pv_input = QtWidgets.QLineEdit("32id:TomoScan:HDF5Location")
+        auto_settings_layout.addRow("HDF5Location PV:", self.hdf5_location_pv_input)
+
+        self.tomoscan_pause_pv_input = QtWidgets.QLineEdit("32id:TomoScan:Pause")
+        auto_settings_layout.addRow("TomoScan Pause PV:", self.tomoscan_pause_pv_input)
+
+        self.run_every_input = QtWidgets.QSpinBox()
+        self.run_every_input.setRange(1, 100)
+        self.run_every_input.setValue(1)
+        self.run_every_input.valueChanged.connect(self._update_run_every)
+        auto_settings_layout.addRow("Run Every N /exchange/Pause:", self.run_every_input)
+
+        auto_settings_group.setLayout(auto_settings_layout)
+        settings_layout.addWidget(auto_settings_group)
 
         settings_layout.addStretch()
 
@@ -315,6 +351,104 @@ class QGMaxDialog(QtWidgets.QDialog):
             )
         else:
             self.motor_positions_label.setText("Motor Positions: --")
+
+    def _update_run_every(self, value: int):
+        """Update the run_every value when changed."""
+        self.hdf5_location_run_every = value
+
+    def _toggle_auto_mode(self, checked: bool):
+        """Toggle automated mode on/off."""
+        self.auto_mode_enabled = checked
+
+        if checked:
+            # Enable automated mode
+            self.auto_mode_btn.setText("Disable Automated Mode")
+            self.auto_mode_btn.setStyleSheet(
+                "QPushButton { font-size: 12pt; padding: 10px; background-color: #4CAF50; }"
+            )
+            self.toggle_btn.setEnabled(False)
+            self.run_once_btn.setEnabled(False)
+
+            # Reset counter
+            self.hdf5_location_trigger_count = 0
+            self.last_hdf5_location = None
+
+            # Start monitoring HDF5Location PV every 2 seconds
+            self.hdf5_location_monitor_timer.start(2000)
+
+            self._log_message(f"Automated mode enabled (will run every {self.hdf5_location_run_every} /exchange/Pause)")
+        else:
+            # Disable automated mode
+            self.auto_mode_btn.setText("Enable Automated Mode")
+            self.auto_mode_btn.setStyleSheet(
+                "QPushButton { font-size: 12pt; padding: 10px; }"
+            )
+            self.toggle_btn.setEnabled(True)
+            self.run_once_btn.setEnabled(True)
+
+            # Stop monitoring
+            self.hdf5_location_monitor_timer.stop()
+
+            self._log_message("Automated mode disabled")
+
+    def _check_hdf5_location(self):
+        """Check HDF5Location PV and trigger optimization if it equals '/exchange/Pause'."""
+        if not self.auto_mode_enabled or self.optimization_active:
+            return
+
+        hdf5_location_pv = self.hdf5_location_pv_input.text()
+
+        # Get current value
+        try:
+            result = subprocess.run(
+                ['caget', '-t', hdf5_location_pv],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode != 0:
+                return
+
+            current_value = result.stdout.strip()
+
+            # Check if it changed to /exchange/Pause
+            if current_value == "/exchange/Pause" and self.last_hdf5_location != "/exchange/Pause":
+                self.hdf5_location_trigger_count += 1
+                self._log_message(f"Detected /exchange/Pause ({self.hdf5_location_trigger_count}/{self.hdf5_location_run_every})")
+
+                # Check if we should run optimization
+                if self.hdf5_location_trigger_count >= self.hdf5_location_run_every:
+                    self._log_message("Triggering automated optimization")
+                    self.hdf5_location_trigger_count = 0  # Reset counter
+                    self._run_automated_optimization()
+
+            self.last_hdf5_location = current_value
+
+        except Exception:
+            # Silently ignore errors to avoid spam
+            pass
+
+    def _run_automated_optimization(self):
+        """Run optimization in automated mode with TomoScan pause control."""
+        if self.optimization_active:
+            return
+
+        # Set TomoScan to Pause
+        tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
+        try:
+            subprocess.run(
+                ['caput', tomoscan_pause_pv, 'Pause'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            self._log_message("Set TomoScan:Pause = Pause")
+        except Exception as e:
+            self._log_message(f"Warning: Failed to pause TomoScan: {e}")
+
+        # Run optimization
+        self.status_label.setText("Status: Optimizing (Automated)")
+        self._run_optimization_cycle()
 
     def _toggle_optimization(self, checked: bool):
         """Toggle continuous optimization on/off."""
@@ -583,6 +717,20 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Set status PV to Done
         self._set_status_pv("Done")
 
+        # If in automated mode, resume TomoScan
+        if self.auto_mode_enabled:
+            tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
+            try:
+                subprocess.run(
+                    ['caput', tomoscan_pause_pv, 'Go'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                self._log_message("Set TomoScan:Pause = Go")
+            except Exception:
+                self._log_message("Warning: Failed to resume TomoScan")
+
         # Report final results
         motor1_improvement = self.motor_max_mean.get('motor1', 0) - self.motor_last_mean.get('motor1', 0)
         motor2_improvement = self.motor_max_mean.get('motor2', 0) - self.motor_last_mean.get('motor2', 0)
@@ -613,6 +761,10 @@ class QGMaxDialog(QtWidgets.QDialog):
         """Handle dialog close event."""
         # Set status PV to Done when closing
         self._set_status_pv("Done")
+
+        # Stop automated mode if running
+        if self.auto_mode_enabled:
+            self.hdf5_location_monitor_timer.stop()
 
         # Stop optimization if running
         if self.is_running:
