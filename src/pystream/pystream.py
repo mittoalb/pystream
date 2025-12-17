@@ -445,12 +445,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view = pg.ImageView()
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
-        self.image_view.view.setMouseMode(pg.ViewBox.RectMode)
-        
-        # Enable mouse wheel zoom
+        self.image_view.view.setMouseMode(pg.ViewBox.PanMode)
+
+        # Enable mouse wheel zoom and panning
         self.image_view.view.setMouseEnabled(x=True, y=True)
-        
-        # Disable panning but keep zoom
+
+        # No limits - allow free panning
         self.image_view.view.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
         
         # Add crosshair lines
