@@ -53,7 +53,7 @@ class SingleScaleBar:
         self.bar_rect: Optional[QtWidgets.QGraphicsRectItem] = None
         self.bar_text: Optional[pg.TextItem] = None
 
-        # Connect to view range changes to update position when zooming/panning
+        # Connect to view range changes to update when zooming/panning
         self.image_view.view.sigRangeChanged.connect(self._on_view_range_changed)
     
     def show(self):
@@ -100,27 +100,37 @@ class SingleScaleBar:
         h, w = image.shape[:2]
         self._last_image_shape = (h, w)
 
-        # Create graphics items if needed (attached to view, not image)
+        # Create graphics items if needed - attach to image item
         if self.bar_rect is None:
             self.bar_rect = QtWidgets.QGraphicsRectItem()
             color_obj = pg.mkColor(self.color)
             self.bar_rect.setBrush(pg.mkBrush(color_obj))
             self.bar_rect.setPen(pg.mkPen(None))
             self.bar_rect.setZValue(2000)
-            self.image_view.getView().addItem(self.bar_rect)
+
+            img_item = self.image_view.getImageItem()
+            if img_item is not None:
+                self.bar_rect.setParentItem(img_item)
+            else:
+                self.image_view.getView().addItem(self.bar_rect)
 
         if self.bar_text is None:
             self.bar_text = pg.TextItem("", anchor=(0.5, 1), color=self.color)
             self.bar_text.setFont(QtGui.QFont("Arial", self.font_size, QtGui.QFont.Bold))
             self.bar_text.setZValue(2001)
-            self.image_view.getView().addItem(self.bar_text)
 
-        # Update scale bar position and size based on current view
+            img_item = self.image_view.getImageItem()
+            if img_item is not None:
+                self.bar_text.setParentItem(img_item)
+            else:
+                self.image_view.getView().addItem(self.bar_text)
+
+        # Update scale bar geometry
         self._update_scalebar_geometry()
 
     def _on_view_range_changed(self):
         """Called when view range changes (zoom/pan)."""
-        if self.enabled and self.bar_rect is not None:
+        if self.enabled and self.bar_rect is not None and self._last_image_shape is not None:
             self._update_scalebar_geometry()
 
     def _update_scalebar_geometry(self):
@@ -135,10 +145,10 @@ class SingleScaleBar:
         x_range = view_range[0]  # [xmin, xmax]
         y_range = view_range[1]  # [ymin, ymax]
 
-        # Calculate visible width in pixels
+        # Calculate visible width in image pixels
         visible_width_px = x_range[1] - x_range[0]
 
-        # Calculate desired bar width in image pixels (fraction of visible width)
+        # Calculate desired bar width (fraction of visible width)
         desired_bar_width_px = visible_width_px * self.bar_width_fraction
         desired_bar_width_real = desired_bar_width_px * self.pixel_size
 
@@ -146,7 +156,7 @@ class SingleScaleBar:
         bar_width_real = self._get_nice_scale(desired_bar_width_real)
         bar_width_px = bar_width_real / self.pixel_size
 
-        # Calculate position in view coordinates (always in bottom-left or as configured)
+        # Calculate position in image coordinates based on visible range
         margin_px = self.margin
         bar_height_px = self.bar_height
 
