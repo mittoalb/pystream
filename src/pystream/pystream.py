@@ -29,8 +29,23 @@ import pvaccess as pva
 
 from PyQt5 import QtWidgets, QtCore
 
+# Disable matplotlib in pyqtgraph to avoid C++ library conflicts
+os.environ['PYQTGRAPH_QT_LIB'] = 'PyQt5'
+
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
+
+# Monkey-patch to prevent pyqtgraph from loading matplotlib colormaps
+try:
+    import pyqtgraph.colormap
+    _original_listMaps = pyqtgraph.colormap.listMaps
+    def _listMaps_no_mpl(source=None):
+        if source == "matplotlib":
+            return []
+        return _original_listMaps(source)
+    pyqtgraph.colormap.listMaps = _listMaps_no_mpl
+except (ImportError, AttributeError):
+    pass
 
 from .logger import setup_custom_logger, log_exception
 
