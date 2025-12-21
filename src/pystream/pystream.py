@@ -66,6 +66,66 @@ except Exception:
     _HAS_ADU = False
 
 
+# Background TIFF writer thread for recording
+class TiffWriterThread(threading.Thread):
+    """Background thread that writes TIFF frames from a queue to disk."""
+
+    def __init__(self, output_dir: str, frame_queue: queue.Queue):
+        super().__init__(daemon=True)
+        self.output_dir = output_dir
+        self.frame_queue = frame_queue
+        self.running = True
+        self.frames_written = 0
+
+    def run(self):
+        """Process frames from queue and write to disk."""
+        from PIL import Image
+
+        while self.running or not self.frame_queue.empty():
+            try:
+                # Get frame from queue with timeout
+                item = self.frame_queue.get(timeout=0.5)
+
+                if item is None:  # Poison pill to stop thread
+                    break
+
+                frame_idx, frame_data = item
+
+                # Convert to uint16 for TIFF
+                if frame_data.dtype != np.uint16:
+                    img_min = frame_data.min()
+                    img_max = frame_data.max()
+                    if img_max > img_min:
+                        normalized = (frame_data - img_min) / (img_max - img_min)
+                        frame_u16 = (normalized * 65535).astype(np.uint16)
+                    else:
+                        frame_u16 = np.zeros_like(frame_data, dtype=np.uint16)
+                else:
+                    frame_u16 = frame_data
+
+                # Save to disk
+                filename = f"frame_{frame_idx:06d}.tiff"
+                filepath = os.path.join(self.output_dir, filename)
+
+                pil_image = Image.fromarray(frame_u16)
+                pil_image.save(filepath, compression="tiff_deflate")
+
+                self.frames_written += 1
+                self.frame_queue.task_done()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.error(f"Error writing frame: {e}")
+                    log_exception(LOGGER, e)
+                break
+
+    def stop(self):
+        """Signal thread to stop."""
+        self.running = False
+
+
 # ----------------------- Config I/O -----------------------
 def _app_dir() -> str:
     config_dir = os.path.join(os.path.expanduser("~"), ".pystream")
@@ -333,6 +393,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.recorded_frame_count = 0
         self.record_path = ""
         self.record_dir = ""
+        self.recording_queue = None
+        self.recording_thread = None
 
         self.motor_scan_dialog = None
         self.roi_manager = None
@@ -1273,13 +1335,36 @@ class PvViewerApp(QtWidgets.QMainWindow):
             f"Mean: {img.mean():.2f}"
         )
         
-        # Recording - capture frame
-        if self.recording:
-            self.recorded_frames.append(np.copy(img))
-            num_frames = len(self.recorded_frames)
-            self.lbl_record_status.setText(
-                f"🔴 REC\nFrames: {num_frames}"
-            )
+        # Recording - add frame to queue for background writer
+        if self.recording and self.recording_queue is not None:
+            try:
+                # Add frame copy to queue (non-blocking with timeout)
+                # Make a copy to avoid reference issues
+                frame_copy = np.copy(img)
+                self.recording_queue.put((self.recorded_frame_count, frame_copy), timeout=0.1)
+
+                self.recorded_frame_count += 1
+                queued = self.recording_queue.qsize()
+                self.lbl_record_status.setText(
+                    f"🔴 REC\nFrames: {self.recorded_frame_count}\nQueued: {queued}"
+                )
+            except queue.Full:
+                # Queue is full - skip this frame or stop recording
+                if LOGGER:
+                    LOGGER.warning("Recording queue full - frame dropped")
+                self.lbl_record_status.setText(
+                    f"🔴 REC\nFrames: {self.recorded_frame_count}\n⚠ Queue full!"
+                )
+            except Exception as e:
+                # Stop recording on error
+                self.recording = False
+                self.btn_record.setChecked(False)
+                self.btn_record.setText("⏺" if self.is_small_screen else "Record")
+                self.btn_record.setStyleSheet("")
+                self.lbl_record_status.setText("✗ Recording error!")
+                if LOGGER:
+                    LOGGER.error("Recording error:")
+                    log_exception(LOGGER, e)
         
         # Histogram update (throttled)
         if (now - self._last_hist_t) >= self.hist_interval:
@@ -1588,97 +1673,81 @@ class PvViewerApp(QtWidgets.QMainWindow):
             path = self.record_path_entry.text().strip()
             if not path:
                 QtWidgets.QMessageBox.warning(
-                    self, "Start Recording", 
-                    "Please specify an output file path first."
+                    self, "Start Recording",
+                    "Please specify an output directory first."
                 )
                 self.btn_record.setChecked(False)
                 return
-            
+
+            # Auto-add timestamp subdirectory to avoid overwriting
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.record_dir = os.path.join(path, f"recording_{timestamp}")
+
+            # Create directory
+            try:
+                os.makedirs(self.record_dir, exist_ok=True)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self, "Start Recording",
+                    f"Failed to create recording directory:\n{e}"
+                )
+                self.btn_record.setChecked(False)
+                return
+
+            # Start background writer thread with queue
+            self.recording_queue = queue.Queue(maxsize=100)  # Buffer up to 100 frames in RAM
+            self.recording_thread = TiffWriterThread(self.record_dir, self.recording_queue)
+            self.recording_thread.start()
+
             self.recording = True
-            self.recorded_frames = []
-            self.record_path = path
+            self.recorded_frame_count = 0
             self.btn_record.setText("⏹" if self.is_small_screen else "Stop Recording")
             self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
             self.lbl_record_status.setText("🔴 REC\nFrames: 0")
             if LOGGER:
-                LOGGER.info("Started recording to %s", path)
+                LOGGER.info("Started recording to %s", self.record_dir)
         else:
-            # Stop recording and save
+            # Stop recording
             self.recording = False
             self.btn_record.setText("⏺" if self.is_small_screen else "Record")
             self.btn_record.setStyleSheet("")
-            
-            if not self.recorded_frames:
+
+            if self.recorded_frame_count == 0:
                 self.lbl_record_status.setText("Not recording")
                 QtWidgets.QMessageBox.information(
-                    self, "Stop Recording", 
+                    self, "Stop Recording",
                     "No frames were recorded."
                 )
                 return
-            
-            # Save frames as separate TIFF files
-            try:
-                from PIL import Image
 
-                num_frames = len(self.recorded_frames)
-                self.lbl_record_status.setText(f"Saving {num_frames} frames...")
+            # Wait for background writer to finish
+            if self.recording_thread and self.recording_thread.is_alive():
+                queued_frames = self.recording_queue.qsize()
+                self.lbl_record_status.setText(f"Flushing {queued_frames} frames...")
                 QtWidgets.QApplication.processEvents()
 
-                # Create output directory if it doesn't exist
-                output_dir = self.record_path
-                os.makedirs(output_dir, exist_ok=True)
+                # Signal thread to stop and wait for queue to empty
+                self.recording_queue.put(None)  # Poison pill
+                self.recording_thread.join(timeout=30)  # Wait up to 30 seconds
 
-                # Determine number of digits for zero-padding
-                num_digits = len(str(num_frames))
+                if self.recording_thread.is_alive():
+                    if LOGGER:
+                        LOGGER.warning("Recording thread did not finish in time")
 
-                # Save each frame as a separate TIFF file
-                for idx, frame in enumerate(self.recorded_frames):
-                    # Convert to uint16 if needed (TIFF supports uint16)
-                    if frame.dtype != np.uint16:
-                        # Normalize and scale to uint16 range
-                        frame_min = frame.min()
-                        frame_max = frame.max()
-                        if frame_max > frame_min:
-                            normalized = (frame - frame_min) / (frame_max - frame_min)
-                            frame_u16 = (normalized * 65535).astype(np.uint16)
-                        else:
-                            frame_u16 = np.zeros_like(frame, dtype=np.uint16)
-                    else:
-                        frame_u16 = frame
+            # Show final status
+            frames_written = self.recording_thread.frames_written if self.recording_thread else self.recorded_frame_count
+            self.lbl_record_status.setText(f"✓ Saved {frames_written} frames")
+            if LOGGER:
+                LOGGER.info("Recording stopped: %d frames saved to %s", frames_written, self.record_dir)
 
-                    # Create filename with zero-padded index
-                    filename = f"frame_{idx:0{num_digits}d}.tiff"
-                    filepath = os.path.join(output_dir, filename)
+            QtWidgets.QMessageBox.information(
+                self, "Recording Stopped",
+                f"Successfully saved {frames_written} frames\n"
+                f"as individual TIFF files to:\n\n{self.record_dir}"
+            )
 
-                    # Save individual TIFF
-                    pil_image = Image.fromarray(frame_u16)
-                    pil_image.save(filepath, compression="tiff_deflate")
-
-                    # Update progress
-                    if (idx + 1) % 10 == 0 or idx == num_frames - 1:
-                        self.lbl_record_status.setText(f"Saving {idx + 1}/{num_frames}...")
-                        QtWidgets.QApplication.processEvents()
-
-                self.lbl_record_status.setText(f"✓ Saved {num_frames} frames")
-                if LOGGER:
-                    LOGGER.info("Saved %d frames to %s", num_frames, output_dir)
-
-                QtWidgets.QMessageBox.information(
-                    self, "Recording Saved",
-                    f"Successfully saved {num_frames} frames\n"
-                    f"as individual TIFF files to:\n\n{output_dir}"
-                )
-            except Exception as e:
-                self.lbl_record_status.setText("✗ Save failed!")
-                if LOGGER:
-                    LOGGER.error("Failed to save recording:")
-                    log_exception(LOGGER, e)
-                QtWidgets.QMessageBox.critical(
-                    self, "Save Recording", 
-                    f"Failed to save recording:\n{e}"
-                )
-            finally:
-                self.recorded_frames = []
+            self.recording_thread = None
+            self.recording_queue = None
     
     # ------------- Other commands -------------
     def _toggle_pause(self):
@@ -1794,16 +1863,18 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.recording:
             reply = QtWidgets.QMessageBox.question(
                 self, "Recording Active",
-                f"Recording is active with {len(self.recorded_frames)} frames. Save before closing?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel
+                f"Recording is active with {self.recorded_frame_count} frames saved.\n"
+                f"Stop recording and close?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel
             )
-            
+
             if reply == QtWidgets.QMessageBox.Cancel:
                 event.ignore()
                 return
-            elif reply == QtWidgets.QMessageBox.Yes:
+            else:
+                # Stop recording (frames already saved)
+                self.recording = False
                 self.btn_record.setChecked(False)
-                self._toggle_recording()
         
         # Save window state
         try:
