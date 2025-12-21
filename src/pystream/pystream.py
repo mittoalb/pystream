@@ -1048,7 +1048,20 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_browse.setMaximumWidth(80)
         path_layout.addWidget(btn_browse)
         record_layout.addLayout(path_layout)
-        
+
+        # File prefix entry
+        prefix_layout = QtWidgets.QHBoxLayout()
+        prefix_layout.setSpacing(4)
+        prefix_label = QtWidgets.QLabel("Prefix:")
+        prefix_label.setMaximumWidth(50)
+        prefix_layout.addWidget(prefix_label)
+        self.record_prefix_entry = QtWidgets.QLineEdit()
+        self.record_prefix_entry.setText("frame")
+        self.record_prefix_entry.setPlaceholderText("frame")
+        self.record_prefix_entry.setToolTip("File prefix (files saved as prefix_000001.tiff, prefix_000002.tiff, ...)")
+        prefix_layout.addWidget(self.record_prefix_entry)
+        record_layout.addLayout(prefix_layout)
+
         # Status label with instructions
         self.lbl_record_status = QtWidgets.QLabel(
             "Not recording\n\n"
@@ -1681,14 +1694,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.btn_record.setChecked(False)
                 return
 
-            # Ask for file prefix
-            prefix, ok = QtWidgets.QInputDialog.getText(
-                self, "File Prefix",
-                "Enter prefix for saved files:",
-                QtWidgets.QLineEdit.Normal,
-                "frame"
-            )
-            if not ok or not prefix:
+            # Get prefix from UI field
+            prefix = self.record_prefix_entry.text().strip()
+            if not prefix:
                 prefix = "frame"
 
             # Auto-add timestamp subdirectory to avoid overwriting
