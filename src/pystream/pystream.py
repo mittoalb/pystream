@@ -1872,10 +1872,34 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 event.ignore()
                 return
             else:
-                # Stop recording (frames already saved)
+                # Properly stop recording with thread cleanup
                 self.recording = False
                 self.btn_record.setChecked(False)
+
+                # Wait for background writer to finish
+                if self.recording_thread and self.recording_thread.is_alive():
+                    if LOGGER:
+                        LOGGER.info("Waiting for recording thread to finish...")
+
+                    # Signal thread to stop and wait for queue to empty
+                    try:
+                        self.recording_queue.put(None, timeout=1)  # Poison pill
+                    except Exception:
+                        pass
+
+                    self.recording_thread.join(timeout=5)  # Wait up to 5 seconds on close
+
+                    if self.recording_thread.is_alive():
+                        if LOGGER:
+                            LOGGER.warning("Recording thread did not finish in time during close")
+
+                self.recording_thread = None
+                self.recording_queue = None
         
+        # Stop pump timer first to avoid processing during cleanup
+        if self.pump_timer:
+            self.pump_timer.stop()
+
         # Save window state
         try:
             if not self.isMaximized():
@@ -1888,19 +1912,21 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.error("[Config] Failed to save config on close")
                 log_exception(LOGGER, e)
-        
+
+        # Disconnect PV subscription
         try:
             self._disconnect_pv(silent=True)
         except Exception as e:
             if LOGGER:
                 LOGGER.warning("Error during disconnect on close:")
                 log_exception(LOGGER, e)
-        
-        # Cleanup ROI
+
+        # Cleanup ROI managers
         self.roi_manager.cleanup()
         self.line_manager.cleanup()
         self.ellipse_roi_manager.cleanup()
 
+        # Close dialogs
         if self.console_dialog:
             self.console_dialog.close()
 
@@ -1909,8 +1935,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.scalebar_dialog:
             self.scalebar_dialog.close()
 
-        # Clean mosalign
-        self.pump_timer.stop()
         if self.motor_scan_dialog:
             self.motor_scan_dialog.close()    
 
