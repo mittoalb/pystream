@@ -977,8 +977,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         path_layout = QtWidgets.QHBoxLayout()
         path_layout.setSpacing(4)
         self.record_path_entry = QtWidgets.QLineEdit()
-        self.record_path_entry.setPlaceholderText("recording.tiff")
-        self.record_path_entry.setToolTip("Path where multi-frame TIFF stack will be saved")
+        self.record_path_entry.setPlaceholderText("/path/to/output/directory")
+        self.record_path_entry.setToolTip("Directory where individual TIFF files will be saved")
         path_layout.addWidget(self.record_path_entry)
         btn_browse = QtWidgets.QPushButton("Browse...")
         btn_browse.clicked.connect(self._browse_record_path)
@@ -1573,9 +1573,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
     
     # ------------- Recording -------------
     def _browse_record_path(self):
-        """Browse for output TIFF file path"""
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Recording As", "", "TIFF Stack (*.tiff *.tif);;All Files (*)"
+        """Browse for output directory or TIFF file path"""
+        # Ask if user wants directory (separate files) or single file (stack)
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Directory to Save Individual TIFF Files"
         )
         if path:
             self.record_path_entry.setText(path)
@@ -1615,17 +1616,23 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 )
                 return
             
-            # Save frames as TIFF stack
+            # Save frames as separate TIFF files
             try:
                 from PIL import Image
-                
+
                 num_frames = len(self.recorded_frames)
                 self.lbl_record_status.setText(f"Saving {num_frames} frames...")
                 QtWidgets.QApplication.processEvents()
-                
-                # Convert frames to appropriate format for TIFF
-                pil_images = []
-                for frame in self.recorded_frames:
+
+                # Create output directory if it doesn't exist
+                output_dir = self.record_path
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Determine number of digits for zero-padding
+                num_digits = len(str(num_frames))
+
+                # Save each frame as a separate TIFF file
+                for idx, frame in enumerate(self.recorded_frames):
                     # Convert to uint16 if needed (TIFF supports uint16)
                     if frame.dtype != np.uint16:
                         # Normalize and scale to uint16 range
@@ -1638,25 +1645,28 @@ class PvViewerApp(QtWidgets.QMainWindow):
                             frame_u16 = np.zeros_like(frame, dtype=np.uint16)
                     else:
                         frame_u16 = frame
-                    
-                    pil_images.append(Image.fromarray(frame_u16))
-                
-                # Save as multi-page TIFF
-                pil_images[0].save(
-                    self.record_path,
-                    save_all=True,
-                    append_images=pil_images[1:],
-                    compression="tiff_deflate"
-                )
-                
+
+                    # Create filename with zero-padded index
+                    filename = f"frame_{idx:0{num_digits}d}.tiff"
+                    filepath = os.path.join(output_dir, filename)
+
+                    # Save individual TIFF
+                    pil_image = Image.fromarray(frame_u16)
+                    pil_image.save(filepath, compression="tiff_deflate")
+
+                    # Update progress
+                    if (idx + 1) % 10 == 0 or idx == num_frames - 1:
+                        self.lbl_record_status.setText(f"Saving {idx + 1}/{num_frames}...")
+                        QtWidgets.QApplication.processEvents()
+
                 self.lbl_record_status.setText(f"✓ Saved {num_frames} frames")
                 if LOGGER:
-                    LOGGER.info("Saved %d frames to %s", num_frames, self.record_path)
-                
+                    LOGGER.info("Saved %d frames to %s", num_frames, output_dir)
+
                 QtWidgets.QMessageBox.information(
-                    self, "Recording Saved", 
+                    self, "Recording Saved",
                     f"Successfully saved {num_frames} frames\n"
-                    f"as multi-page TIFF stack to:\n\n{self.record_path}"
+                    f"as individual TIFF files to:\n\n{output_dir}"
                 )
             except Exception as e:
                 self.lbl_record_status.setText("✗ Save failed!")
