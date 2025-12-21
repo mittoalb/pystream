@@ -70,10 +70,11 @@ except Exception:
 class TiffWriterThread(threading.Thread):
     """Background thread that writes TIFF frames from a queue to disk."""
 
-    def __init__(self, output_dir: str, frame_queue: queue.Queue):
+    def __init__(self, output_dir: str, frame_queue: queue.Queue, prefix: str = "frame"):
         super().__init__(daemon=True)
         self.output_dir = output_dir
         self.frame_queue = frame_queue
+        self.prefix = prefix
         self.running = True
         self.frames_written = 0
 
@@ -104,7 +105,7 @@ class TiffWriterThread(threading.Thread):
                     frame_u16 = frame_data
 
                 # Save to disk
-                filename = f"frame_{frame_idx:06d}.tiff"
+                filename = f"{self.prefix}_{frame_idx:06d}.tiff"
                 filepath = os.path.join(self.output_dir, filename)
 
                 pil_image = Image.fromarray(frame_u16)
@@ -1679,6 +1680,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.btn_record.setChecked(False)
                 return
 
+            # Ask for file prefix
+            prefix, ok = QtWidgets.QInputDialog.getText(
+                self, "File Prefix",
+                "Enter prefix for saved files:",
+                QtWidgets.QLineEdit.Normal,
+                "frame"
+            )
+            if not ok or not prefix:
+                prefix = "frame"
+
             # Auto-add timestamp subdirectory to avoid overwriting
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             self.record_dir = os.path.join(path, f"recording_{timestamp}")
@@ -1696,7 +1707,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
             # Start background writer thread with queue
             self.recording_queue = queue.Queue(maxsize=100)  # Buffer up to 100 frames in RAM
-            self.recording_thread = TiffWriterThread(self.record_dir, self.recording_queue)
+            self.recording_thread = TiffWriterThread(self.record_dir, self.recording_queue, prefix)
             self.recording_thread.start()
 
             self.recording = True
@@ -1771,12 +1782,26 @@ class PvViewerApp(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Save Frame", "No image to save yet.")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Frame", "", "NumPy Array (*.npy);;PNG Image (*.png);;All Files (*)"
+            self, "Save Frame", "", "TIFF Image (*.tiff *.tif);;NumPy Array (*.npy);;PNG Image (*.png);;All Files (*)"
         )
         if not path:
             return
         try:
-            if path.lower().endswith(".png"):
+            if path.lower().endswith((".tiff", ".tif")):
+                from PIL import Image
+                # Save as uint16 TIFF
+                img = self._last_display_img
+                if img.dtype != np.uint16:
+                    img_min = img.min()
+                    img_max = img.max()
+                    if img_max > img_min:
+                        normalized = (img - img_min) / (img_max - img_min)
+                        img = (normalized * 65535).astype(np.uint16)
+                    else:
+                        img = np.zeros_like(img, dtype=np.uint16)
+                pil_image = Image.fromarray(img)
+                pil_image.save(path, compression="tiff_deflate")
+            elif path.lower().endswith(".png"):
                 from PIL import Image
                 img = self._last_display_img.astype(np.float32)
                 if self.vmin is not None and self.vmax is not None:
