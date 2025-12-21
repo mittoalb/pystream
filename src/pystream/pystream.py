@@ -1339,10 +1339,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Recording - add frame to queue for background writer
         if self.recording and self.recording_queue is not None:
             try:
-                # Add frame copy to queue (non-blocking with timeout)
+                # Add frame copy to queue (non-blocking)
                 # Make a copy to avoid reference issues
-                frame_copy = np.copy(img)
-                self.recording_queue.put((self.recorded_frame_count, frame_copy), timeout=0.1)
+                # Use astype to ensure contiguous copy
+                frame_copy = img.astype(img.dtype, order='C', copy=True)
+                self.recording_queue.put_nowait((self.recorded_frame_count, frame_copy))
 
                 self.recorded_frame_count += 1
                 queued = self.recording_queue.qsize()
@@ -1350,7 +1351,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                     f"🔴 REC\nFrames: {self.recorded_frame_count}\nQueued: {queued}"
                 )
             except queue.Full:
-                # Queue is full - skip this frame or stop recording
+                # Queue is full - skip this frame
                 if LOGGER:
                     LOGGER.warning("Recording queue full - frame dropped")
                 self.lbl_record_status.setText(
@@ -1731,35 +1732,53 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 )
                 return
 
-            # Wait for background writer to finish
+            # Wait for background writer to finish (non-blocking)
             if self.recording_thread and self.recording_thread.is_alive():
                 queued_frames = self.recording_queue.qsize()
                 self.lbl_record_status.setText(f"Flushing {queued_frames} frames...")
-                QtWidgets.QApplication.processEvents()
 
-                # Signal thread to stop and wait for queue to empty
-                self.recording_queue.put(None)  # Poison pill
-                self.recording_thread.join(timeout=30)  # Wait up to 30 seconds
+                # Signal thread to stop
+                try:
+                    self.recording_queue.put_nowait(None)  # Poison pill
+                except queue.Full:
+                    pass
 
-                if self.recording_thread.is_alive():
-                    if LOGGER:
-                        LOGGER.warning("Recording thread did not finish in time")
-
-            # Show final status
-            frames_written = self.recording_thread.frames_written if self.recording_thread else self.recorded_frame_count
-            self.lbl_record_status.setText(f"✓ Saved {frames_written} frames")
-            if LOGGER:
-                LOGGER.info("Recording stopped: %d frames saved to %s", frames_written, self.record_dir)
-
-            QtWidgets.QMessageBox.information(
-                self, "Recording Stopped",
-                f"Successfully saved {frames_written} frames\n"
-                f"as individual TIFF files to:\n\n{self.record_dir}"
-            )
-
-            self.recording_thread = None
-            self.recording_queue = None
+                # Use a timer to check when thread finishes (non-blocking)
+                self._finish_recording_async()
+            else:
+                # Thread already done
+                self._show_recording_complete()
     
+    def _finish_recording_async(self):
+        """Check if recording thread finished (non-blocking with timer)."""
+        if self.recording_thread and self.recording_thread.is_alive():
+            # Still running, check again in 500ms
+            queued = self.recording_queue.qsize() if self.recording_queue else 0
+            written = self.recording_thread.frames_written if self.recording_thread else 0
+            self.lbl_record_status.setText(f"Flushing...\nWritten: {written}\nQueued: {queued}")
+            QtCore.QTimer.singleShot(500, self._finish_recording_async)
+        else:
+            # Thread finished
+            self._show_recording_complete()
+
+    def _show_recording_complete(self):
+        """Show recording completion message."""
+        frames_written = self.recording_thread.frames_written if self.recording_thread else self.recorded_frame_count
+        record_dir = self.record_dir
+
+        self.lbl_record_status.setText(f"✓ Saved {frames_written} frames")
+        if LOGGER:
+            LOGGER.info("Recording stopped: %d frames saved to %s", frames_written, record_dir)
+
+        QtWidgets.QMessageBox.information(
+            self, "Recording Stopped",
+            f"Successfully saved {frames_written} frames\n"
+            f"as individual TIFF files to:\n\n{record_dir}"
+        )
+
+        self.recording_thread = None
+        self.recording_queue = None
+
     # ------------- Other commands -------------
     def _toggle_pause(self):
         self.paused = not self.paused
