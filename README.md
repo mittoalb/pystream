@@ -1,45 +1,34 @@
-# pystream - High-performance viewer for EPICS PVAccess NTNDArray data
+# PyStream
 
-Real-time image streaming and analysis from EPICS area detectors with PyQtGraph rendering.
+Real-time image viewer for EPICS PVAccess NTNDArray data with beamline-specific tools.
 
-## Key Features
+## Features
 
-- **Real-time Streaming**: Live image visualization from EPICS PVs
-- **Distance Measurement**: Calibrated measurements in pixels, micrometers, and millimeters
-- **Beamline Tools**: Auto-discovering plugins for facility-specific workflows
-- **Image Analysis**: Metrics, ROI analysis, intensity profiles, and quality assessment
-- **Motor Control**: Automated mosaic scanning with real-time stitching
+- **Real-time Streaming**: Live EPICS area detector visualization
+- **Beamline Plugins**: Configurable facility-specific tools
+- **Image Analysis**: Metrics, ROI, profiles, and measurements
 - **Plugin Architecture**: Extensible processing pipeline
 
-## Documentation
+## Installation
 
-**Full documentation available at:** https://pystream.readthedocs.io/en/latest/index.html
+```bash
+# Basic installation
+pip install pystream
+
+# With beamline tools (e.g., bl32ID)
+pip install pystream[bl32ID]
+```
 
 ## Quick Start
 
 ```bash
-pip install pystream
 pystream --pv YOUR:NTNDARRAY:PV
 ```
 
-## Recent Updates
+## Documentation
 
-### Enhanced Line Profile Tool
-- Distance measurements in multiple units (px, µm, mm)
-- ΔX and ΔY component measurements
-- Calibrated physical distances with configurable pixel size
+**📚 Full documentation:** https://pystream.readthedocs.io
 
-### Beamlines Plugin System
-- Automatic discovery of beamline-specific tools
-- Horizontal toolbar for easy access
-- Modular architecture for facility customization
+## License
 
-### UI Improvements
-- Reset View, Beamlines, and HDF5 Viewer in top toolbar
-- Improved layout for frequently-used controls
-- Cleaner, more intuitive interface
-
-### Bug Fixes
-- Fixed mosalign starting position parameters
-- Resolved NTNDArray empty value handling
-- Corrected static method signatures
+MIT License - Copyright (c) 2025 Alberto Mittone

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Line Profile Plugin for PyQtGraph Viewer
+Line Profile Plugin for PyQtGraph Viewer - ImageJ-style
 """
 
 import logging
@@ -13,8 +13,11 @@ from PyQt5 import QtWidgets, QtCore
 
 class LineProfileManager:
     """
-    Line drawing tool with Shift-constrain for vertical/horizontal lines (ImageJ-style).
-    Includes a center handle for dragging the entire line.
+    Simple line drawing tool similar to ImageJ.
+    - Click and drag to draw a line
+    - Large, visible handles for precise positioning
+    - Hold Shift for horizontal/vertical constraint
+    - Drag anywhere on the line to move it
     """
 
     def __init__(
@@ -23,8 +26,8 @@ class LineProfileManager:
         stats_label: QtWidgets.QLabel,
         logger: Optional[logging.Logger] = None,
         *,
-        handle_size: int = 20,
-        line_pen_width: int = 3,
+        handle_size: int = 12,
+        line_pen_width: int = 2,
         pixel_size_um: float = 1.0,
     ):
         self.image_view = image_view
@@ -40,9 +43,7 @@ class LineProfileManager:
         self._last_image: Optional[np.ndarray] = None
 
         self._shift_pressed = False
-
-        self._prev_p0 = None
-        self._prev_p1 = None
+        self._dragging_handle = None  # Track which handle is being dragged
 
     def set_pixel_size(self, pixel_size_um: float):
         self.pixel_size_um = pixel_size_um
@@ -64,7 +65,7 @@ class LineProfileManager:
             self._update_stats()
             self.stats_label.setText(
                 "Line enabled\n"
-                "(drag endpoints or center; hold Shift for H/V snap)"
+                "(Hold Shift for H/V constraint)"
             )
         else:
             if self.line is not None:
@@ -253,8 +254,10 @@ class LineProfileManager:
 
     def _build_line(self, x1, y1, x2, y2):
         img_item = self.image_view.getImageItem()
-        pen = pg.mkPen("y", width=self.line_pen_width)
-        hover_pen = pg.mkPen((255, 255, 0, 220), width=self.line_pen_width + 2)
+
+        # Bright yellow line for visibility
+        pen = pg.mkPen((255, 255, 0), width=self.line_pen_width)
+        hover_pen = pg.mkPen((255, 255, 100), width=self.line_pen_width + 1)
 
         positions = [[x1, y1], [x2, y2]]
         self.line = pg.LineSegmentROI(
@@ -267,13 +270,15 @@ class LineProfileManager:
         else:
             self.image_view.getView().addItem(self.line)
 
-        self._add_center_handle()
+        # Style handles for high visibility
         self._style_handles()
 
+        # Connect signals for shift-constraint
         self.line.sigRegionChangeStarted.connect(self._on_drag_start)
         self.line.sigRegionChanged.connect(self._on_region_changed)
         self.line.sigRegionChangeFinished.connect(self._on_drag_finish)
 
+        # Install shift key handler
         self._install_key_handler()
 
         self.line.setVisible(True)
@@ -282,48 +287,35 @@ class LineProfileManager:
         if self.logger:
             self.logger.info("Line created at (%d, %d) - (%d, %d)", x1, y1, x2, y2)
 
-    def _add_center_handle(self):
+    def _style_handles(self):
+        """Style handles for high visibility - large, bright, easy to grab."""
         if self.line is None:
             return
 
-        handles = self.line.getHandles()
-        if len(handles) >= 2:
-            p1 = self._handle_pos(handles[0])
-            p2 = self._handle_pos(handles[1])
-            center_x = (p1.x() + p2.x()) / 2.0
-            center_y = (p1.y() + p2.y()) / 2.0
-            self.line.addTranslateHandle([center_x, center_y])
+        # Large, bright handles - easy to see and grab
+        handle_brush = pg.mkBrush((255, 0, 0, 200))  # Bright red, slightly transparent
+        handle_pen = pg.mkPen((255, 255, 255), width=2)  # White outline
 
-    def _style_handles(self):
-        if not hasattr(self, 'line_roi') or self.line_roi is None:
-            return
-        
-        handle_brush = pg.mkBrush(255, 0, 0, 255)
-        handle_pen = pg.mkPen('w', width=3)
-        size = float(self.handle_size * 2)
-        
-        for h in self.line_roi.getHandles():
+        for h in self.line.getHandles():
             item = self._handle_item(h)
             if item is None:
                 continue
-                
+
             try:
-                if hasattr(item, 'setSize'):
-                    item.setSize(size)
-                elif hasattr(item, 'setScale'):
-                    item.setScale(size / 10.0)
-                
-                if hasattr(item, 'setBrush'):
-                    item.setBrush(handle_brush)
-                if hasattr(item, 'setPen'):
-                    item.setPen(handle_pen)
-                
-                item.setZValue(self.line_roi.zValue() + 1)
+                # Make handles large and visible
+                item.setSize(self.handle_size)
+                item.setBrush(handle_brush)
+                item.setPen(handle_pen)
+
+                # Ensure handles are on top
+                item.setZValue(self.line.zValue() + 10)
+
             except Exception as e:
                 if self.logger:
                     self.logger.debug("Handle styling issue: %s", e)
 
     def _install_key_handler(self):
+        """Install event filter to detect Shift key."""
         key_filter = ShiftKeyFilter(self)
 
         app = QtWidgets.QApplication.instance()
@@ -333,28 +325,29 @@ class LineProfileManager:
         view = self.image_view.getView()
         if view:
             view.installEventFilter(key_filter)
-            if view.scene():
-                view.scene().installEventFilter(key_filter)
-
-        self.image_view.installEventFilter(key_filter)
-
-        if self.line:
-            self.line.installEventFilter(key_filter)
 
     def _on_drag_start(self):
+        """Called when user starts dragging a handle."""
+        self._dragging_handle = None
+
+        if not self._shift_pressed:
+            return
+
+        # Determine which handle is being dragged
         handles = self.line.getHandles() if self.line is not None else []
-        if len(handles) >= 2:
-            self._prev_p0 = self._handle_pos(handles[0])
-            self._prev_p1 = self._handle_pos(handles[1])
-        else:
-            self._prev_p0 = None
-            self._prev_p1 = None
+        if len(handles) < 2:
+            return
+
+        # Store initial positions
+        self._initial_pos_0 = QtCore.QPointF(self._handle_pos(handles[0]))
+        self._initial_pos_1 = QtCore.QPointF(self._handle_pos(handles[1]))
 
     def _on_drag_finish(self):
-        self._prev_p0 = None
-        self._prev_p1 = None
+        """Called when user finishes dragging."""
+        self._dragging_handle = None
 
     def _on_region_changed(self):
+        """Called when line is moved or resized - apply Shift constraint if needed."""
         if not self.enabled or self.line is None:
             return
 
@@ -362,54 +355,50 @@ class LineProfileManager:
         if len(handles) < 2:
             return
 
-        p0 = self._handle_pos(handles[0])
-        p1 = self._handle_pos(handles[1])
+        # Apply shift constraint for horizontal/vertical lines
+        if self._shift_pressed and hasattr(self, '_initial_pos_0'):
+            p0 = self._handle_pos(handles[0])
+            p1 = self._handle_pos(handles[1])
 
-        if self._prev_p0 is None or self._prev_p1 is None:
-            self._prev_p0 = QtCore.QPointF(p0)
-            self._prev_p1 = QtCore.QPointF(p1)
-            self._update_stats()
-            return
+            # Detect which handle moved more
+            dist0 = (p0 - self._initial_pos_0).manhattanLength()
+            dist1 = (p1 - self._initial_pos_1).manhattanLength()
 
-        if self._shift_pressed:
-            d0 = (p0.x() - self._prev_p0.x()) ** 2 + (p0.y() - self._prev_p0.y()) ** 2
-            d1 = (p1.x() - self._prev_p1.x()) ** 2 + (p1.y() - self._prev_p1.y()) ** 2
-
-            if d0 >= d1:
+            if dist0 > dist1:
+                # Handle 0 is moving, handle 1 is anchor
                 moving_idx, anchor_idx = 0, 1
-                moving_local, anchor_local = p0, p1
+                moving_pos = p0
+                anchor_pos = p1
             else:
+                # Handle 1 is moving, handle 0 is anchor
                 moving_idx, anchor_idx = 1, 0
-                moving_local, anchor_local = p1, p0
+                moving_pos = p1
+                anchor_pos = p0
 
-            ax, ay = anchor_local.x(), anchor_local.y()
-            mx, my = moving_local.x(), moving_local.y()
+            # Calculate constrained position
+            dx = moving_pos.x() - anchor_pos.x()
+            dy = moving_pos.y() - anchor_pos.y()
 
-            dx = mx - ax
-            dy = my - ay
+            # Snap to horizontal or vertical
+            if abs(dx) > abs(dy):
+                # Horizontal line
+                constrained_x = moving_pos.x()
+                constrained_y = anchor_pos.y()
+            else:
+                # Vertical line
+                constrained_x = anchor_pos.x()
+                constrained_y = moving_pos.y()
 
-            if dx != 0 or dy != 0:
-                if abs(dx) >= abs(dy):
-                    new_mx, new_my = ax + dx, ay
-                else:
-                    new_mx, new_my = ax, ay + dy
-
-                self.line.blockSignals(True)
-                moving_item = self._handle_item(handles[moving_idx])
-                moving_item.setPos(new_mx, new_my)
-                self.line.blockSignals(False)
-
-                if moving_idx == 0:
-                    p0 = QtCore.QPointF(new_mx, new_my)
-                else:
-                    p1 = QtCore.QPointF(new_mx, new_my)
-
-        self._prev_p0 = QtCore.QPointF(p0)
-        self._prev_p1 = QtCore.QPointF(p1)
+            # Apply constraint
+            self.line.blockSignals(True)
+            moving_item = self._handle_item(handles[moving_idx])
+            moving_item.setPos(constrained_x, constrained_y)
+            self.line.blockSignals(False)
 
         self._update_stats()
 
     def _update_stats(self):
+        """Update statistics display with line measurements."""
         if not self.enabled or self.line is None or self._last_image is None:
             return
 
@@ -475,6 +464,8 @@ class LineProfileManager:
 
 
 class ShiftKeyFilter(QtCore.QObject):
+    """Event filter to detect Shift key press/release."""
+
     def __init__(self, line_manager: LineProfileManager):
         super().__init__()
         self.line_manager = line_manager

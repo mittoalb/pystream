@@ -96,10 +96,28 @@ The side panel provides image controls and plugin settings for tools like crossh
 3. X, Y position and pixel value displayed in the left panel
 
 ### Recording
-1. Choose output directory
-2. Set filename prefix (default: `frame`)
-3. Click **Start Recording** → frames saved as `prefix_000001.tiff`, `prefix_000002.tiff`, …
-4. Click **Stop Recording** to end
+
+PyStream includes a high-performance recording system with RAM buffering for capturing image streams at high frame rates:
+
+1. **Choose output directory**: Click **Browse** to select where recordings will be saved
+2. **Set filename prefix**: Enter a prefix in the **Prefix** field (default: `frame`)
+3. **Start recording**: Click **⏺ Record** button
+   - Frames are buffered in RAM (up to 100 frames) and written to disk in a background thread
+   - Recording saves to timestamped subdirectories: `recording_YYYYMMDD_HHMMSS/`
+   - Files are named: `prefix_000001.tiff`, `prefix_000002.tiff`, etc.
+   - Status shows live frame count and buffer queue size
+4. **Stop recording**: Click **⏺ Record** again to stop
+   - Displays progress while flushing remaining buffered frames to disk
+   - Shows completion summary with total frames and output directory
+
+**Recording Features:**
+- **Non-blocking I/O**: Background thread prevents GUI freezes during high-speed capture
+- **TIFF format**: Saves as 16-bit TIFF with deflate compression
+- **RAM buffering**: 100-frame queue for smooth capture at high frame rates
+- **Live monitoring**: Real-time display of frames captured and queue depth
+- **Async flush**: Non-blocking completion with progress feedback
+
+**Performance:** Successfully tested at 50 FPS with 2048×2048 images
 
 ### Flat-Field Correction
 - **Capture**: save current frame as flat reference
@@ -111,7 +129,7 @@ The side panel provides image controls and plugin settings for tools like crossh
 - Flip H/V, Transpose
 - Manual or auto contrast
 - Pause / Resume streaming
-- Save single frame (`.npy`, `.png`)
+- Save single frame (`.tiff` default, also `.npy`, `.png`)
 
 ### Processing Plugins
 - **Python Console**: Write custom real-time processing functions with save/load capability

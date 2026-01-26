@@ -29,8 +29,23 @@ import pvaccess as pva
 
 from PyQt5 import QtWidgets, QtCore
 
+# Disable matplotlib in pyqtgraph to avoid C++ library conflicts
+os.environ['PYQTGRAPH_QT_LIB'] = 'PyQt5'
+
 import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder='row-major')
+
+# Monkey-patch to prevent pyqtgraph from loading matplotlib colormaps
+try:
+    import pyqtgraph.colormap
+    _original_listMaps = pyqtgraph.colormap.listMaps
+    def _listMaps_no_mpl(source=None):
+        if source == "matplotlib":
+            return []
+        return _original_listMaps(source)
+    pyqtgraph.colormap.listMaps = _listMaps_no_mpl
+except (ImportError, AttributeError):
+    pass
 
 from .logger import setup_custom_logger, log_exception
 
@@ -49,6 +64,67 @@ try:
     _HAS_ADU = True
 except Exception:
     _HAS_ADU = False
+
+
+# Background TIFF writer thread for recording
+class TiffWriterThread(threading.Thread):
+    """Background thread that writes TIFF frames from a queue to disk."""
+
+    def __init__(self, output_dir: str, frame_queue: queue.Queue, prefix: str = "frame"):
+        super().__init__(daemon=True)
+        self.output_dir = output_dir
+        self.frame_queue = frame_queue
+        self.prefix = prefix
+        self.running = True
+        self.frames_written = 0
+
+    def run(self):
+        """Process frames from queue and write to disk."""
+        from PIL import Image
+
+        while self.running or not self.frame_queue.empty():
+            try:
+                # Get frame from queue with timeout
+                item = self.frame_queue.get(timeout=0.5)
+
+                if item is None:  # Poison pill to stop thread
+                    break
+
+                frame_idx, frame_data = item
+
+                # Convert to uint16 for TIFF
+                if frame_data.dtype != np.uint16:
+                    img_min = frame_data.min()
+                    img_max = frame_data.max()
+                    if img_max > img_min:
+                        normalized = (frame_data - img_min) / (img_max - img_min)
+                        frame_u16 = (normalized * 65535).astype(np.uint16)
+                    else:
+                        frame_u16 = np.zeros_like(frame_data, dtype=np.uint16)
+                else:
+                    frame_u16 = frame_data
+
+                # Save to disk
+                filename = f"{self.prefix}_{frame_idx:06d}.tiff"
+                filepath = os.path.join(self.output_dir, filename)
+
+                pil_image = Image.fromarray(frame_u16)
+                pil_image.save(filepath, compression="tiff_deflate")
+
+                self.frames_written += 1
+                self.frame_queue.task_done()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.error(f"Error writing frame: {e}")
+                    log_exception(LOGGER, e)
+                break
+
+    def stop(self):
+        """Signal thread to stop."""
+        self.running = False
 
 
 # ----------------------- Config I/O -----------------------
@@ -318,6 +394,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.recorded_frame_count = 0
         self.record_path = ""
         self.record_dir = ""
+        self.recording_queue = None
+        self.recording_thread = None
 
         self.motor_scan_dialog = None
         self.roi_manager = None
@@ -445,12 +523,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view = pg.ImageView()
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
-        self.image_view.view.setMouseMode(pg.ViewBox.RectMode)
-        
-        # Enable mouse wheel zoom
+        self.image_view.view.setMouseMode(pg.ViewBox.PanMode)
+
+        # Enable mouse wheel zoom and panning
         self.image_view.view.setMouseEnabled(x=True, y=True)
-        
-        # Disable panning but keep zoom
+
+        # No limits - allow free panning
         self.image_view.view.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
         
         # Add crosshair lines
@@ -486,7 +564,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Toggle sidebar button
         btn_toggle_sidebar = QtWidgets.QPushButton("☰ Menu")
-        btn_toggle_sidebar.setMaximumWidth(80)
+        btn_toggle_sidebar.setMaximumWidth(100)
         btn_toggle_sidebar.setToolTip("Toggle control panel")
         btn_toggle_sidebar.clicked.connect(self._toggle_control_panel)
         top_layout.addWidget(btn_toggle_sidebar)
@@ -500,7 +578,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.pv_entry)
         
         btn_connect = QtWidgets.QPushButton("Connect")
-        btn_connect.setMaximumWidth(80)
+        btn_connect.setMaximumWidth(100)
         btn_connect.clicked.connect(self._connect_pv)
         top_layout.addWidget(btn_connect)
         
@@ -525,21 +603,21 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.chk_autoscale)
 
         btn_reset_view = QtWidgets.QPushButton("Reset View")
-        btn_reset_view.setMaximumWidth(90)
+        btn_reset_view.setMaximumWidth(120)
         btn_reset_view.setToolTip("Reset zoom and pan to fit image")
         btn_reset_view.clicked.connect(self._reset_view)
         top_layout.addWidget(btn_reset_view)
 
         btn_beamlines = QtWidgets.QPushButton("⚡ Beamlines")
         btn_beamlines.setCheckable(True)
-        btn_beamlines.setMaximumWidth(100)
+        btn_beamlines.setMaximumWidth(140)
         btn_beamlines.setToolTip("Show/hide beamline tools")
         btn_beamlines.clicked.connect(self._toggle_beamlines_bar)
         top_layout.addWidget(btn_beamlines)
         self.btn_beamlines = btn_beamlines
 
         btn_viewer = QtWidgets.QPushButton("HDF5 Viewer")
-        btn_viewer.setMaximumWidth(100)
+        btn_viewer.setMaximumWidth(150)
         btn_viewer.setToolTip("Open HDF5 image divider/viewer")
         btn_viewer.clicked.connect(self._open_viewer)
         top_layout.addWidget(btn_viewer)
@@ -558,9 +636,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         return top_bar
 
     def _create_beamlines_bar(self):
-        """Create horizontal beamlines toolbar that auto-discovers plugins"""
+        """Create horizontal beamlines toolbar that auto-discovers plugins from configured beamline"""
         import importlib
-        import pkgutil
         from pathlib import Path
 
         bar = QtWidgets.QWidget()
@@ -570,45 +647,84 @@ class PvViewerApp(QtWidgets.QMainWindow):
         bar_layout.setContentsMargins(5, 5, 5, 5)
 
         try:
-            beamlines_path = Path(__file__).parent / "beamlines"
-            if not beamlines_path.exists():
-                bar_layout.addWidget(QtWidgets.QLabel("No beamlines found"))
+            # Load beamline configuration
+            try:
+                from . import beamline_config
+                active_beamline = beamline_config.ACTIVE_BEAMLINE
+                enabled_plugins = beamline_config.ENABLED_PLUGINS
+            except ImportError:
+                # Fallback to default if config file doesn't exist
+                active_beamline = 'bl32ID'
+                enabled_plugins = None
+                if LOGGER:
+                    LOGGER.warning("beamline_config.py not found, using default beamline: bl32ID")
+
+            # If no beamline is configured, show message and return empty bar
+            if active_beamline is None or active_beamline == 'None':
+                bar_layout.addWidget(QtWidgets.QLabel("No beamline configured (edit beamline_config.py)"))
+                bar_layout.addStretch()
                 return bar
 
-            for beamline_dir in sorted(beamlines_path.iterdir()):
-                if not beamline_dir.is_dir() or beamline_dir.name.startswith('_'):
-                    continue
+            beamlines_path = Path(__file__).parent / "beamlines" / active_beamline
+            if not beamlines_path.exists():
+                bar_layout.addWidget(QtWidgets.QLabel(f"Beamline '{active_beamline}' not found"))
+                bar_layout.addStretch()
+                return bar
 
-                beamline_name = beamline_dir.name
-                group_label = QtWidgets.QLabel(f"<b>{beamline_name}:</b>")
-                bar_layout.addWidget(group_label)
+            # Load the beamline module
+            try:
+                beamline_module = importlib.import_module(f".beamlines.{active_beamline}", package=__package__)
+            except ImportError as e:
+                if LOGGER:
+                    LOGGER.error(f"Failed to load beamline module {active_beamline}: {e}")
+                bar_layout.addWidget(QtWidgets.QLabel(f"Error loading {active_beamline}"))
+                bar_layout.addStretch()
+                return bar
 
-                for plugin_file in sorted(beamline_dir.glob("*.py")):
-                    if plugin_file.name.startswith('_'):
-                        continue
+            # Get all exported dialog classes
+            if hasattr(beamline_module, '__all__'):
+                dialog_classes = beamline_module.__all__
+            else:
+                # Fallback: find all *Dialog classes
+                dialog_classes = [name for name in dir(beamline_module) if name.endswith('Dialog')]
 
-                    plugin_name = plugin_file.stem
-                    module_path = f".beamlines.{beamline_name}.{plugin_name}"
+            # Filter by enabled plugins if specified
+            if enabled_plugins is not None:
+                dialog_classes = [cls for cls in dialog_classes if cls in enabled_plugins]
 
-                    try:
-                        module = importlib.import_module(module_path, package=__package__)
+            # If no plugins available, show message
+            if not dialog_classes:
+                bar_layout.addWidget(QtWidgets.QLabel(f"No plugins in {active_beamline}"))
+                bar_layout.addStretch()
+                return bar
 
-                        btn = QtWidgets.QPushButton(plugin_name.capitalize())
-                        btn.setMaximumWidth(120)
+            # Add beamline label
+            group_label = QtWidgets.QLabel(f"<b>{active_beamline}:</b>")
+            bar_layout.addWidget(group_label)
 
-                        if hasattr(module, 'MotorScanDialog'):
-                            btn.clicked.connect(self._open_motor_scan)
-                        else:
-                            btn.setEnabled(False)
-                            btn.setToolTip(f"Plugin '{plugin_name}' not implemented")
+            # Create button for each dialog class
+            for dialog_class_name in dialog_classes:
+                try:
+                    dialog_class = getattr(beamline_module, dialog_class_name)
 
-                        bar_layout.addWidget(btn)
+                    # Get button text from class attribute or use class name
+                    if hasattr(dialog_class, 'BUTTON_TEXT'):
+                        btn_text = dialog_class.BUTTON_TEXT
+                    else:
+                        # Convert ClassName to Class Name
+                        btn_text = dialog_class_name.replace('Dialog', '').replace('_', ' ').title()
 
-                    except Exception as e:
-                        if LOGGER:
-                            LOGGER.warning(f"Failed to load beamline plugin {module_path}: {e}")
+                    btn = QtWidgets.QPushButton(btn_text)
+                    btn.setMaximumWidth(120)
 
-                bar_layout.addWidget(QtWidgets.QLabel("|"))
+                    # Connect to appropriate handler based on class name
+                    self._connect_beamline_button(btn, dialog_class_name, beamline_module)
+
+                    bar_layout.addWidget(btn)
+
+                except Exception as e:
+                    if LOGGER:
+                        LOGGER.warning(f"Failed to create button for {dialog_class_name}: {e}")
 
         except Exception as e:
             if LOGGER:
@@ -617,6 +733,53 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
         bar_layout.addStretch()
         return bar
+
+    def _connect_beamline_button(self, btn, dialog_class_name, module):
+        """
+        Connect a beamline button to its appropriate handler.
+
+        Uses plugin-defined behavior if available, otherwise falls back to generic handling.
+        """
+        dialog_class = getattr(module, dialog_class_name)
+
+        # Check if plugin defines its own handler type
+        if hasattr(dialog_class, 'HANDLER_TYPE'):
+            handler_type = dialog_class.HANDLER_TYPE
+        else:
+            # Auto-detect handler type based on class attributes
+            handler_type = 'singleton'  # Default to singleton
+
+        # Create appropriate handler based on type
+        if handler_type == 'launcher':
+            # Launcher plugins: execute immediately and close
+            def handler():
+                dialog_class(parent=self, logger=LOGGER)
+            btn.clicked.connect(handler)
+
+        elif handler_type == 'singleton':
+            # Singleton plugins: keep one instance, show/hide it
+            def handler():
+                attr_name = f'{dialog_class_name.lower()}_instance'
+                if not hasattr(self, attr_name) or getattr(self, attr_name) is None:
+                    setattr(self, attr_name, dialog_class(parent=self, logger=LOGGER))
+                dialog = getattr(self, attr_name)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+            btn.clicked.connect(handler)
+
+        elif handler_type == 'multi-instance':
+            # Multi-instance plugins: create new instance each time
+            def handler():
+                dialog = dialog_class(parent=self, logger=LOGGER)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+            btn.clicked.connect(handler)
+
+        else:
+            btn.setEnabled(False)
+            btn.setToolTip(f"Unknown handler type '{handler_type}' for '{dialog_class_name}'")
 
     def _toggle_beamlines_bar(self):
         """Toggle visibility of beamlines toolbar"""
@@ -877,15 +1040,28 @@ class PvViewerApp(QtWidgets.QMainWindow):
         path_layout = QtWidgets.QHBoxLayout()
         path_layout.setSpacing(4)
         self.record_path_entry = QtWidgets.QLineEdit()
-        self.record_path_entry.setPlaceholderText("recording.tiff")
-        self.record_path_entry.setToolTip("Path where multi-frame TIFF stack will be saved")
+        self.record_path_entry.setPlaceholderText("/path/to/output/directory")
+        self.record_path_entry.setToolTip("Directory where individual TIFF files will be saved")
         path_layout.addWidget(self.record_path_entry)
         btn_browse = QtWidgets.QPushButton("Browse...")
         btn_browse.clicked.connect(self._browse_record_path)
         btn_browse.setMaximumWidth(80)
         path_layout.addWidget(btn_browse)
         record_layout.addLayout(path_layout)
-        
+
+        # File prefix entry
+        prefix_layout = QtWidgets.QHBoxLayout()
+        prefix_layout.setSpacing(4)
+        prefix_label = QtWidgets.QLabel("Prefix:")
+        prefix_label.setMaximumWidth(50)
+        prefix_layout.addWidget(prefix_label)
+        self.record_prefix_entry = QtWidgets.QLineEdit()
+        self.record_prefix_entry.setText("frame")
+        self.record_prefix_entry.setPlaceholderText("frame")
+        self.record_prefix_entry.setToolTip("File prefix (files saved as prefix_000001.tiff, prefix_000002.tiff, ...)")
+        prefix_layout.addWidget(self.record_prefix_entry)
+        record_layout.addLayout(prefix_layout)
+
         # Status label with instructions
         self.lbl_record_status = QtWidgets.QLabel(
             "Not recording\n\n"
@@ -1100,6 +1276,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
     
     @QtCore.pyqtSlot(int, np.ndarray, float)
     def _update_image_slot(self, uid: int, img: np.ndarray, ts: float):
+        # Store original shape before any transformations
+        original_shape = img.shape
+
         img = self._apply_view_ops(img)
         self._last_display_img = img
         self.current_uid = uid
@@ -1160,23 +1339,47 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         self.lbl_uid.setText(f"UID: {uid}")
         self.lbl_fps.setText(f"FPS: {self.fps_ema:4.1f}")
-        
-        # Update image info
+
+        # Update image info - show original shape before binning
         self.lbl_info.setText(
-            f"Shape: {img.shape}\n"
+            f"Shape: {original_shape}\n"
             f"Dtype: {img.dtype}\n"
             f"Min: {img.min():.2f}\n"
             f"Max: {img.max():.2f}\n"
             f"Mean: {img.mean():.2f}"
         )
         
-        # Recording - capture frame
-        if self.recording:
-            self.recorded_frames.append(np.copy(img))
-            num_frames = len(self.recorded_frames)
-            self.lbl_record_status.setText(
-                f"🔴 REC\nFrames: {num_frames}"
-            )
+        # Recording - add frame to queue for background writer
+        if self.recording and self.recording_queue is not None:
+            try:
+                # Add frame copy to queue (non-blocking)
+                # Make a copy to avoid reference issues
+                # Use astype to ensure contiguous copy
+                frame_copy = img.astype(img.dtype, order='C', copy=True)
+                self.recording_queue.put_nowait((self.recorded_frame_count, frame_copy))
+
+                self.recorded_frame_count += 1
+                queued = self.recording_queue.qsize()
+                self.lbl_record_status.setText(
+                    f"🔴 REC\nFrames: {self.recorded_frame_count}\nQueued: {queued}"
+                )
+            except queue.Full:
+                # Queue is full - skip this frame
+                if LOGGER:
+                    LOGGER.warning("Recording queue full - frame dropped")
+                self.lbl_record_status.setText(
+                    f"🔴 REC\nFrames: {self.recorded_frame_count}\n⚠ Queue full!"
+                )
+            except Exception as e:
+                # Stop recording on error
+                self.recording = False
+                self.btn_record.setChecked(False)
+                self.btn_record.setText("⏺" if self.is_small_screen else "Record")
+                self.btn_record.setStyleSheet("")
+                self.lbl_record_status.setText("✗ Recording error!")
+                if LOGGER:
+                    LOGGER.error("Recording error:")
+                    log_exception(LOGGER, e)
         
         # Histogram update (throttled)
         if (now - self._last_hist_t) >= self.hist_interval:
@@ -1470,9 +1673,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
     
     # ------------- Recording -------------
     def _browse_record_path(self):
-        """Browse for output TIFF file path"""
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Recording As", "", "TIFF Stack (*.tiff *.tif);;All Files (*)"
+        """Browse for output directory or TIFF file path"""
+        # Ask if user wants directory (separate files) or single file (stack)
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Directory to Save Individual TIFF Files"
         )
         if path:
             self.record_path_entry.setText(path)
@@ -1484,89 +1688,105 @@ class PvViewerApp(QtWidgets.QMainWindow):
             path = self.record_path_entry.text().strip()
             if not path:
                 QtWidgets.QMessageBox.warning(
-                    self, "Start Recording", 
-                    "Please specify an output file path first."
+                    self, "Start Recording",
+                    "Please specify an output directory first."
                 )
                 self.btn_record.setChecked(False)
                 return
-            
+
+            # Get prefix from UI field
+            prefix = self.record_prefix_entry.text().strip()
+            if not prefix:
+                prefix = "frame"
+
+            # Auto-add timestamp subdirectory to avoid overwriting
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.record_dir = os.path.join(path, f"recording_{timestamp}")
+
+            # Create directory
+            try:
+                os.makedirs(self.record_dir, exist_ok=True)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self, "Start Recording",
+                    f"Failed to create recording directory:\n{e}"
+                )
+                self.btn_record.setChecked(False)
+                return
+
+            # Start background writer thread with queue
+            self.recording_queue = queue.Queue(maxsize=100)  # Buffer up to 100 frames in RAM
+            self.recording_thread = TiffWriterThread(self.record_dir, self.recording_queue, prefix)
+            self.recording_thread.start()
+
             self.recording = True
-            self.recorded_frames = []
-            self.record_path = path
+            self.recorded_frame_count = 0
             self.btn_record.setText("⏹" if self.is_small_screen else "Stop Recording")
             self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
             self.lbl_record_status.setText("🔴 REC\nFrames: 0")
             if LOGGER:
-                LOGGER.info("Started recording to %s", path)
+                LOGGER.info("Started recording to %s", self.record_dir)
         else:
-            # Stop recording and save
+            # Stop recording
             self.recording = False
             self.btn_record.setText("⏺" if self.is_small_screen else "Record")
             self.btn_record.setStyleSheet("")
-            
-            if not self.recorded_frames:
+
+            if self.recorded_frame_count == 0:
                 self.lbl_record_status.setText("Not recording")
                 QtWidgets.QMessageBox.information(
-                    self, "Stop Recording", 
+                    self, "Stop Recording",
                     "No frames were recorded."
                 )
                 return
-            
-            # Save frames as TIFF stack
-            try:
-                from PIL import Image
-                
-                num_frames = len(self.recorded_frames)
-                self.lbl_record_status.setText(f"Saving {num_frames} frames...")
-                QtWidgets.QApplication.processEvents()
-                
-                # Convert frames to appropriate format for TIFF
-                pil_images = []
-                for frame in self.recorded_frames:
-                    # Convert to uint16 if needed (TIFF supports uint16)
-                    if frame.dtype != np.uint16:
-                        # Normalize and scale to uint16 range
-                        frame_min = frame.min()
-                        frame_max = frame.max()
-                        if frame_max > frame_min:
-                            normalized = (frame - frame_min) / (frame_max - frame_min)
-                            frame_u16 = (normalized * 65535).astype(np.uint16)
-                        else:
-                            frame_u16 = np.zeros_like(frame, dtype=np.uint16)
-                    else:
-                        frame_u16 = frame
-                    
-                    pil_images.append(Image.fromarray(frame_u16))
-                
-                # Save as multi-page TIFF
-                pil_images[0].save(
-                    self.record_path,
-                    save_all=True,
-                    append_images=pil_images[1:],
-                    compression="tiff_deflate"
-                )
-                
-                self.lbl_record_status.setText(f"✓ Saved {num_frames} frames")
-                if LOGGER:
-                    LOGGER.info("Saved %d frames to %s", num_frames, self.record_path)
-                
-                QtWidgets.QMessageBox.information(
-                    self, "Recording Saved", 
-                    f"Successfully saved {num_frames} frames\n"
-                    f"as multi-page TIFF stack to:\n\n{self.record_path}"
-                )
-            except Exception as e:
-                self.lbl_record_status.setText("✗ Save failed!")
-                if LOGGER:
-                    LOGGER.error("Failed to save recording:")
-                    log_exception(LOGGER, e)
-                QtWidgets.QMessageBox.critical(
-                    self, "Save Recording", 
-                    f"Failed to save recording:\n{e}"
-                )
-            finally:
-                self.recorded_frames = []
+
+            # Wait for background writer to finish (non-blocking)
+            if self.recording_thread and self.recording_thread.is_alive():
+                queued_frames = self.recording_queue.qsize()
+                self.lbl_record_status.setText(f"Flushing {queued_frames} frames...")
+
+                # Signal thread to stop
+                try:
+                    self.recording_queue.put_nowait(None)  # Poison pill
+                except queue.Full:
+                    pass
+
+                # Use a timer to check when thread finishes (non-blocking)
+                self._finish_recording_async()
+            else:
+                # Thread already done
+                self._show_recording_complete()
     
+    def _finish_recording_async(self):
+        """Check if recording thread finished (non-blocking with timer)."""
+        if self.recording_thread and self.recording_thread.is_alive():
+            # Still running, check again in 500ms
+            queued = self.recording_queue.qsize() if self.recording_queue else 0
+            written = self.recording_thread.frames_written if self.recording_thread else 0
+            self.lbl_record_status.setText(f"Flushing...\nWritten: {written}\nQueued: {queued}")
+            QtCore.QTimer.singleShot(500, self._finish_recording_async)
+        else:
+            # Thread finished
+            self._show_recording_complete()
+
+    def _show_recording_complete(self):
+        """Show recording completion message."""
+        frames_written = self.recording_thread.frames_written if self.recording_thread else self.recorded_frame_count
+        record_dir = self.record_dir
+
+        self.lbl_record_status.setText(f"✓ Saved {frames_written} frames")
+        if LOGGER:
+            LOGGER.info("Recording stopped: %d frames saved to %s", frames_written, record_dir)
+
+        QtWidgets.QMessageBox.information(
+            self, "Recording Stopped",
+            f"Successfully saved {frames_written} frames\n"
+            f"as individual TIFF files to:\n\n{record_dir}"
+        )
+
+        self.recording_thread = None
+        self.recording_queue = None
+
     # ------------- Other commands -------------
     def _toggle_pause(self):
         self.paused = not self.paused
@@ -1589,12 +1809,26 @@ class PvViewerApp(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Save Frame", "No image to save yet.")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Frame", "", "NumPy Array (*.npy);;PNG Image (*.png);;All Files (*)"
+            self, "Save Frame", "", "TIFF Image (*.tiff *.tif);;NumPy Array (*.npy);;PNG Image (*.png);;All Files (*)"
         )
         if not path:
             return
         try:
-            if path.lower().endswith(".png"):
+            if path.lower().endswith((".tiff", ".tif")):
+                from PIL import Image
+                # Save as uint16 TIFF
+                img = self._last_display_img
+                if img.dtype != np.uint16:
+                    img_min = img.min()
+                    img_max = img.max()
+                    if img_max > img_min:
+                        normalized = (img - img_min) / (img_max - img_min)
+                        img = (normalized * 65535).astype(np.uint16)
+                    else:
+                        img = np.zeros_like(img, dtype=np.uint16)
+                pil_image = Image.fromarray(img)
+                pil_image.save(path, compression="tiff_deflate")
+            elif path.lower().endswith(".png"):
                 from PIL import Image
                 img = self._last_display_img.astype(np.float32)
                 if self.vmin is not None and self.vmax is not None:
@@ -1626,6 +1860,48 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.motor_scan_dialog.raise_()
         self.motor_scan_dialog.activateWindow()
 
+    def _open_softbpm(self, module):
+        """Open the SoftBPM dialog"""
+        if not hasattr(self, 'softbpm_dialog') or self.softbpm_dialog is None:
+            self.softbpm_dialog = module.SoftBPMDialog(parent=self, logger=LOGGER)
+        self.softbpm_dialog.show()
+        self.softbpm_dialog.raise_()
+        self.softbpm_dialog.activateWindow()
+
+    def _open_detector_control(self, module):
+        """Open the Detector Control dialog"""
+        if not hasattr(self, 'detector_control_dialog') or self.detector_control_dialog is None:
+            self.detector_control_dialog = module.DetectorControlDialog(parent=self, logger=LOGGER)
+        self.detector_control_dialog.show()
+        self.detector_control_dialog.raise_()
+        self.detector_control_dialog.activateWindow()
+
+    def _open_rotation_axis(self, module):
+        """Open the Rotation Axis Detection dialog"""
+        if not hasattr(self, 'rotation_axis_dialog') or self.rotation_axis_dialog is None:
+            self.rotation_axis_dialog = module.RotationAxisDialog(parent=self, logger=LOGGER)
+        self.rotation_axis_dialog.show()
+        self.rotation_axis_dialog.raise_()
+        self.rotation_axis_dialog.activateWindow()
+
+    def _open_xanes_gui(self, module):
+        """Launch the XANES GUI (runs immediately, no dialog)"""
+        # Create launcher - it executes immediately and closes itself
+        module.XANESGuiDialog(parent=self, logger=LOGGER)
+
+    def _open_optics_calc(self, module):
+        """Launch the Optics Calculator (runs immediately, no dialog)"""
+        # Create launcher - it executes immediately and closes itself
+        module.OpticsCalcDialog(parent=self, logger=LOGGER)
+
+    def _open_qgmax(self, module):
+        """Open the QGMax dialog"""
+        if not hasattr(self, 'qgmax_dialog') or self.qgmax_dialog is None:
+            self.qgmax_dialog = module.QGMaxDialog(parent=self, logger=LOGGER)
+        self.qgmax_dialog.show()
+        self.qgmax_dialog.raise_()
+        self.qgmax_dialog.activateWindow()
+
     def _open_viewer(self):
         """Open a standalone viewer window"""
         from .plugins.viewer import HDF5ImageDividerDialog
@@ -1639,17 +1915,43 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.recording:
             reply = QtWidgets.QMessageBox.question(
                 self, "Recording Active",
-                f"Recording is active with {len(self.recorded_frames)} frames. Save before closing?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel
+                f"Recording is active with {self.recorded_frame_count} frames saved.\n"
+                f"Stop recording and close?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel
             )
-            
+
             if reply == QtWidgets.QMessageBox.Cancel:
                 event.ignore()
                 return
-            elif reply == QtWidgets.QMessageBox.Yes:
+            else:
+                # Properly stop recording with thread cleanup
+                self.recording = False
                 self.btn_record.setChecked(False)
-                self._toggle_recording()
+
+                # Wait for background writer to finish
+                if self.recording_thread and self.recording_thread.is_alive():
+                    if LOGGER:
+                        LOGGER.info("Waiting for recording thread to finish...")
+
+                    # Signal thread to stop and wait for queue to empty
+                    try:
+                        self.recording_queue.put(None, timeout=1)  # Poison pill
+                    except Exception:
+                        pass
+
+                    self.recording_thread.join(timeout=5)  # Wait up to 5 seconds on close
+
+                    if self.recording_thread.is_alive():
+                        if LOGGER:
+                            LOGGER.warning("Recording thread did not finish in time during close")
+
+                self.recording_thread = None
+                self.recording_queue = None
         
+        # Stop pump timer first to avoid processing during cleanup
+        if self.pump_timer:
+            self.pump_timer.stop()
+
         # Save window state
         try:
             if not self.isMaximized():
@@ -1662,19 +1964,21 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.error("[Config] Failed to save config on close")
                 log_exception(LOGGER, e)
-        
+
+        # Disconnect PV subscription
         try:
             self._disconnect_pv(silent=True)
         except Exception as e:
             if LOGGER:
                 LOGGER.warning("Error during disconnect on close:")
                 log_exception(LOGGER, e)
-        
-        # Cleanup ROI
+
+        # Cleanup ROI managers
         self.roi_manager.cleanup()
         self.line_manager.cleanup()
         self.ellipse_roi_manager.cleanup()
 
+        # Close dialogs
         if self.console_dialog:
             self.console_dialog.close()
 
@@ -1683,8 +1987,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.scalebar_dialog:
             self.scalebar_dialog.close()
 
-        # Clean mosalign
-        self.pump_timer.stop()
         if self.motor_scan_dialog:
             self.motor_scan_dialog.close()    
 

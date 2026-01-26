@@ -55,6 +55,7 @@ autodoc_mock_imports = [
     'types',
     'dataclasses',
     'PyQt5',
-    'tkinter',
     'typing',
+    'epics',
+    'pystream.beamlines.bl32ID',
 ]

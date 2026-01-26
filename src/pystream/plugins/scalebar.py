@@ -24,7 +24,7 @@ class SingleScaleBar:
         pixel_size: float = 1.0,
         unit: str = "nm",
         bar_width_fraction: float = 0.25,
-        position: str = "bottom-right",
+        position: str = "bottom-left",
         bar_height: int = 8,
         font_size: int = 12,
         color: str = "white",
@@ -33,7 +33,7 @@ class SingleScaleBar:
     ):
         self.image_view = image_view
         self.logger = logger
-        
+
         # Scale bar settings
         self.pixel_size = pixel_size
         self.unit = unit
@@ -44,13 +44,17 @@ class SingleScaleBar:
         self.color = color
         self.margin = margin
         self.vertical_offset = vertical_offset
-        
+
         # State
         self.enabled = False
-        
+        self._last_image_shape = None
+
         # Graphics items
         self.bar_rect: Optional[QtWidgets.QGraphicsRectItem] = None
         self.bar_text: Optional[pg.TextItem] = None
+
+        # Connect to view range changes to update when zooming/panning
+        self.image_view.view.sigRangeChanged.connect(self._on_view_range_changed)
     
     def show(self):
         """Show scale bar and text."""
@@ -68,13 +72,19 @@ class SingleScaleBar:
     
     def cleanup(self):
         """Remove scale bar graphics items."""
+        # Disconnect signal
+        try:
+            self.image_view.view.sigRangeChanged.disconnect(self._on_view_range_changed)
+        except Exception:
+            pass
+
         if self.bar_rect is not None:
             try:
                 self.image_view.getView().removeItem(self.bar_rect)
             except Exception:
                 pass
             self.bar_rect = None
-        
+
         if self.bar_text is not None:
             try:
                 self.image_view.getView().removeItem(self.bar_text)
@@ -86,58 +96,100 @@ class SingleScaleBar:
         """Update scale bar based on image dimensions."""
         if not self.enabled:
             return
-        
+
         h, w = image.shape[:2]
-        
-        # Calculate bar length in pixels
-        desired_bar_width_px = w * self.bar_width_fraction
-        desired_bar_width_real = desired_bar_width_px * self.pixel_size
-        
-        # Round to nice number
-        bar_width_real = self._get_nice_scale(desired_bar_width_real)
-        bar_width_px = bar_width_real / self.pixel_size
-        
-        # Calculate position
-        x, y = self._calculate_position(w, h, bar_width_px)
-        
-        # Create or update rectangle
+        self._last_image_shape = (h, w)
+
+        # Create graphics items if needed - attach to image item
         if self.bar_rect is None:
-            self.bar_rect = QtWidgets.QGraphicsRectItem(x, y, bar_width_px, self.bar_height)
+            self.bar_rect = QtWidgets.QGraphicsRectItem()
             color_obj = pg.mkColor(self.color)
             self.bar_rect.setBrush(pg.mkBrush(color_obj))
             self.bar_rect.setPen(pg.mkPen(None))
             self.bar_rect.setZValue(2000)
-            
+
             img_item = self.image_view.getImageItem()
             if img_item is not None:
                 self.bar_rect.setParentItem(img_item)
             else:
                 self.image_view.getView().addItem(self.bar_rect)
-        else:
-            self.bar_rect.setRect(x, y, bar_width_px, self.bar_height)
-            color_obj = pg.mkColor(self.color)
-            self.bar_rect.setBrush(pg.mkBrush(color_obj))
-        
-        # Create or update text
-        text = self._format_scale_text(bar_width_real)
-        text_x, text_y = self._calculate_text_position(x, y, bar_width_px)
-        
+
         if self.bar_text is None:
-            self.bar_text = pg.TextItem(text, anchor=(0.5, 1), color=self.color)
+            self.bar_text = pg.TextItem("", anchor=(0.5, 1), color=self.color)
             self.bar_text.setFont(QtGui.QFont("Arial", self.font_size, QtGui.QFont.Bold))
             self.bar_text.setZValue(2001)
-            
+
             img_item = self.image_view.getImageItem()
             if img_item is not None:
                 self.bar_text.setParentItem(img_item)
             else:
                 self.image_view.getView().addItem(self.bar_text)
+
+        # Update scale bar geometry
+        self._update_scalebar_geometry()
+
+    def _on_view_range_changed(self):
+        """Called when view range changes (zoom/pan)."""
+        if self.enabled and self.bar_rect is not None and self._last_image_shape is not None:
+            self._update_scalebar_geometry()
+
+    def _update_scalebar_geometry(self):
+        """Update scale bar geometry based on current view range."""
+        if not self.enabled or self.bar_rect is None or self._last_image_shape is None:
+            return
+
+        view = self.image_view.getView()
+        view_range = view.viewRange()
+
+        # Get visible range in image coordinates
+        x_range = view_range[0]  # [xmin, xmax]
+        y_range = view_range[1]  # [ymin, ymax]
+
+        # Calculate visible width in image pixels
+        visible_width_px = x_range[1] - x_range[0]
+
+        # Calculate desired bar width (fraction of visible width)
+        desired_bar_width_px = visible_width_px * self.bar_width_fraction
+        desired_bar_width_real = desired_bar_width_px * self.pixel_size
+
+        # Round to nice number
+        bar_width_real = self._get_nice_scale(desired_bar_width_real)
+        bar_width_px = bar_width_real / self.pixel_size
+
+        # Calculate position in image coordinates based on visible range
+        margin_px = self.margin
+        bar_height_px = self.bar_height
+
+        if self.position == "bottom-left":
+            x = x_range[0] + margin_px
+            y = y_range[1] - bar_height_px - margin_px - self.vertical_offset
+        elif self.position == "bottom-right":
+            x = x_range[1] - bar_width_px - margin_px
+            y = y_range[1] - bar_height_px - margin_px - self.vertical_offset
+        elif self.position == "top-left":
+            x = x_range[0] + margin_px
+            y = y_range[0] + margin_px + self.vertical_offset
+        elif self.position == "top-right":
+            x = x_range[1] - bar_width_px - margin_px
+            y = y_range[0] + margin_px + self.vertical_offset
         else:
-            self.bar_text.setText(text)
-            self.bar_text.setColor(self.color)
-        
+            # Default to bottom-left
+            x = x_range[0] + margin_px
+            y = y_range[1] - bar_height_px - margin_px - self.vertical_offset
+
+        # Update rectangle
+        self.bar_rect.setRect(x, y, bar_width_px, bar_height_px)
+        color_obj = pg.mkColor(self.color)
+        self.bar_rect.setBrush(pg.mkBrush(color_obj))
+
+        # Update text
+        text = self._format_scale_text(bar_width_real)
+        text_x = x + bar_width_px / 2
+        text_y = y - 5
+        self.bar_text.setText(text)
+        self.bar_text.setColor(self.color)
         self.bar_text.setPos(text_x, text_y)
-        
+
         if self.logger:
             self.logger.debug("Scale bar updated: %.1f px = %.2f %s", bar_width_px, bar_width_real, self.unit)
     
@@ -169,41 +221,13 @@ class SingleScaleBar:
                 return f"{value/1000:.1f} mm"
             elif self.unit == "mm":
                 return f"{value/1000:.1f} m"
-        
+
         if value >= 100:
             return f"{int(value)} {self.unit}"
         elif value >= 10:
             return f"{value:.1f} {self.unit}"
         else:
             return f"{value:.2f} {self.unit}"
-    
-    def _calculate_position(self, img_w: int, img_h: int, bar_w: float) -> tuple:
-        """Calculate x, y position for scale bar based on position setting."""
-        margin = self.margin
-        
-        if self.position == "bottom-right":
-            x = img_w - bar_w - margin
-            y = img_h - self.bar_height - margin - self.vertical_offset
-        elif self.position == "bottom-left":
-            x = margin
-            y = img_h - self.bar_height - margin - self.vertical_offset
-        elif self.position == "top-right":
-            x = img_w - bar_w - margin
-            y = margin + self.vertical_offset
-        elif self.position == "top-left":
-            x = margin
-            y = margin + self.vertical_offset
-        else:
-            x = img_w - bar_w - margin
-            y = img_h - self.bar_height - margin - self.vertical_offset
-        
-        return x, y
-    
-    def _calculate_text_position(self, bar_x: float, bar_y: float, bar_w: float) -> tuple:
-        """Calculate text position (centered above bar)."""
-        text_x = bar_x + bar_w / 2
-        text_y = bar_y - 5
-        return text_x, text_y
 
 
 class ScaleBarManager:

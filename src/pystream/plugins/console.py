@@ -29,6 +29,7 @@ class PythonConsole(QtWidgets.QWidget):
 
         self.process_func: Optional[Callable] = None
         self.enabled = False
+        self.user_namespace = {}  # Store full namespace for calling user functions
 
         self._build_ui()
         self._set_default_template()
@@ -107,13 +108,40 @@ class PythonConsole(QtWidgets.QWidget):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
+        # Command input for calling functions
+        cmd_layout = QtWidgets.QHBoxLayout()
+        cmd_label = QtWidgets.QLabel("Command:")
+        cmd_layout.addWidget(cmd_label)
+
+        self.cmd_input = QtWidgets.QLineEdit()
+        self.cmd_input.setPlaceholderText("Enter command, e.g. c1() or diff()")
+        self.cmd_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #404040;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: monospace;
+            }
+        """)
+        self.cmd_input.returnPressed.connect(self._run_command)
+        cmd_layout.addWidget(self.cmd_input)
+
+        btn_run = QtWidgets.QPushButton("Run")
+        btn_run.clicked.connect(self._run_command)
+        btn_run.setMaximumWidth(60)
+        cmd_layout.addWidget(btn_run)
+
+        layout.addLayout(cmd_layout)
+
         # Status/error display
-        status_label = QtWidgets.QLabel("Status:")
+        status_label = QtWidgets.QLabel("Output:")
         layout.addWidget(status_label)
-        
+
         self.status_display = QtWidgets.QTextEdit()
         self.status_display.setReadOnly(True)
-        self.status_display.setMaximumHeight(100)
+        self.status_display.setMaximumHeight(150)
         self.status_display.setStyleSheet("""
             QTextEdit {
                 background-color: #1a1a1a;
@@ -125,7 +153,7 @@ class PythonConsole(QtWidgets.QWidget):
             }
         """)
         layout.addWidget(self.status_display)
-        
+
         self._log_status("Console ready. Write your code and click 'Execute'.")
     
     def _set_default_template(self):
@@ -238,9 +266,19 @@ def process(img):
                 if self.logger:
                     self.logger.error("Console function test failed: %s", e)
                 return
-            
-            self._log_status("✓ Function compiled successfully!\n"
-                           "Enable the checkbox to activate real-time processing.")
+
+            # Store full namespace for running commands
+            self.user_namespace = namespace
+
+            # List available functions for user
+            user_funcs = [k for k, v in namespace.items()
+                         if callable(v) and not k.startswith('_') and k != 'process']
+
+            msg = "✓ Function compiled successfully!\n"
+            msg += "Enable the checkbox to activate real-time processing."
+            if user_funcs:
+                msg += f"\n\nAvailable commands: {', '.join(user_funcs)}"
+            self._log_status(msg)
             
             if self.logger:
                 self.logger.info("Console processing function compiled successfully")
@@ -251,6 +289,52 @@ def process(img):
             if self.logger:
                 self.logger.error("Console code compilation failed: %s", e)
     
+    def _run_command(self):
+        """Execute a command in the user namespace."""
+        cmd = self.cmd_input.text().strip()
+        if not cmd:
+            return
+
+        if not self.user_namespace:
+            self._log_status("⚠ No code compiled yet. Click 'Execute' first.", error=True)
+            return
+
+        # Capture print output
+        import io
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = captured = io.StringIO()
+
+        try:
+            # Execute the command in user namespace
+            result = eval(cmd, self.user_namespace)
+            output = captured.getvalue()
+
+            if output:
+                self._log_status(output.strip())
+            if result is not None:
+                self._log_status(f">>> {cmd}\n{result}")
+            elif not output:
+                self._log_status(f">>> {cmd}\nOK")
+
+        except SyntaxError:
+            # Try exec for statements
+            try:
+                exec(cmd, self.user_namespace)
+                output = captured.getvalue()
+                if output:
+                    self._log_status(output.strip())
+                else:
+                    self._log_status(f">>> {cmd}\nOK")
+            except Exception as e:
+                self._log_status(f"⚠ ERROR: {e}", error=True)
+        except Exception as e:
+            self._log_status(f"⚠ ERROR: {e}", error=True)
+        finally:
+            sys.stdout = old_stdout
+
+        self.cmd_input.clear()
+
     def _clear_function(self):
         """Clear the processing function"""
         self.process_func = None

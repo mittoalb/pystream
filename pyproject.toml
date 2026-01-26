@@ -11,10 +11,10 @@ requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Alberto Mittone", email = "amittone@anl.gov" }]
 dependencies = [
-  "numpy>=1.21",
-  "pvapy>=5.6.0",
-  "PyQt5==5.15.10",
-  "PyQt5-Qt5==5.15.14",
+  "numpy>=1.21,<2.0",
+  "pvapy>=5.0.0,<5.6.0",
+  "PyQt5>=5.15.10,<5.16",
+  "PyQt5-Qt5>=5.15.14,<5.16",
   "PyQt5-sip>=12.13,<13",
   "pyqtgraph>=0.13.0",
   "Pillow>=9.0",
@@ -23,13 +23,17 @@ dependencies = [
 
 [project.optional-dependencies]
 vispy = ["vispy>=0.14.0"]
+docs = ["sphinx>=6.0", "sphinx-rtd-theme", "myst-parser>=3.0"]
+bl32ID = [
+  "xanes-gui @ git+https://github.com/mittoalb/xanes_gui.git",
+  "mosalign @ git+https://github.com/mittoalb/mosalign.git",
+]
 all = ["vispy>=0.14.0"]
 dev = ["black", "flake8", "pytest"]
 
 [project.scripts]
 pystream = "pystream.pystream:main"
 viewer = "pystream.plugins.viewer:main"
-mosalign = "pystream.plugins.mosalign:main"
 metrics = "pystream.plugins.metrics:main"
 
 [tool.setuptools]

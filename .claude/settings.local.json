@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(python3:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(make:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(done)",
+      "Bash(mosalign:*)",
+      "Bash(tree:*)",
+      "Bash(chmod:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
