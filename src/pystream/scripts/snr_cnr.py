@@ -1,5 +1,5 @@
 """
-Live Plot Viewer (no SciPy) - SNR, CNR (robust)
+Live Plot Viewer  - SNR, CNR  
 
 - Works even if img arrives as (H,W,1) or (1,H,W)
 - Patch extraction includes last patch start (+1)
