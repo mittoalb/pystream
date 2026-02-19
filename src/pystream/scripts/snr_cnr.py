@@ -1,14 +1,15 @@
 """
-Live Plot Viewer
+Live Plot Viewer (no SciPy) - SNR, CNR (robust)
 
-Shows real-time plot of image statistics updated with each frame.
-Window opens automatically when you execute this script.
+- Works even if img arrives as (H,W,1) or (1,H,W)
+- Patch extraction includes last patch start (+1)
+- Uses robust selection (top/bottom-k) instead of percentiles that can yield empty sets
+- Avoids sigma==0 early-return traps
 """
 
 import numpy as np
 from PyQt5 import QtWidgets
 import pyqtgraph as pg
-from scipy.ndimage import sobel, gaussian_filter
 
 # Plot window
 _plot_win = None
@@ -16,17 +17,114 @@ _plot_win = None
 # Data buffers
 _max_points = 500
 _frame_count = 0
-_data = {
-    'mean': [],
-    'max': [],
-    'min': [],
-    'std': [],
-    'snr': [],
-    'cnr': [],
-}
+_data = {"snr": [], "cnr": []}
 
 # Minimum size to consider a real frame (not test image)
 _MIN_FRAME_SIZE = 100
+
+
+# -------------------------------------------------
+# Robust helpers
+
+# -------------------------------------------------
+def _ensure_2d(img: np.ndarray):
+    """Force image to 2D float32. Returns None if cannot."""
+    img = np.asarray(img)
+    img = np.squeeze(img)
+    if img.ndim == 3:
+        img = img[..., 0]
+    if img.ndim != 2:
+        return None
+    return img.astype(np.float32, copy=False)
+
+
+def _extract_patches(img2d: np.ndarray, patch_size=32) -> np.ndarray:
+    """Extract non-overlapping patches; includes last possible patch start."""
+    H, W = img2d.shape
+    if H < patch_size or W < patch_size:
+        return np.empty((0, patch_size, patch_size), dtype=np.float32)
+
+    patches = []
+    for y in range(0, H - patch_size + 1, patch_size):
+        for x in range(0, W - patch_size + 1, patch_size):
+            patches.append(img2d[y: y + patch_size, x: x + patch_size])
+
+    if not patches:
+        return np.empty((0, patch_size, patch_size), dtype=np.float32)
+
+    return np.stack(patches, axis=0).astype(np.float32, copy=False)
+
+
+def grad_energy(patch: np.ndarray) -> float:
+    """Mean gradient energy of a patch using numpy.gradient (no SciPy)."""
+    gy, gx = np.gradient(patch.astype(np.float32, copy=False))
+    return float(np.mean(gx * gx + gy * gy))
+
+
+# -------------------------------------------------
+# SNR reale (patch-based, robust)
+# -------------------------------------------------
+def snr_real(img, patch_size=32):
+    img2d = _ensure_2d(img)
+    if img2d is None:
+        return 0.0
+
+    patches = _extract_patches(img2d, patch_size=patch_size)
+    n = len(patches)
+    if n == 0:
+        return 0.0
+
+    flat = patches.reshape(n, -1)
+
+    # Noise: k lowest-variance patches
+    variances = np.var(flat, axis=1)
+    k_noise = max(1, int(0.2 * n))
+    noise_idx = np.argpartition(variances, k_noise - 1)[:k_noise]
+    noise_patches = patches[noise_idx]
+    noise_std = float(np.std(noise_patches)) + 1e-12  # avoid zero
+
+    # Signal: k highest gradient-energy patches
+    energies = np.array([grad_energy(p) for p in patches], dtype=np.float32)
+    k_sig = max(1, int(0.3 * n))
+    sig_idx = np.argpartition(-energies, k_sig - 1)[:k_sig]
+    signal_patches = patches[sig_idx]
+    signal_mean = float(np.mean(signal_patches))
+
+    snr_lin = signal_mean / noise_std
+    return float(20.0 * np.log10(snr_lin + 1e-9))
+
+
+# -------------------------------------------------
+# CNR auto (proxy, robust): |mu_sig - mu_bg| / sigma_bg
+# -------------------------------------------------
+def cnr_auto(img, patch_size=32):
+    img2d = _ensure_2d(img)
+    if img2d is None:
+        return 0.0
+
+    patches = _extract_patches(img2d, patch_size=patch_size)
+    n = len(patches)
+    if n == 0:
+        return 0.0
+
+    flat = patches.reshape(n, -1)
+    variances = np.var(flat, axis=1)
+
+    # Background: k lowest variance patches
+    k_bg = max(1, int(0.2 * n))
+    bg_idx = np.argpartition(variances, k_bg - 1)[:k_bg]
+    bg = patches[bg_idx]
+    mu_bg = float(np.mean(bg))
+    sigma_bg = float(np.std(bg)) + 1e-12  # avoid zero
+
+    # Signal: k highest gradient energy patches
+    energies = np.array([grad_energy(p) for p in patches], dtype=np.float32)
+    k_sig = max(1, int(0.3 * n))
+    sig_idx = np.argpartition(-energies, k_sig - 1)[:k_sig]
+    sig = patches[sig_idx]
+    mu_sig = float(np.mean(sig))
+
+    return float(abs(mu_sig - mu_bg) / sigma_bg)
 
 
 class PlotWindow(QtWidgets.QWidget):
@@ -54,9 +152,9 @@ class PlotWindow(QtWidgets.QWidget):
         self.btn_pause.clicked.connect(self._on_pause)
         btn_layout.addWidget(self.btn_pause)
 
-        self.btn_clear = QtWidgets.QPushButton("Clear")
+        self.btn_clear = QtWidgets.QPushButton("Clear Plot")
         self.btn_clear.clicked.connect(self._on_clear)
-        self.btn_clear.setToolTip("Clear all data")
+        self.btn_clear.setToolTip("Clear plot data")
         btn_layout.addWidget(self.btn_clear)
 
         btn_layout.addStretch()
@@ -68,23 +166,18 @@ class PlotWindow(QtWidgets.QWidget):
 
         # Plot widget
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('w')
+        self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_widget.setLabel('left', 'Value')
-        self.plot_widget.setLabel('bottom', 'Frame')
+        self.plot_widget.setLabel("left", "Value")
+        self.plot_widget.setLabel("bottom", "Frame")
+        self.plot_widget.setTitle("Live Image Statistics")
         self.plot_widget.addLegend()
 
-        # Create plot lines
-        self.line_mean = self.plot_widget.plot([], [], pen=pg.mkPen('b', width=2), name='Mean')
-        self.line_max = self.plot_widget.plot([], [], pen=pg.mkPen('r', width=1), name='Max')
-        self.line_min = self.plot_widget.plot([], [], pen=pg.mkPen('g', width=1), name='Min')
-        self.line_std = self.plot_widget.plot([], [], pen=pg.mkPen('m', width=1, style=2), name='Std')
-      
-        self.line_snr = self.plot_widget.plot([], [], pen=pg.mkPen('c', width=1), name='Min')
-        self.line_cnr = self.plot_widget.plot([], [], pen=pg.mkPen('y', width=1), name='Min')
+        # Lines: SNR blue, CNR red
+        self.line_snr = self.plot_widget.plot([], [], pen=pg.mkPen("b", width=2), name="SNR (dB)")
+        self.line_cnr = self.plot_widget.plot([], [], pen=pg.mkPen("r", width=2), name="CNR")
 
         layout.addWidget(self.plot_widget)
-
         self._update_buttons()
 
     def _on_start(self):
@@ -100,16 +193,12 @@ class PlotWindow(QtWidgets.QWidget):
     def _on_clear(self):
         global _frame_count, _data
         _frame_count = 0
-        _data = {'mean': [], 'max': [], 'min': [], 'std': []}
-        self.line_mean.setData([], [])
-        self.line_max.setData([], [])
-        self.line_min.setData([], [])
-        self.line_std.setData([], [])
-        self.lbl_stats.setText("Data cleared. Waiting for frames...")
-      
+        _data = {"snr": [], "cnr": []}
+
         self.line_snr.setData([], [])
         self.line_cnr.setData([], [])
-        
+
+        self.lbl_stats.setText("Plot cleared. Waiting for frames...")
 
     def _update_buttons(self):
         if self.running and not self.paused:
@@ -132,125 +221,39 @@ class PlotWindow(QtWidgets.QWidget):
         if not self.running or self.paused:
             return
 
-        x = list(range(len(_data['mean'])))
-        self.line_mean.setData(x, _data['mean'])
-        self.line_max.setData(x, _data['max'])
-        self.line_min.setData(x, _data['min'])
-        self.line_std.setData(x, _data['std'])
+        x = list(range(len(_data["snr"])))
+        self.line_snr.setData(x, _data["snr"])
+        self.line_cnr.setData(x, _data["cnr"])
         self.lbl_stats.setText(stats_text)
 
-        self.line_snr.setData(x, _data['std'])
-        self.line_cnr.setData(x, _data['std'])
 
-         # end class
-
-
-
-
-
-
-#-------------------------------------------------
-# SNR reale
-#-------------------------------------------------
-
-def snr_real(img, patch_size=32):
- 
-    H, W = img.shape
-    patches = []
-# estrae patch in modo  sequenziale su tutta l'immagine e valuta srn localmente
-    for y in range(0, H - patch_size, patch_size):
-        for x in range(0, W - patch_size, patch_size):
-            patches.append(img[y:y+patch_size, x:x+patch_size])
-
-    patches = np.array(patches)
-    if len(patches) == 0:      # controlla se non ci sono patch
-        return 0.0
-
-    ''' Noise: valuta varianza per ogni patch e prende il 20% più basso  
-    var bass - quasi solo rumore
-    var alta - dettagli
-
-  '''
-    variances = np.var(patches.reshape(len(patches), -1), axis=1)
-    noise_thresh = np.percentile(variances, 20)           # percentile = valore che divide la distribuzione
-    noise_patches = patches[variances <= noise_thresh]    # seleziono immagini a bassa var 
-
-    if len(noise_patches) == 0:         # vedo se esistono patch di noise , altrimenti 0 
-        return 0.0
-
-    noise_std = np.std(noise_patches)
-
-    # gradiente: gx gy e bordi 
-  ''' uno mi calcola il gradiente orizzontale l'altro verticale 
-  se ci sono bordi verticali, dendriti, cellule-> gx è alto
-  se la patch è uniforme -> gx circa 0
-  la somma dei quadrati  mi fornisce la media sel segnale
-
-  Analysis of focus measure operators in shape‑from‑focus (Said Pertuz, Puig, García, Pattern Recognition, 2013)
-  '''
-    grad_energies = []
-    for p in patches:
-        gx = sobel(p, axis=1)
-        gy = sobel(p, axis=0)
-        grad_energies.append(np.mean(gx**2 + gy**2))  #energia del bordo e media , per valori alti segnale biologixo      
-
-    grad_energies = np.array(grad_energies)
-    signal_thresh = np.percentile(grad_energies, 70)      # valuto percentile, al di sopra del range sono più segnale
-    signal_patches = patches[grad_energies >= signal_thresh]  # considera solo quelle al di sorpa della soglia 
-
-    if len(signal_patches) == 0:         # controllo per immagine vuota
-        return 0.0
-
-    signal_mean = np.mean(signal_patches)   # livello medio del segnale : la media di intensità nelle patch ad alta struttura
-
-    if noise_std == 0:
-        return 0.0
-
-    snr = signal_mean / noise_std                # formula reale
-    return float(20 * np.log10(snr + 1e-9))      # conversione in bd
-
-        # process
 def process(img):
     """Process each frame."""
     global _frame_count, _data, _plot_win
 
-    # Skip tiny test images from console
-    if img.shape[0] < _MIN_FRAME_SIZE or img.shape[1] < _MIN_FRAME_SIZE:
+    img2d = _ensure_2d(img)
+    if img2d is None:
         return img
 
-    # Skip if window not running
+    if img2d.shape[0] < _MIN_FRAME_SIZE or img2d.shape[1] < _MIN_FRAME_SIZE:
+        return img
+
     if _plot_win is None or not _plot_win.running or _plot_win.paused:
         return img
 
-    # Compute statistics
-    img_mean = float(np.mean(img))
-    img_max = float(np.max(img))
-    img_min = float(np.min(img))
-    img_std = float(np.std(img))
+    img_snr = float(snr_real(img2d))
+    img_cnr = float(cnr_auto(img2d))
 
-    img_snr = float(np.std(img))
-    img_cnr = float(np.std(img))
+    _data["snr"].append(img_snr)
+    _data["cnr"].append(img_cnr)
 
-    # Append to buffers
-    _data['mean'].append(img_mean)
-    _data['max'].append(img_max)
-    _data['min'].append(img_min)
-    _data['std'].append(img_std)
-  
-    _data['snr'].append(img_std)
-    _data['scnr'].append(img_std)
-
-    
-
-    # Trim to max points
-    if len(_data['mean']) > _max_points:
+    if len(_data["snr"]) > _max_points:
         for key in _data:
             _data[key] = _data[key][-_max_points:]
 
     _frame_count += 1
 
-    # Update plot
-    stats = f"Frame {_frame_count}: Mean={img_mean:.1f} Max={img_max:.1f} Min={img_min:.1f} Std={img_std:.1f}"
+    stats = f"Frame {_frame_count}: SNR={img_snr:.2f} dB | CNR={img_cnr:.2f}"
     _plot_win.update_plot(stats)
 
     return img
@@ -258,9 +261,10 @@ def process(img):
 
 # Reset state and open window when script is executed
 _frame_count = 0
-_data = {'mean': [], 'max': [], 'min': [], 'std': [], 'snr': [], 'cnr': []}
+_data = {"snr": [], "cnr": []}
+
 _plot_win = PlotWindow()
 _plot_win.show()
 _plot_win.raise_()
-print("Plot window opened. Showing mean/max/min/std/snr/cnr vs frame number.")
 
+print("Plot window opened. Showing SNR/CNR vs frame number.")
