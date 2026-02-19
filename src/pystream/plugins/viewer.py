@@ -20,7 +20,6 @@ import h5py
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
-pg.setConfigOptions(imageAxisOrder='row-major')
 
 
 class Hdf5MetadataReader:
@@ -879,6 +878,7 @@ def main():
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
+    pg.setConfigOptions(imageAxisOrder='row-major')
     app.setApplicationName("HDF5 Image Divider with Metadata")
     
     # Apply dark theme
