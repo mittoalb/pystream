@@ -19,7 +19,8 @@ Tab 2: Comprehensive metadata viewer
 import h5py
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
-import pyqtgraph as pg
+
+pg = None  # imported in main() after QApplication is created
 
 
 class Hdf5MetadataReader:
@@ -873,11 +874,15 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
 def main():
     """Run the HDF5 image divider as a standalone application"""
     import sys
-    
-    # Check if QApplication already exists (for script entry points)
+    global pg
+
+    # QApplication MUST exist before importing pyqtgraph on some versions
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
+
+    import pyqtgraph as _pg
+    pg = _pg
     pg.setConfigOptions(imageAxisOrder='row-major')
     app.setApplicationName("HDF5 Image Divider with Metadata")
     
