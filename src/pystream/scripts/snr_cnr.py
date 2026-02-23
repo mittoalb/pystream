@@ -62,7 +62,7 @@ def grad_energy(patch: np.ndarray) -> float:
 
 
 # -------------------------------------------------
-# SNR reale (patch-based, robust)
+# SNR real(patch-based, Db)      
 # -------------------------------------------------
 def snr_real(img, patch_size=32):
     img2d = _ensure_2d(img)
@@ -95,8 +95,9 @@ def snr_real(img, patch_size=32):
 
 
 # -------------------------------------------------
-# CNR auto (proxy, robust): |mu_sig - mu_bg| / sigma_bg
-# -------------------------------------------------
+# CNR : |mu_sig - mu_bg| / sigma_bg
+# ----------------- ------------------------------
+                            
 def cnr_auto(img, patch_size=32):
     img2d = _ensure_2d(img)
     if img2d is None:
