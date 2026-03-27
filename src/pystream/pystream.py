@@ -1330,10 +1330,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.scalebar_manager is not None:
             self.scalebar_manager.update_image(img)
 
-        # Update detector control dialog with new image dimensions
-        if (hasattr(self, 'detector_control_dialog') and
-                self.detector_control_dialog is not None):
-            self.detector_control_dialog.update_image(img)
 
         # FPS calculation
         now = time.time()

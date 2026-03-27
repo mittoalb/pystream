@@ -28,6 +28,8 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.roi = None
         self.roi_enabled = False
         self._last_image = None
+        self._max_sizex = None
+        self._max_sizey = None
 
         self._init_ui()
         self._load_current_values()
@@ -80,14 +82,19 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.sizex_spin = QtWidgets.QSpinBox()
         self.sizex_spin.setRange(1, 8192)
         self.sizex_spin.setValue(2048)
-        binning_layout.addRow("SizeX:", self.sizex_spin)
+        self.sizex_spin.setReadOnly(True)
+        binning_layout.addRow("SizeX (computed):", self.sizex_spin)
 
         self.sizey_spin = QtWidgets.QSpinBox()
         self.sizey_spin.setRange(1, 8192)
         self.sizey_spin.setValue(2048)
-        binning_layout.addRow("SizeY:", self.sizey_spin)
+        self.sizey_spin.setReadOnly(True)
+        binning_layout.addRow("SizeY (computed):", self.sizey_spin)
 
         bin_button_layout = QtWidgets.QHBoxLayout()
+        self.binx_spin.valueChanged.connect(self._refresh_computed_sizes)
+        self.biny_spin.valueChanged.connect(self._refresh_computed_sizes)
+
         self.apply_binning_btn = QtWidgets.QPushButton("Apply Binning")
         self.apply_binning_btn.clicked.connect(self._apply_binning)
         bin_button_layout.addWidget(self.apply_binning_btn)
@@ -224,50 +231,54 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self._log_message(f"Error setting PV {pv_name}: {e}")
             return False
 
-    def update_image(self, image):
-        """Receive a new image and update spinboxes when dimensions change."""
-        new_h, new_w = image.shape[:2]
-        old = self._last_image
-        self._last_image = image
-        if old is not None and old.shape[:2] == (new_h, new_w):
-            return
-        self.sizex_spin.setValue(new_w)
-        self.sizey_spin.setValue(new_h)
-        self._log_message(f"Image size changed: SizeX={new_w}, SizeY={new_h}")
-
     def _load_current_values(self):
         """Load current binning and ROI values from PVs."""
         self._read_binning()
         self._read_roi()
 
     def _read_binning(self):
-        """Read current binning and size values from detector."""
+        """Read current binning from detector and store max sensor size."""
         prefix = self.pv_prefix_input.text()
 
-        binx_val = self._get_pv_value(f"{prefix}:BinX")
-        biny_val = self._get_pv_value(f"{prefix}:BinY")
-        sizex_val = self._get_pv_value(f"{prefix}:SizeX_RBV")
-        sizey_val = self._get_pv_value(f"{prefix}:SizeY_RBV")
+        binx_val  = self._get_pv_value(f"{prefix}:BinX")
+        biny_val  = self._get_pv_value(f"{prefix}:BinY")
+        max_x_val = self._get_pv_value(f"{prefix}:MaxSizeX_RBV")
+        max_y_val = self._get_pv_value(f"{prefix}:MaxSizeY_RBV")
 
         if binx_val:
             self.binx_spin.setValue(int(binx_val))
         if biny_val:
             self.biny_spin.setValue(int(biny_val))
-        if sizex_val:
-            self.sizex_spin.setValue(int(sizex_val))
-        if sizey_val:
-            self.sizey_spin.setValue(int(sizey_val))
+        if max_x_val:
+            self._max_sizex = int(max_x_val)
+        if max_y_val:
+            self._max_sizey = int(max_y_val)
 
-        self._log_message(f"Read: BinX={binx_val}, BinY={biny_val}, SizeX={sizex_val}, SizeY={sizey_val}")
+        self._refresh_computed_sizes()
+        self._log_message(f"Read: BinX={binx_val}, BinY={biny_val}, MaxSizeX={max_x_val}, MaxSizeY={max_y_val}")
+
+    def _refresh_computed_sizes(self):
+        """Recompute SizeX/SizeY from max sensor size and current binning."""
+        if self._max_sizex is None or self._max_sizey is None:
+            return
+        self.sizex_spin.setValue(self._max_sizex // self.binx_spin.value())
+        self.sizey_spin.setValue(self._max_sizey // self.biny_spin.value())
 
     def _apply_binning(self):
-        """Apply binning values to detector."""
+        """Apply binning values to detector, computing SizeX/SizeY from max sensor size."""
         prefix = self.pv_prefix_input.text()
         binx = self.binx_spin.value()
         biny = self.biny_spin.value()
 
-        sizex = self.sizex_spin.value()
-        sizey = self.sizey_spin.value()
+        if self._max_sizex is None or self._max_sizey is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Error",
+                "Max sensor size not available. Click 'Read Current' first."
+            )
+            return
+
+        sizex = self._max_sizex // binx
+        sizey = self._max_sizey // biny
 
         success = True
         if not self._set_pv_value(f"{prefix}:BinX", binx):
@@ -280,10 +291,12 @@ class DetectorControlDialog(QtWidgets.QDialog):
             success = False
 
         if success:
-            self._log_message(f"Applied binning: BinX={binx}, BinY={biny}")
+            self.sizex_spin.setValue(sizex)
+            self.sizey_spin.setValue(sizey)
+            self._log_message(f"Applied: BinX={binx}, BinY={biny}, SizeX={sizex}, SizeY={sizey}")
             QtWidgets.QMessageBox.information(
                 self, "Success",
-                f"Binning applied: BinX={binx}, BinY={biny}"
+                f"Binning applied: BinX={binx}, BinY={biny}\nSizeX={sizex}, SizeY={sizey}"
             )
         else:
             QtWidgets.QMessageBox.warning(
