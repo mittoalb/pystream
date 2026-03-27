@@ -225,16 +225,15 @@ class DetectorControlDialog(QtWidgets.QDialog):
             return False
 
     def update_image(self, image):
-        """Receive a new image and sync SizeX/SizeY PVs if dimensions changed."""
+        """Receive a new image and update spinboxes when dimensions change."""
         new_h, new_w = image.shape[:2]
         old = self._last_image
         self._last_image = image
         if old is not None and old.shape[:2] == (new_h, new_w):
             return
-        prefix = self.pv_prefix_input.text()
-        self._set_pv_value(f"{prefix}:SizeX", new_w)
-        self._set_pv_value(f"{prefix}:SizeY", new_h)
-        self._log_message(f"Image size updated: SizeX={new_w}, SizeY={new_h}")
+        self.sizex_spin.setValue(new_w)
+        self.sizey_spin.setValue(new_h)
+        self._log_message(f"Image size changed: SizeX={new_w}, SizeY={new_h}")
 
     def _load_current_values(self):
         """Load current binning and ROI values from PVs."""
