@@ -249,10 +249,11 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self.binx_spin.setValue(int(binx_val))
         if biny_val:
             self.biny_spin.setValue(int(biny_val))
-        if max_x_val:
-            self._max_sizex = int(max_x_val)
-        if max_y_val:
-            self._max_sizey = int(max_y_val)
+        # MaxSizeX/Y_RBV is in binned units — recover unbinned sensor size
+        if max_x_val and binx_val:
+            self._max_sizex = int(max_x_val) * int(binx_val)
+        if max_y_val and biny_val:
+            self._max_sizey = int(max_y_val) * int(biny_val)
 
         self._refresh_computed_sizes()
         self._log_message(f"Read: BinX={binx_val}, BinY={biny_val}, MaxSizeX={max_x_val}, MaxSizeY={max_y_val}")
