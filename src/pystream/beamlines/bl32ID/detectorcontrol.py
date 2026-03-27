@@ -77,6 +77,16 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.biny_spin.setValue(1)
         binning_layout.addRow("BinY:", self.biny_spin)
 
+        self.sizex_spin = QtWidgets.QSpinBox()
+        self.sizex_spin.setRange(1, 8192)
+        self.sizex_spin.setValue(2048)
+        binning_layout.addRow("SizeX:", self.sizex_spin)
+
+        self.sizey_spin = QtWidgets.QSpinBox()
+        self.sizey_spin.setRange(1, 8192)
+        self.sizey_spin.setValue(2048)
+        binning_layout.addRow("SizeY:", self.sizey_spin)
+
         bin_button_layout = QtWidgets.QHBoxLayout()
         self.apply_binning_btn = QtWidgets.QPushButton("Apply Binning")
         self.apply_binning_btn.clicked.connect(self._apply_binning)
@@ -214,24 +224,42 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self._log_message(f"Error setting PV {pv_name}: {e}")
             return False
 
+    def update_image(self, image):
+        """Receive a new image and sync SizeX/SizeY PVs if dimensions changed."""
+        new_h, new_w = image.shape[:2]
+        old = self._last_image
+        self._last_image = image
+        if old is not None and old.shape[:2] == (new_h, new_w):
+            return
+        prefix = self.pv_prefix_input.text()
+        self._set_pv_value(f"{prefix}:SizeX", new_w)
+        self._set_pv_value(f"{prefix}:SizeY", new_h)
+        self._log_message(f"Image size updated: SizeX={new_w}, SizeY={new_h}")
+
     def _load_current_values(self):
         """Load current binning and ROI values from PVs."""
         self._read_binning()
         self._read_roi()
 
     def _read_binning(self):
-        """Read current binning values from detector."""
+        """Read current binning and size values from detector."""
         prefix = self.pv_prefix_input.text()
 
         binx_val = self._get_pv_value(f"{prefix}:BinX")
         biny_val = self._get_pv_value(f"{prefix}:BinY")
+        sizex_val = self._get_pv_value(f"{prefix}:SizeX_RBV")
+        sizey_val = self._get_pv_value(f"{prefix}:SizeY_RBV")
 
         if binx_val:
             self.binx_spin.setValue(int(binx_val))
         if biny_val:
             self.biny_spin.setValue(int(biny_val))
+        if sizex_val:
+            self.sizex_spin.setValue(int(sizex_val))
+        if sizey_val:
+            self.sizey_spin.setValue(int(sizey_val))
 
-        self._log_message(f"Read binning: BinX={binx_val}, BinY={biny_val}")
+        self._log_message(f"Read: BinX={binx_val}, BinY={biny_val}, SizeX={sizex_val}, SizeY={sizey_val}")
 
     def _apply_binning(self):
         """Apply binning values to detector."""
@@ -239,10 +267,17 @@ class DetectorControlDialog(QtWidgets.QDialog):
         binx = self.binx_spin.value()
         biny = self.biny_spin.value()
 
+        sizex = self.sizex_spin.value()
+        sizey = self.sizey_spin.value()
+
         success = True
         if not self._set_pv_value(f"{prefix}:BinX", binx):
             success = False
         if not self._set_pv_value(f"{prefix}:BinY", biny):
+            success = False
+        if not self._set_pv_value(f"{prefix}:SizeX", sizex):
+            success = False
+        if not self._set_pv_value(f"{prefix}:SizeY", sizey):
             success = False
 
         if success:
