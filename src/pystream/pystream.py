@@ -433,6 +433,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
 
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
+        self.line_manager.set_scalebar_manager(self.scalebar_manager)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
         if hasattr(self, 'btn_reset_line'):
             self.btn_reset_line.clicked.connect(self.line_manager.reset)
