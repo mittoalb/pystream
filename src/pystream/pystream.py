@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-NTNDArray Real-time Viewer (PyQt5/PyQtGraph)
+pystream
 ---------------------------------------------------------------------
 
 Usage:
@@ -344,7 +344,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 auto_every: int = 10):
         super().__init__()
         
-        self.setWindowTitle("NTNDArray PyQtGraph Viewer")
+        self.setWindowTitle("pystream")
 
         screen = QtWidgets.QApplication.desktop().availableGeometry()
         self.is_small_screen = screen.width() < 1600 or screen.height() < 1000
@@ -1190,7 +1190,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         try:
             self.sub = NtndaSubscriber(pv, self.queue)
             self.sub.start()
-            self.setWindowTitle(f"NTNDArray PyQtGraph Viewer - {pv}")
+            self.setWindowTitle(f"pystream - {pv}")
             if LOGGER: LOGGER.info("Connected to PV %s", pv)
         except Exception as e:
             self.sub = None
@@ -1208,7 +1208,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                     LOGGER.warning("Error stopping subscription:")
                     log_exception(LOGGER, e)
             self.sub = None
-            self.setWindowTitle("NTNDArray PyQtGraph Viewer")
+            self.setWindowTitle("pystream")
             if not silent:
                 QtWidgets.QMessageBox.information(self, "Disconnect PV", "Disconnected.")
             if LOGGER: LOGGER.info("Disconnected from PV")
@@ -2006,7 +2006,7 @@ def _parse_loglevel(s: Optional[str]) -> int:
 
 def main():
     global LOGGER
-    ap = argparse.ArgumentParser(description="NTNDArray Viewer (PyQtGraph - SSH Compatible)")
+    ap = argparse.ArgumentParser(description="pystream")
     ap.add_argument("--pv", help="PVAccess NTNDArray PV name")
     ap.add_argument("--max-fps", type=int, default=0, help="Max redraw FPS (0 = unthrottled)")
     ap.add_argument("--hist-fps", type=float, default=4.0, help="Histogram updates per second")
@@ -2025,7 +2025,7 @@ def main():
         stream_to_console=True,
         level=_parse_loglevel(args.log_level),
     )
-    LOGGER.info("Starting NTNDArray PyQtGraph Viewer (SSH-compatible)")
+    LOGGER.info("Starting pystream (SSH-compatible)")
     LOGGER.info("Args: %s", vars(args))
     
     # Initialize plugins
@@ -2036,7 +2036,7 @@ def main():
     
     # Create Qt application
     app = QtWidgets.QApplication([])
-    app.setApplicationName("NTNDArray PyQtGraph Viewer")
+    app.setApplicationName("pystream")
     
     # Create viewer window
     viewer = PvViewerApp(

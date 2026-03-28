@@ -73,8 +73,14 @@ class LineProfileManager:
         self._drag_start_geom  = None   # (x1,y1,x2,y2) snapshot for move
         self._drag_endpoint_idx = None  # 1 or 2
 
-        self._vp_filter = _LineVpFilter(self)
+        self._shift = False
+
+        self._vp_filter  = _LineVpFilter(self)
+        self._key_filter = _LineKeyFilter(self)
         self._gv.viewport().installEventFilter(self._vp_filter)
+        app = QtWidgets.QApplication.instance()
+        if app:
+            app.installEventFilter(self._key_filter)
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -111,6 +117,12 @@ class LineProfileManager:
         self._remove_graphics()
         try:
             self._gv.viewport().removeEventFilter(self._vp_filter)
+        except Exception:
+            pass
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app:
+                app.removeEventFilter(self._key_filter)
         except Exception:
             pass
 
@@ -190,6 +202,15 @@ class LineProfileManager:
         return (np.hypot(vp_pos.x() - h_vp.x(),
                          vp_pos.y() - h_vp.y()) <= _HANDLE_HIT_PX)
 
+    # ── constraint ────────────────────────────────────────────────────────
+
+    def _constrain(self, ax, ay, fx, fy):
+        if not self._shift:
+            return fx, fy
+        if abs(fx - ax) >= abs(fy - ay):
+            return fx, ay   # horizontal
+        return ax, fy       # vertical
+
     # ── mouse events ──────────────────────────────────────────────────────
 
     def _on_press(self, vp_pos) -> bool:
@@ -203,15 +224,7 @@ class LineProfileManager:
             self._y1 = self._y2 = sp.y()
             self._create_graphics()
             self._state = self._PLACING
-            self.stats_label.setText("Line: click to set end point")
-            return True
-
-        if self._state == self._PLACING:
-            self._x2, self._y2 = sp.x(), sp.y()
-            self._apply_geom()
-            self._state = self._PLACED
-            self._gv.viewport().setCursor(QtCore.Qt.ArrowCursor)
-            self._refresh_stats()
+            self.stats_label.setText("Line: drag to end, release to place")
             return True
 
         if self._state == self._PLACED:
@@ -239,16 +252,19 @@ class LineProfileManager:
         sp = self._to_scene(vp_pos)
 
         if self._state == self._PLACING:
-            self._x2, self._y2 = sp.x(), sp.y()
+            x, y = self._constrain(self._x1, self._y1, sp.x(), sp.y())
+            self._x2, self._y2 = x, y
             self._apply_geom()
             self._refresh_stats()
             return True
 
         if self._state == self._DRAG_ENDPOINT:
             if self._drag_endpoint_idx == 1:
-                self._x1, self._y1 = sp.x(), sp.y()
+                x, y = self._constrain(self._x2, self._y2, sp.x(), sp.y())
+                self._x1, self._y1 = x, y
             else:
-                self._x2, self._y2 = sp.x(), sp.y()
+                x, y = self._constrain(self._x1, self._y1, sp.x(), sp.y())
+                self._x2, self._y2 = x, y
             self._apply_geom()
             self._refresh_stats()
             return True
@@ -264,7 +280,16 @@ class LineProfileManager:
 
         return False
 
-    def _on_release(self, _vp_pos) -> bool:
+    def _on_release(self, vp_pos) -> bool:
+        if self._state == self._PLACING:
+            sp = self._to_scene(vp_pos)
+            x, y = self._constrain(self._x1, self._y1, sp.x(), sp.y())
+            self._x2, self._y2 = x, y
+            self._apply_geom()
+            self._state = self._PLACED
+            self._gv.viewport().setCursor(QtCore.Qt.ArrowCursor)
+            self._refresh_stats()
+            return True
         if self._state in (self._MOVING, self._DRAG_ENDPOINT):
             self._state = self._PLACED
             self._drag_endpoint_idx = None
@@ -308,6 +333,20 @@ class LineProfileManager:
             f"Angle: {angle:.1f}°\n"
             f"Start: ({ix1:.1f}, {iy1:.1f})\n"
             f"End:   ({ix2:.1f}, {iy2:.1f})")
+
+
+class _LineKeyFilter(QtCore.QObject):
+    def __init__(self, mgr):
+        super().__init__()
+        self.mgr = mgr
+
+    def eventFilter(self, _obj, event):
+        t = event.type()
+        if t == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Shift:
+            self.mgr._shift = True
+        elif t == QtCore.QEvent.KeyRelease and event.key() == QtCore.Qt.Key_Shift:
+            self.mgr._shift = False
+        return False
 
 
 class _LineVpFilter(QtCore.QObject):
