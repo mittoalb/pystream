@@ -519,13 +519,11 @@ class DetectorControlDialog(QtWidgets.QDialog):
     # ── ROI changed callback ──────────────────────────────────────────────
 
     def _roi_to_sensor(self):
-        """Convert current scene-space ROI → sensor pixel box (sx, sy, sx1, sy1).
+        """Convert scene-space ROI → sensor pixel box (sx, sy, sx1, sy1).
 
-        Uses mapSceneToView to get data coordinates, undoes pystream display
-        transforms, and accounts for any existing crop offset so the mapping
-        is correct even when the displayed image is already cropped.
-
-        Returns (sx, sy, sx1, sy1) in full-sensor pixels, or None on failure.
+        mapSceneToView gives data coords that ARE pixel positions in the
+        displayed numpy array.  Undo pystream flips/transpose to get sensor
+        pixel positions.  No PV reads — fast enough for live drag updates.
         """
         p = self.parent()
         if self.roi is None or p is None or not hasattr(p, 'image_view'):
@@ -536,69 +534,48 @@ class DetectorControlDialog(QtWidgets.QDialog):
         if img_item is None or img_item.image is None:
             return None
 
-        sensor_w = self._max_sizex
-        sensor_h = self._max_sizey
-        if not sensor_w or not sensor_h:
-            return None
-
-        # ── ROI scene → data coordinates via mapSceneToView ──────────────
+        # ── scene → data (pixel) coordinates ─────────────────────────────
         pos  = self.roi.pos()
         size = self.roi.size()
         d0 = view.mapSceneToView(QtCore.QPointF(pos[0], pos[1]))
         d1 = view.mapSceneToView(QtCore.QPointF(pos[0] + size[0],
                                                   pos[1] + size[1]))
-        img_w = float(img_item.width())    # col-major: first axis extent
-        img_h = float(img_item.height())   # second axis extent
+        img_w = float(img_item.width())    # col-major: first axis
+        img_h = float(img_item.height())   # col-major: second axis
         if img_w < 1 or img_h < 1:
             return None
 
-        # Sort and clamp to image bounds → fractions [0..1]
-        fx0 = max(0.0, min(1.0, min(d0.x(), d1.x()) / img_w))
-        fx1 = max(0.0, min(1.0, max(d0.x(), d1.x()) / img_w))
-        fy0 = max(0.0, min(1.0, min(d0.y(), d1.y()) / img_h))
-        fy1 = max(0.0, min(1.0, max(d0.y(), d1.y()) / img_h))
+        # sort & clamp to displayed image bounds
+        px0 = max(0.0, min(img_w, min(d0.x(), d1.x())))
+        px1 = max(0.0, min(img_w, max(d0.x(), d1.x())))
+        py0 = max(0.0, min(img_h, min(d0.y(), d1.y())))
+        py1 = max(0.0, min(img_h, max(d0.y(), d1.y())))
 
-        # ── Undo pystream display transforms ─────────────────────────────
-        # pystream applies: transpose(swapaxes 0,1) → flip_h([:, ::-1]) → flip_v([::-1, :])
-        # col-major: first axis → x on screen, second axis → y on screen
+        # ── undo pystream display transforms ─────────────────────────────
+        # pystream: transpose(swapaxes 0,1) → flip_h([:, ::-1]) → flip_v([::-1, :])
+        # col-major: first axis = x on screen, second axis = y on screen
         viewer    = self.parent()
         flip_h    = getattr(viewer, 'flip_h',        False)
         flip_v    = getattr(viewer, 'flip_v',        False)
         do_transp = getattr(viewer, 'transpose_img', False)
 
-        # flip_v reverses first axis (x in col-major display)
+        # undo flip_v  (reverses first axis → x in col-major)
         if flip_v:
-            fx0, fx1 = 1.0 - fx1, 1.0 - fx0
-        # flip_h reverses second axis (y in col-major display)
+            px0, px1 = img_w - px1, img_w - px0
+        # undo flip_h  (reverses second axis → y in col-major)
         if flip_h:
-            fy0, fy1 = 1.0 - fy1, 1.0 - fy0
+            py0, py1 = img_h - py1, img_h - py0
 
-        # Map display axes → sensor axes
+        # ── map to sensor axes ───────────────────────────────────────────
+        # With transpose: first axis = sensor cols,  second = sensor rows
+        # Without:        first axis = sensor rows,  second = sensor cols
         if do_transp:
-            # after transpose: first axis = sensor cols, second = sensor rows
-            col_f0, col_f1 = fx0, fx1
-            row_f0, row_f1 = fy0, fy1
+            sx, sx1 = int(px0), int(px1)     # sensor columns
+            sy, sy1 = int(py0), int(py1)     # sensor rows
         else:
-            # no transpose: first axis = sensor rows, second = sensor cols
-            col_f0, col_f1 = fy0, fy1
-            row_f0, row_f1 = fx0, fx1
+            sx, sx1 = int(py0), int(py1)     # sensor columns ← from y
+            sy, sy1 = int(px0), int(px1)     # sensor rows    ← from x
 
-        # ── Account for existing crop offset ─────────────────────────────
-        # The displayed image may already be a cropped sub-region of the sensor.
-        # Fractions are relative to the VISIBLE region, not the full sensor.
-        crop_prefix = self.crop_prefix_input.text()
-        cur_left   = int(float(self._get_pv_value(f"{crop_prefix}:CropLeft")   or 0))
-        cur_right  = int(float(self._get_pv_value(f"{crop_prefix}:CropRight")  or 0))
-        cur_top    = int(float(self._get_pv_value(f"{crop_prefix}:CropTop")    or 0))
-        cur_bottom = int(float(self._get_pv_value(f"{crop_prefix}:CropBottom") or 0))
-
-        vis_w = sensor_w - cur_left - cur_right
-        vis_h = sensor_h - cur_top  - cur_bottom
-
-        sx  = cur_left + int(col_f0 * vis_w)
-        sx1 = cur_left + int(col_f1 * vis_w)
-        sy  = cur_top  + int(row_f0 * vis_h)
-        sy1 = cur_top  + int(row_f1 * vis_h)
         return sx, sy, sx1, sy1
 
     def _on_roi_changed(self):
@@ -609,8 +586,15 @@ class DetectorControlDialog(QtWidgets.QDialog):
             sx, sy, sx1, sy1 = result
             sw = max(1, sx1 - sx)
             sh = max(1, sy1 - sy)
+            sensor_w = self._max_sizex or 0
+            sensor_h = self._max_sizey or 0
+            cl = sx
+            cr = max(0, sensor_w - sx1)
+            ct = sy
+            cb = max(0, sensor_h - sy1)
             self.roi_info_label.setText(
-                f"ROI  x={sx}  y={sy}  w={sw}  h={sh}  (sensor px)")
+                f"Crop L={cl} R={cr} T={ct} B={cb}  "
+                f"(ROI {sw}×{sh})")
             return
         pos  = self.roi.pos()
         size = self.roi.size()
@@ -640,26 +624,22 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
         sx, sy, sx1, sy1 = result
 
-        # Vertical flip checkbox: tick if sensor hardware row 0 is at bottom
+        # Vertical flip checkbox
         if self.vertical_flip_check.isChecked():
             sy, sy1 = sensor_h - sy1, sensor_h - sy
 
-        # Crop = pixels removed from each border
+        # Crop = distance from each border to the ROI edge
         crop_left   = max(0, sx)
         crop_right  = max(0, sensor_w - sx1)
         crop_top    = max(0, sy)
         crop_bottom = max(0, sensor_h - sy1)
 
-        sw = max(1, sx1 - sx)
-        sh = max(1, sy1 - sy)
+        sw = sx1 - sx
+        sh = sy1 - sy
 
         self._log_message(
-            f"Sensor ROI: x={sx} y={sy} w={sw} h={sh} "
-            f"(sensor {sensor_w}×{sensor_h})"
-        )
-        self._log_message(
             f"Crop: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}  "
-            f"sum_h={crop_left + sw + crop_right}  sum_v={crop_top + sh + crop_bottom}"
+            f"ROI {sw}×{sh}  sensor {sensor_w}×{sensor_h}"
         )
 
         crop_prefix = self.crop_prefix_input.text()
