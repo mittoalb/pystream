@@ -521,8 +521,28 @@ class DetectorControlDialog(QtWidgets.QDialog):
     def _on_roi_changed(self):
         if self.roi is None:
             return
-        # Show info in scene coords (same as what was drawn — user can relate
-        # this to what they see on screen).
+        # Convert scene coords → image pixel coords for the label so the
+        # user sees values that correspond to actual detector pixels.
+        p = self.parent()
+        if p and hasattr(p, 'image_view'):
+            img_item = p.image_view.getImageItem()
+            if img_item is not None and img_item.image is not None:
+                pos  = self.roi.pos()
+                size = self.roi.size()
+                sc_tl = QtCore.QPointF(pos[0],           pos[1])
+                sc_br = QtCore.QPointF(pos[0] + size[0], pos[1] + size[1])
+                pt   = img_item.mapFromScene(sc_tl)
+                pb   = img_item.mapFromScene(sc_br)
+                img_h, img_w = img_item.image.shape[:2]
+                col_min = int(max(0,     min(pt.x(), pb.x())))
+                row_min = int(max(0,     min(pt.y(), pb.y())))
+                col_max = int(min(img_w, max(pt.x(), pb.x())))
+                row_max = int(min(img_h, max(pt.y(), pb.y())))
+                self.roi_info_label.setText(
+                    f"ROI  x={col_min}  y={row_min}  "
+                    f"w={col_max-col_min}  h={row_max-row_min}  "
+                    f"(px)")
+                return
         pos  = self.roi.pos()
         size = self.roi.size()
         self.roi_info_label.setText(
@@ -550,29 +570,42 @@ class DetectorControlDialog(QtWidgets.QDialog):
         image = img_item.image
         img_h, img_w = image.shape[:2]
 
-        try:
-            roi_slice, _ = self.roi.getArraySlice(image, img_item)
-            row_sl = roi_slice[0]
-            col_sl = roi_slice[1]
-            x = max(0, col_sl.start or 0)
-            y = max(0, row_sl.start or 0)
-            w = max(1, (col_sl.stop or img_w) - x)
-            h = max(1, (row_sl.stop or img_h) - y)
-        except Exception as e:
-            self._log_message(f"getArraySlice failed: {e}")
-            return
+        # Map the ROI's scene-space corners directly through the image item
+        # transform.  This is the only reliable way when the ROI lives in the
+        # scene (no parent item) — getArraySlice assumes the ROI is a child of
+        # the image item, so it gives wrong results here.
+        pos  = self.roi.pos()
+        size = self.roi.size()
+        sc_tl = QtCore.QPointF(pos[0],           pos[1])
+        sc_tr = QtCore.QPointF(pos[0] + size[0], pos[1])
+        sc_bl = QtCore.QPointF(pos[0],           pos[1] + size[1])
+        sc_br = QtCore.QPointF(pos[0] + size[0], pos[1] + size[1])
 
-        # Apply vertical flip if the image is displayed flipped
+        pts = [img_item.mapFromScene(p) for p in (sc_tl, sc_tr, sc_bl, sc_br)]
+        xs  = [p.x() for p in pts]
+        ys  = [p.y() for p in pts]
+
+        col_min = int(max(0,      min(xs)))
+        col_max = int(min(img_w,  max(xs)))
+        row_min = int(max(0,      min(ys)))
+        row_max = int(min(img_h,  max(ys)))
+
+        x = col_min
+        y = row_min
+        w = max(1, col_max - col_min)
+        h = max(1, row_max - row_min)
+
+        # Vertical flip: physical detector y=0 is at the top but pyqtgraph
+        # may display the image with y=0 at the bottom.  Tick the checkbox
+        # if the drawn ROI top corresponds to the detector's bottom edge.
         if self.vertical_flip_check.isChecked():
-            y_flipped = img_h - (y + h)
-            crop_top    = y_flipped
-            crop_bottom = img_h - (y_flipped + h)
-        else:
-            crop_top    = y
-            crop_bottom = img_h - (y + h)
+            y = img_h - row_max
+            h = max(1, row_max - row_min)
 
-        crop_left  = x
-        crop_right = img_w - (x + w)
+        crop_left   = x
+        crop_right  = img_w - (x + w)
+        crop_top    = y
+        crop_bottom = img_h - (y + h)
 
         crop_prefix = self.crop_prefix_input.text()
         success = True
