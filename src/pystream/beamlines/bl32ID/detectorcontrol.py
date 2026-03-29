@@ -321,146 +321,237 @@ class DetectorControlDialog(QtWidgets.QDialog):
             )
             self._log_message(f"Read Crop: Left={crop_left}, Right={crop_right}, Top={crop_top}, Bottom={crop_bottom}")
 
-    def _toggle_roi(self, checked: bool):
-        """Toggle ROI drawing on the image."""
-        self.roi_enabled = checked
+    # ── ROI drawing helpers (same pattern as plugins/roi.py) ─────────────
 
+    def _gv(self):
+        p = self.parent()
+        if p and hasattr(p, 'image_view'):
+            return p.image_view.ui.graphicsView
+        return None
+
+    def _sc(self):
+        gv = self._gv()
+        return gv.scene() if gv else None
+
+    def _install_filter(self):
+        gv = self._gv()
+        if gv and not hasattr(self, '_vp_filter'):
+            self._vp_filter = _DetectorRoiFilter(self)
+            gv.viewport().installEventFilter(self._vp_filter)
+
+    def _uninstall_filter(self):
+        gv = self._gv()
+        if gv and hasattr(self, '_vp_filter'):
+            gv.viewport().removeEventFilter(self._vp_filter)
+            del self._vp_filter
+
+    def _set_crosshair(self, on: bool):
+        gv = self._gv()
+        if gv:
+            gv.viewport().setCursor(
+                QtCore.Qt.CrossCursor if on else QtCore.Qt.ArrowCursor)
+
+    # ── toggle ────────────────────────────────────────────────────────────
+
+    def _toggle_roi(self, checked: bool):
+        self.roi_enabled = checked
         if checked:
             self.roi_toggle_btn.setText("Disable ROI Drawing")
-            self._create_or_show_roi()
             self.roi_reset_btn.setEnabled(True)
             self.apply_roi_btn.setEnabled(True)
-            self._log_message("ROI drawing enabled")
+            self._roi_state = 'idle'
+            self._roi_press_scene = None
+            self._roi_preview = None
+            self._install_filter()
+            self._set_crosshair(True)
+            self._log_message("ROI: click and drag to draw")
         else:
             self.roi_toggle_btn.setText("Enable ROI Drawing")
-            if self.roi:
-                self.roi.setVisible(False)
+            self._roi_erase()
+            self._uninstall_filter()
+            self._set_crosshair(False)
             self.roi_reset_btn.setEnabled(False)
             self.apply_roi_btn.setEnabled(False)
             self._log_message("ROI drawing disabled")
 
-    def _get_scene(self):
-        parent_viewer = self.parent()
-        if parent_viewer and hasattr(parent_viewer, 'image_view'):
-            return parent_viewer.image_view.ui.graphicsView.scene()
-        return None
+    # ── mouse events (called by _DetectorRoiFilter) ───────────────────────
 
-    def _create_or_show_roi(self):
-        """Create or show the ROI on the image."""
-        parent_viewer = self.parent()
-        if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
-            self._log_message("Error: Cannot access image view")
+    def _roi_on_press(self, vp_pos) -> bool:
+        if not self.roi_enabled or getattr(self, '_roi_state', 'idle') != 'idle':
+            return False
+        gv = self._gv()
+        sc = self._sc()
+        if gv is None or sc is None:
+            return False
+        sp = gv.mapToScene(vp_pos)
+        self._roi_press_scene = sp
+        pen = pg.mkPen('r', width=2)
+        pen.setCosmetic(True)
+        self._roi_preview = QtWidgets.QGraphicsRectItem(sp.x(), sp.y(), 0, 0)
+        self._roi_preview.setPen(pen)
+        self._roi_preview.setZValue(1000)
+        sc.addItem(self._roi_preview)
+        self._roi_state = 'placing'
+        return True
+
+    def _roi_on_move(self, vp_pos) -> bool:
+        if getattr(self, '_roi_state', 'idle') != 'placing' or self._roi_preview is None:
+            return False
+        gv = self._gv()
+        if gv is None:
+            return False
+        sp = gv.mapToScene(vp_pos)
+        p0 = self._roi_press_scene
+        x = min(p0.x(), sp.x())
+        y = min(p0.y(), sp.y())
+        w = max(1.0, abs(sp.x() - p0.x()))
+        h = max(1.0, abs(sp.y() - p0.y()))
+        self._roi_preview.setRect(x, y, w, h)
+        return True
+
+    def _roi_on_release(self, vp_pos) -> bool:
+        if getattr(self, '_roi_state', 'idle') != 'placing':
+            return False
+        gv = self._gv()
+        sc = self._sc()
+        if gv is None:
+            return False
+        sp = gv.mapToScene(vp_pos)
+
+        # remove preview
+        if sc and self._roi_preview:
+            sc.removeItem(self._roi_preview)
+        self._roi_preview = None
+
+        p0 = self._roi_press_scene
+        x = min(p0.x(), sp.x())
+        y = min(p0.y(), sp.y())
+        w = max(1.0, abs(sp.x() - p0.x()))
+        h = max(1.0, abs(sp.y() - p0.y()))
+
+        self._roi_build(x, y, w, h)
+        self._roi_state = 'placed'
+        self._set_crosshair(False)
+        return True
+
+    # ── build / erase ROI ─────────────────────────────────────────────────
+
+    def _roi_erase(self):
+        sc = self._sc()
+        if self.roi is not None:
+            try:
+                self.roi.sigRegionChanged.disconnect(self._on_roi_changed)
+            except Exception:
+                pass
+            if sc:
+                try:
+                    sc.removeItem(self.roi)
+                except Exception:
+                    pass
+            self.roi = None
+        if getattr(self, '_roi_preview', None) is not None and sc:
+            try:
+                sc.removeItem(self._roi_preview)
+            except Exception:
+                pass
+            self._roi_preview = None
+
+    def _roi_build(self, x, y, w, h):
+        sc = self._sc()
+        if sc is None:
             return
+        self._roi_erase()
 
-        image_view = parent_viewer.image_view
+        pen       = pg.mkPen('r', width=2)
+        hover_pen = pg.mkPen((255, 100, 100), width=3)
+        self.roi = pg.RectROI([0, 0], [w, h],
+                              pen=pen, hoverPen=hover_pen,
+                              movable=True, resizable=True, removable=False)
+        self.roi.setZValue(1000)
+        sc.addItem(self.roi)
+        self.roi.setPos(x, y)
 
-        if self.roi is None:
-            image_item = image_view.getImageItem()
-            if image_item is None or image_item.image is None:
-                self._log_message("Error: No image available")
-                return
+        # 4 corners + 4 edges
+        self.roi.addScaleHandle([1, 1], [0, 0])
+        self.roi.addScaleHandle([0, 0], [1, 1])
+        self.roi.addScaleHandle([1, 0], [0, 1])
+        self.roi.addScaleHandle([0, 1], [1, 0])
+        self.roi.addScaleHandle([0.5, 0],   [0.5, 1])
+        self.roi.addScaleHandle([0.5, 1],   [0.5, 0])
+        self.roi.addScaleHandle([0,   0.5], [1,   0.5])
+        self.roi.addScaleHandle([1,   0.5], [0,   0.5])
 
-            sc = image_view.ui.graphicsView.scene()
-            if sc is None:
-                return
+        self.roi.sigRegionChanged.connect(self._on_roi_changed)
+        self.roi.setVisible(True)
+        self._on_roi_changed()
+        self._log_message(f"ROI placed at scene ({x:.0f},{y:.0f}) size ({w:.0f}×{h:.0f})")
 
-            image = image_item.image
-            h, w = image.shape[:2]
-            rw = max(10, w // 2)
-            rh = max(10, h // 2)
-            rx = (w - rw) // 2
-            ry = (h - rh) // 2
-
-            # Convert image-pixel coords to scene coords so the ROI
-            # appears at the correct position regardless of y-axis orientation.
-            p_tl = image_item.mapToScene(QtCore.QPointF(rx, ry))
-            p_br = image_item.mapToScene(QtCore.QPointF(rx + rw, ry + rh))
-            sx = min(p_tl.x(), p_br.x())
-            sy = min(p_tl.y(), p_br.y())
-            sw = abs(p_br.x() - p_tl.x())
-            sh = abs(p_br.y() - p_tl.y())
-
-            self.roi = pg.ROI([0, 0], [sw, sh], pen='r')
-            self.roi.addScaleHandle([1, 1], [0, 0])
-            self.roi.addScaleHandle([0, 0], [1, 1])
-            self.roi.addScaleHandle([1, 0], [0, 1])
-            self.roi.addScaleHandle([0, 1], [1, 0])
-            self.roi.setZValue(1000)
-            sc.addItem(self.roi)
-            self.roi.setPos(sx, sy)
-            self.roi.sigRegionChanged.connect(self._on_roi_changed)
-            self._log_message(f"ROI created at image ({rx},{ry}) size ({rw},{rh})")
-        else:
-            self.roi.setVisible(True)
+    # ── reset ────────────────────────────────────────────────────────────
 
     def _reset_roi(self):
-        """Reset ROI to center of image."""
-        parent_viewer = self.parent()
-        if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
+        p = self.parent()
+        if not p or not hasattr(p, 'image_view'):
             return
+        iv  = p.image_view
+        img = iv.getImageItem()
+        if img is None or img.image is None:
+            return
+        gv  = iv.ui.graphicsView
+        sc  = gv.scene()
+        if sc is None:
+            return
+        h, w = img.image.shape[:2]
+        rw = max(10, w // 2)
+        rh = max(10, h // 2)
+        rx = (w - rw) // 2
+        ry = (h - rh) // 2
+        # map image pixels → scene coords, exactly as plugins/roi.py does
+        p1 = img.mapToScene(QtCore.QPointF(rx, ry))
+        p2 = img.mapToScene(QtCore.QPointF(rx + rw, ry + rh))
+        sx = min(p1.x(), p2.x())
+        sy = min(p1.y(), p2.y())
+        sw = abs(p2.x() - p1.x())
+        sh = abs(p2.y() - p1.y())
+        self._roi_build(sx, sy, sw, sh)
+        self._roi_state = 'placed'
+        self._set_crosshair(False)
 
-        image_view = parent_viewer.image_view
-        image_item = image_view.getImageItem()
-        if image_item is not None and image_item.image is not None and self.roi:
-            image = image_item.image
-            h, w = image.shape[:2]
-            rw = max(10, w // 2)
-            rh = max(10, h // 2)
-            rx = (w - rw) // 2
-            ry = (h - rh) // 2
-
-            p_tl = image_item.mapToScene(QtCore.QPointF(rx, ry))
-            p_br = image_item.mapToScene(QtCore.QPointF(rx + rw, ry + rh))
-            sx = min(p_tl.x(), p_br.x())
-            sy = min(p_tl.y(), p_br.y())
-            sw = abs(p_br.x() - p_tl.x())
-            sh = abs(p_br.y() - p_tl.y())
-
-            self.roi.setPos([sx, sy])
-            self.roi.setSize([sw, sh])
-            self._log_message(f"ROI reset to image ({rx},{ry}) size ({rw},{rh})")
+    # ── ROI changed callback ──────────────────────────────────────────────
 
     def _on_roi_changed(self):
-        """Called when ROI is moved or resized."""
-        if self.roi:
-            pos = self.roi.pos()
-            size = self.roi.size()
-            x, y = int(pos[0]), int(pos[1])
-            w, h = int(size[0]), int(size[1])
-            self.roi_info_label.setText(
-                f"ROI Position: ({x}, {y}), Size: {w}×{h}"
-            )
+        if self.roi is None:
+            return
+        # Show info in scene coords (same as what was drawn — user can relate
+        # this to what they see on screen).
+        pos  = self.roi.pos()
+        size = self.roi.size()
+        self.roi_info_label.setText(
+            f"ROI  pos ({pos[0]:.0f}, {pos[1]:.0f})  size {size[0]:.0f}×{size[1]:.0f}")
+
+    # ── apply ROI to PVs ─────────────────────────────────────────────────
 
     def _apply_roi(self):
-        """Apply the drawn ROI to crop PVs."""
         if not self.roi:
-            QtWidgets.QMessageBox.warning(
-                self, "No ROI",
-                "Please enable and draw an ROI first."
-            )
+            QtWidgets.QMessageBox.warning(self, "No ROI",
+                "Please draw an ROI first.")
             return
 
-        # Get image and convert ROI (scene coords) → image pixel coords
-        # via getArraySlice, which handles all coordinate transforms correctly.
-        parent_viewer = self.parent()
-        if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
-            QtWidgets.QMessageBox.warning(self, "Error",
-                "Cannot access image view.")
+        p = self.parent()
+        if not p or not hasattr(p, 'image_view'):
+            QtWidgets.QMessageBox.warning(self, "Error", "Cannot access image view.")
             return
 
-        image_view = parent_viewer.image_view
-        image_item = image_view.getImageItem()
-        if image_item is None or image_item.image is None:
-            QtWidgets.QMessageBox.warning(self, "Error",
-                "No image available.")
+        iv       = p.image_view
+        img_item = iv.getImageItem()
+        if img_item is None or img_item.image is None:
+            QtWidgets.QMessageBox.warning(self, "Error", "No image available.")
             return
 
-        image = image_item.image
+        image = img_item.image
         img_h, img_w = image.shape[:2]
 
         try:
-            roi_slice, _ = self.roi.getArraySlice(image, image_item)
-            # roi_slice[0] = row (y) slice, roi_slice[1] = col (x) slice
+            roi_slice, _ = self.roi.getArraySlice(image, img_item)
             row_sl = roi_slice[0]
             col_sl = roi_slice[1]
             x = max(0, col_sl.start or 0)
@@ -471,97 +562,92 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self._log_message(f"getArraySlice failed: {e}")
             return
 
-        crop_left   = x
-        crop_right  = img_w - (x + w)
-        crop_top    = y
-        crop_bottom = img_h - (y + h)
+        # Apply vertical flip if the image is displayed flipped
+        if self.vertical_flip_check.isChecked():
+            y_flipped = img_h - (y + h)
+            crop_top    = y_flipped
+            crop_bottom = img_h - (y_flipped + h)
+        else:
+            crop_top    = y
+            crop_bottom = img_h - (y + h)
 
-        # Apply to crop PVs
+        crop_left  = x
+        crop_right = img_w - (x + w)
+
         crop_prefix = self.crop_prefix_input.text()
         success = True
+        for pv, val in [
+            (f"{crop_prefix}:CropLeft",   crop_left),
+            (f"{crop_prefix}:CropRight",  crop_right),
+            (f"{crop_prefix}:CropTop",    crop_top),
+            (f"{crop_prefix}:CropBottom", crop_bottom),
+        ]:
+            if not self._set_pv_value(pv, val):
+                success = False
 
-        if not self._set_pv_value(f"{crop_prefix}:CropLeft", crop_left):
-            success = False
-        if not self._set_pv_value(f"{crop_prefix}:CropRight", crop_right):
-            success = False
-        if not self._set_pv_value(f"{crop_prefix}:CropTop", crop_top):
-            success = False
-        if not self._set_pv_value(f"{crop_prefix}:CropBottom", crop_bottom):
-            success = False
-
-        # Apply the crop
         if success:
             if not self._set_pv_value(f"{crop_prefix}:Crop", 1):
                 success = False
 
         if success:
             self._log_message(
-                f"Applied ROI: Left={crop_left}, Right={crop_right}, "
-                f"Top={crop_top}, Bottom={crop_bottom}"
-            )
+                f"Applied ROI: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}")
             QtWidgets.QMessageBox.information(
                 self, "Success",
-                f"ROI applied to detector:\n"
-                f"CropLeft={crop_left}, CropRight={crop_right}\n"
-                f"CropTop={crop_top}, CropBottom={crop_bottom}\n"
-                f"ROI region: ({x},{y}) size {w}×{h}"
-            )
+                f"ROI applied:\n"
+                f"CropLeft={crop_left}  CropRight={crop_right}\n"
+                f"CropTop={crop_top}  CropBottom={crop_bottom}\n"
+                f"(image region: x={x} y={y} w={w} h={h})")
         else:
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "Failed to apply ROI. Check log for details."
-            )
+            QtWidgets.QMessageBox.warning(self, "Error",
+                "Failed to apply ROI. Check log for details.")
+
+    # ── remove ROI (full frame) ───────────────────────────────────────────
 
     def _remove_roi(self):
-        """Remove ROI from detector (reset to full frame)."""
-        prefix = self.pv_prefix_input.text()
-
-        # Get the full detector size
+        prefix   = self.pv_prefix_input.text()
         max_sizex = self._get_pv_value(f"{prefix}:MaxSizeX_RBV")
         max_sizey = self._get_pv_value(f"{prefix}:MaxSizeY_RBV")
-
         if not max_sizex or not max_sizey:
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "Could not read detector maximum size.\n"
-                "Make sure the PV prefix is correct."
-            )
+            QtWidgets.QMessageBox.warning(self, "Error",
+                "Could not read detector maximum size.")
             return
-
-        # Set ROI to full frame: MinX=0, MinY=0, SizeX=Max, SizeY=Max
-        success = True
-        if not self._set_pv_value(f"{prefix}:MinX", 0):
-            success = False
-        if not self._set_pv_value(f"{prefix}:MinY", 0):
-            success = False
-        if not self._set_pv_value(f"{prefix}:SizeX", max_sizex):
-            success = False
-        if not self._set_pv_value(f"{prefix}:SizeY", max_sizey):
-            success = False
-
+        success = all([
+            self._set_pv_value(f"{prefix}:MinX", 0),
+            self._set_pv_value(f"{prefix}:MinY", 0),
+            self._set_pv_value(f"{prefix}:SizeX", max_sizex),
+            self._set_pv_value(f"{prefix}:SizeY", max_sizey),
+        ])
         if success:
-            self._log_message(f"Removed ROI: Reset to full frame {max_sizex}×{max_sizey}")
-            QtWidgets.QMessageBox.information(
-                self, "Success",
-                f"ROI removed. Detector reset to full frame:\n"
-                f"{max_sizex}×{max_sizey}"
-            )
-            # Update the display
+            self._log_message(f"Reset to full frame {max_sizex}×{max_sizey}")
+            QtWidgets.QMessageBox.information(self, "Success",
+                f"Detector reset to full frame {max_sizex}×{max_sizey}")
             self._read_roi()
         else:
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "Failed to remove ROI. Check log for details."
-            )
+            QtWidgets.QMessageBox.warning(self, "Error",
+                "Failed to remove ROI. Check log for details.")
 
     def closeEvent(self, event):
-        """Handle dialog close event."""
-        if self.roi:
-            sc = self._get_scene()
-            if sc:
-                try:
-                    sc.removeItem(self.roi)
-                except Exception:
-                    pass
-            self.roi = None
+        self._roi_erase()
+        self._uninstall_filter()
         event.accept()
+
+
+class _DetectorRoiFilter(QtCore.QObject):
+    """Viewport event filter — same pattern as plugins/roi.py _RoiVpFilter."""
+
+    def __init__(self, dlg: DetectorControlDialog):
+        super().__init__()
+        self.dlg = dlg
+
+    def eventFilter(self, _obj, event):
+        t = event.type()
+        if t == QtCore.QEvent.MouseButtonPress:
+            if event.button() == QtCore.Qt.LeftButton:
+                return self.dlg._roi_on_press(event.pos())
+        elif t == QtCore.QEvent.MouseMove:
+            return self.dlg._roi_on_move(event.pos())
+        elif t == QtCore.QEvent.MouseButtonRelease:
+            if event.button() == QtCore.Qt.LeftButton:
+                return self.dlg._roi_on_release(event.pos())
+        return False
