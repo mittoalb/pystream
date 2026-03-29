@@ -557,7 +557,6 @@ class DetectorControlDialog(QtWidgets.QDialog):
         viewer    = self.parent()
         flip_h    = getattr(viewer, 'flip_h',        False)
         flip_v    = getattr(viewer, 'flip_v',        False)
-        do_transp = getattr(viewer, 'transpose_img', False)
 
         # undo flip_v  (reverses first axis → x in col-major)
         if flip_v:
@@ -566,19 +565,26 @@ class DetectorControlDialog(QtWidgets.QDialog):
         if flip_h:
             py0, py1 = img_h - py1, img_h - py0
 
-        # ── map to sensor axes ───────────────────────────────────────────
-        # With transpose: first axis = sensor cols,  second = sensor rows
-        # Without:        first axis = sensor rows,  second = sensor cols
-        if do_transp:
-            sx, sx1 = int(px0), int(px1)     # sensor columns
-            sy, sy1 = int(py0), int(py1)     # sensor rows
-            total_w = int(img_w)             # sensor width  = first axis
-            total_h = int(img_h)             # sensor height = second axis
+        # ── map display axes to sensor CropLeft/Right (sensor_w) and
+        #    CropTop/Bottom (sensor_h) ────────────────────────────────────
+        # Determine which display axis matches _max_sizex (sensor width).
+        # This auto-detects the orientation regardless of transpose state.
+        sensor_w = self._max_sizex or 0
+        sensor_h = self._max_sizey or 0
+        x_matches_w = abs(img_w - sensor_w) <= abs(img_h - sensor_w)
+
+        if x_matches_w:
+            # display x-axis = sensor width direction
+            sx, sx1 = int(px0), int(px1)
+            sy, sy1 = int(py0), int(py1)
+            total_w = int(img_w)
+            total_h = int(img_h)
         else:
-            sx, sx1 = int(py0), int(py1)     # sensor columns ← from y
-            sy, sy1 = int(px0), int(px1)     # sensor rows    ← from x
-            total_w = int(img_h)             # sensor width  = second axis
-            total_h = int(img_w)             # sensor height = first axis
+            # display y-axis = sensor width direction
+            sx, sx1 = int(py0), int(py1)
+            sy, sy1 = int(px0), int(px1)
+            total_w = int(img_h)
+            total_h = int(img_w)
 
         return sx, sy, sx1, sy1, total_w, total_h
 
