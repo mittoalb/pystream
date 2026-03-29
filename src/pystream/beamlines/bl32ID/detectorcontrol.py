@@ -575,13 +575,13 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
         if x_matches_w:
             # display x-axis = sensor width direction
-            sx, sx1 = int(px0), int(px1)
+            sx, sx1 = int(img_w - px1), int(img_w - px0)
             sy, sy1 = int(py0), int(py1)
             total_w = int(img_w)
             total_h = int(img_h)
         else:
             # display y-axis = sensor width direction
-            sx, sx1 = int(py0), int(py1)
+            sx, sx1 = int(img_h - py1), int(img_h - py0)
             sy, sy1 = int(px0), int(px1)
             total_w = int(img_h)
             total_h = int(img_w)
