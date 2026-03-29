@@ -568,44 +568,87 @@ class DetectorControlDialog(QtWidgets.QDialog):
             return
 
         image = img_item.image
-        img_h, img_w = image.shape[:2]
+        # image is the *displayed* array (after flip/transpose/bin applied by pystream)
+        disp_h, disp_w = image.shape[:2]
 
-        # Map the ROI's scene-space corners directly through the image item
-        # transform.  This is the only reliable way when the ROI lives in the
-        # scene (no parent item) — getArraySlice assumes the ROI is a child of
-        # the image item, so it gives wrong results here.
+        # ── Step 1: scene → display-pixel coords ─────────────────────────
+        # pg.ImageView with default axis order maps arr[row, col] with rows
+        # going UP the Y axis, so mapFromScene gives (col, disp_h-1-row).
         pos  = self.roi.pos()
         size = self.roi.size()
-        sc_tl = QtCore.QPointF(pos[0],           pos[1])
-        sc_tr = QtCore.QPointF(pos[0] + size[0], pos[1])
-        sc_bl = QtCore.QPointF(pos[0],           pos[1] + size[1])
-        sc_br = QtCore.QPointF(pos[0] + size[0], pos[1] + size[1])
+        corners_scene = [
+            QtCore.QPointF(pos[0],           pos[1]),
+            QtCore.QPointF(pos[0] + size[0], pos[1]),
+            QtCore.QPointF(pos[0],           pos[1] + size[1]),
+            QtCore.QPointF(pos[0] + size[0], pos[1] + size[1]),
+        ]
+        corners_item = [img_item.mapFromScene(p) for p in corners_scene]
+        # item X = display col, item Y = (disp_h - 1 - display_row)  [y-flipped]
+        cols = [p.x()                   for p in corners_item]
+        rows = [disp_h - 1.0 - p.y()   for p in corners_item]
 
-        pts = [img_item.mapFromScene(p) for p in (sc_tl, sc_tr, sc_bl, sc_br)]
-        xs  = [p.x() for p in pts]
-        ys  = [p.y() for p in pts]
+        dc0 = int(max(0,      min(cols)))
+        dc1 = int(min(disp_w, max(cols)))
+        dr0 = int(max(0,      min(rows)))
+        dr1 = int(min(disp_h, max(rows)))
+        # dc0..dc1, dr0..dr1 are display-array pixel indices
 
-        col_min = int(max(0,      min(xs)))
-        col_max = int(min(img_w,  max(xs)))
-        row_min = int(max(0,      min(ys)))
-        row_max = int(min(img_h,  max(ys)))
+        # ── Step 2: undo display transforms to get raw sensor coords ─────
+        # Read the current view transforms from the parent viewer.
+        viewer = self.parent()
+        flip_h     = getattr(viewer, 'flip_h',        False)
+        flip_v     = getattr(viewer, 'flip_v',        False)
+        transpose  = getattr(viewer, 'transpose_img', False)
+        disp_bin   = getattr(viewer, 'display_bin',   1)
+        if disp_bin < 1:
+            disp_bin = 1
 
-        x = col_min
-        y = row_min
-        w = max(1, col_max - col_min)
-        h = max(1, row_max - row_min)
+        # Scale back up from display-binned pixels to full-res display pixels
+        dc0 *= disp_bin
+        dc1 *= disp_bin
+        dr0 *= disp_bin
+        dr1 *= disp_bin
 
-        # Vertical flip: physical detector y=0 is at the top but pyqtgraph
-        # may display the image with y=0 at the bottom.  Tick the checkbox
-        # if the drawn ROI top corresponds to the detector's bottom edge.
+        # Undo display transforms (applied as transpose→flip_h→flip_v, so
+        # reverse order: undo flip_v → undo flip_h → undo transpose)
+        if flip_v:
+            disp_h_full = disp_h * disp_bin
+            dr0, dr1 = disp_h_full - dr1, disp_h_full - dr0
+
+        if flip_h:
+            disp_w_full = disp_w * disp_bin
+            dc0, dc1 = disp_w_full - dc1, disp_w_full - dc0
+
+        if transpose:
+            dc0, dc1, dr0, dr1 = dr0, dr1, dc0, dc1
+
+        x = max(0, dc0)
+        y = max(0, dr0)
+        w = max(1, dc1 - dc0)
+        h = max(1, dr1 - dr0)
+
+        # ── Step 3: sensor may have y=0 at bottom (hardware convention) ──
+        # Tick "Vertical Flip" in the detector dialog if the sensor's row 0
+        # is at the physical bottom of the image (common for CCD cameras).
         if self.vertical_flip_check.isChecked():
-            y = img_h - row_max
-            h = max(1, row_max - row_min)
+            # need raw sensor height — use stored max size if available
+            sensor_h = self._max_sizey if self._max_sizey else (disp_h * disp_bin)
+            y = sensor_h - (y + h)
 
         crop_left   = x
-        crop_right  = img_w - (x + w)
+        crop_right  = (self._max_sizex or disp_w * disp_bin) - (x + w)
         crop_top    = y
-        crop_bottom = img_h - (y + h)
+        crop_bottom = (self._max_sizey or disp_h * disp_bin) - (y + h)
+
+        # Diagnostic log — helps verify coordinate mapping is correct
+        self._log_message(
+            f"ROI px: x={x} y={y} w={w} h={h} "
+            f"(disp {disp_w}×{disp_h} bin={disp_bin} "
+            f"flip_h={flip_h} flip_v={flip_v} T={transpose})"
+        )
+        self._log_message(
+            f"Crop: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}"
+        )
 
         crop_prefix = self.crop_prefix_input.text()
         success = True
