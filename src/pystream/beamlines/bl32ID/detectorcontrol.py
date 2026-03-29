@@ -521,27 +521,29 @@ class DetectorControlDialog(QtWidgets.QDialog):
     def _on_roi_changed(self):
         if self.roi is None:
             return
-        # Convert scene coords → image pixel coords for the label so the
-        # user sees values that correspond to actual detector pixels.
         p = self.parent()
         if p and hasattr(p, 'image_view'):
-            img_item = p.image_view.getImageItem()
+            iv       = p.image_view
+            img_item = iv.getImageItem()
             if img_item is not None and img_item.image is not None:
+                disp_h, disp_w = img_item.image.shape[:2]
+                sensor_w = self._max_sizex or disp_w
+                sensor_h = self._max_sizey or disp_h
+                view = iv.getView()
                 pos  = self.roi.pos()
                 size = self.roi.size()
-                sc_tl = QtCore.QPointF(pos[0],           pos[1])
-                sc_br = QtCore.QPointF(pos[0] + size[0], pos[1] + size[1])
-                pt   = img_item.mapFromScene(sc_tl)
-                pb   = img_item.mapFromScene(sc_br)
-                img_h, img_w = img_item.image.shape[:2]
-                col_min = int(max(0,     min(pt.x(), pb.x())))
-                row_min = int(max(0,     min(pt.y(), pb.y())))
-                col_max = int(min(img_w, max(pt.x(), pb.x())))
-                row_max = int(min(img_h, max(pt.y(), pb.y())))
+                vb_tl = view.mapSceneToView(QtCore.QPointF(pos[0],           pos[1]))
+                vb_br = view.mapSceneToView(QtCore.QPointF(pos[0]+size[0],   pos[1]+size[1]))
+                col0 = max(0.0, min(1.0, vb_tl.x() / disp_w))
+                col1 = max(0.0, min(1.0, vb_br.x() / disp_w))
+                row0 = max(0.0, min(1.0, (disp_h - vb_br.y()) / disp_h))
+                row1 = max(0.0, min(1.0, (disp_h - vb_tl.y()) / disp_h))
+                sx = int(col0 * sensor_w)
+                sy = int(row0 * sensor_h)
+                sw = max(1, int(col1 * sensor_w) - sx)
+                sh = max(1, int(row1 * sensor_h) - sy)
                 self.roi_info_label.setText(
-                    f"ROI  x={col_min}  y={row_min}  "
-                    f"w={col_max-col_min}  h={row_max-row_min}  "
-                    f"(px)")
+                    f"ROI  x={sx}  y={sy}  w={sw}  h={sh}  (sensor px)")
                 return
         pos  = self.roi.pos()
         size = self.roi.size()
@@ -571,80 +573,69 @@ class DetectorControlDialog(QtWidgets.QDialog):
         # image is the *displayed* array (after flip/transpose/bin applied by pystream)
         disp_h, disp_w = image.shape[:2]
 
-        # ── Step 1: scene → display-pixel coords ─────────────────────────
-        # pg.ImageView with default axis order maps arr[row, col] with rows
-        # going UP the Y axis, so mapFromScene gives (col, disp_h-1-row).
+        # ── Step 1: scene → display fractional coords ────────────────────
+        # Use ViewBox.mapSceneToView — this handles zoom/pan correctly and
+        # avoids the ImageItem y-flip confusion that breaks mapFromScene.
+        # In pyqtgraph with row-major ImageItem, the ImageItem transform
+        # flips y so that row 0 is at the top. In scene/ViewBox coords:
+        #   vb.x() ∈ [0, disp_w] → display column
+        #   vb.y() ∈ [0, disp_h], with y=disp_h at top → display_row = disp_h - vb.y()
+        view = iv.getView()
         pos  = self.roi.pos()
         size = self.roi.size()
-        corners_scene = [
-            QtCore.QPointF(pos[0],           pos[1]),
-            QtCore.QPointF(pos[0] + size[0], pos[1]),
-            QtCore.QPointF(pos[0],           pos[1] + size[1]),
-            QtCore.QPointF(pos[0] + size[0], pos[1] + size[1]),
-        ]
-        corners_item = [img_item.mapFromScene(p) for p in corners_scene]
-        # item X = display col, item Y = (disp_h - 1 - display_row)  [y-flipped]
-        cols = [p.x()                   for p in corners_item]
-        rows = [disp_h - 1.0 - p.y()   for p in corners_item]
 
-        dc0 = int(max(0,      min(cols)))
-        dc1 = int(min(disp_w, max(cols)))
-        dr0 = int(max(0,      min(rows)))
-        dr1 = int(min(disp_h, max(rows)))
-        # dc0..dc1, dr0..dr1 are display-array pixel indices
+        vb_tl = view.mapSceneToView(QtCore.QPointF(pos[0],            pos[1]))
+        vb_br = view.mapSceneToView(QtCore.QPointF(pos[0] + size[0],  pos[1] + size[1]))
 
-        # ── Step 2: undo display transforms to get raw sensor coords ─────
-        # Read the current view transforms from the parent viewer.
-        viewer = self.parent()
-        flip_h     = getattr(viewer, 'flip_h',        False)
-        flip_v     = getattr(viewer, 'flip_v',        False)
-        transpose  = getattr(viewer, 'transpose_img', False)
-        disp_bin   = getattr(viewer, 'display_bin',   1)
-        if disp_bin < 1:
-            disp_bin = 1
+        col0 = vb_tl.x()
+        col1 = vb_br.x()
+        # vb_y increases upward; row 0 of the array is at top (vb_y = disp_h)
+        row0 = disp_h - vb_br.y()   # top of ROI box → smaller row index
+        row1 = disp_h - vb_tl.y()   # bottom of ROI box → larger row index
 
-        # Scale back up from display-binned pixels to full-res display pixels
-        dc0 *= disp_bin
-        dc1 *= disp_bin
-        dr0 *= disp_bin
-        dr1 *= disp_bin
+        # Work in fractions — bin-invariant, no need to know actual bin size
+        frac_c0 = max(0.0, min(1.0, col0 / disp_w))
+        frac_c1 = max(0.0, min(1.0, col1 / disp_w))
+        frac_r0 = max(0.0, min(1.0, row0 / disp_h))
+        frac_r1 = max(0.0, min(1.0, row1 / disp_h))
 
-        # Undo display transforms (applied as transpose→flip_h→flip_v, so
-        # reverse order: undo flip_v → undo flip_h → undo transpose)
+        # ── Step 2: undo display transforms (fraction space) ─────────────
+        # pystream applies: transpose → flip_h → flip_v
+        # Undo in reverse:  flip_v   → flip_h  → transpose
+        viewer    = self.parent()
+        flip_h    = getattr(viewer, 'flip_h',        False)
+        flip_v    = getattr(viewer, 'flip_v',        False)
+        transpose = getattr(viewer, 'transpose_img', False)
+
         if flip_v:
-            disp_h_full = disp_h * disp_bin
-            dr0, dr1 = disp_h_full - dr1, disp_h_full - dr0
-
+            frac_r0, frac_r1 = 1.0 - frac_r1, 1.0 - frac_r0
         if flip_h:
-            disp_w_full = disp_w * disp_bin
-            dc0, dc1 = disp_w_full - dc1, disp_w_full - dc0
-
+            frac_c0, frac_c1 = 1.0 - frac_c1, 1.0 - frac_c0
         if transpose:
-            dc0, dc1, dr0, dr1 = dr0, dr1, dc0, dc1
+            frac_c0, frac_c1, frac_r0, frac_r1 = frac_r0, frac_r1, frac_c0, frac_c1
 
-        x = max(0, dc0)
-        y = max(0, dr0)
-        w = max(1, dc1 - dc0)
-        h = max(1, dr1 - dr0)
+        # ── Step 3: map fractions → sensor pixel coords ──────────────────
+        sensor_w = self._max_sizex or disp_w
+        sensor_h = self._max_sizey or disp_h
 
-        # ── Step 3: sensor may have y=0 at bottom (hardware convention) ──
-        # Tick "Vertical Flip" in the detector dialog if the sensor's row 0
-        # is at the physical bottom of the image (common for CCD cameras).
+        x = int(frac_c0 * sensor_w)
+        y = int(frac_r0 * sensor_h)
+        w = max(1, int(frac_c1 * sensor_w) - x)
+        h = max(1, int(frac_r1 * sensor_h) - y)
+
+        # Optional extra flip for sensors where hardware row 0 is at bottom
         if self.vertical_flip_check.isChecked():
-            # need raw sensor height — use stored max size if available
-            sensor_h = self._max_sizey if self._max_sizey else (disp_h * disp_bin)
             y = sensor_h - (y + h)
 
         crop_left   = x
-        crop_right  = (self._max_sizex or disp_w * disp_bin) - (x + w)
+        crop_right  = sensor_w - (x + w)
         crop_top    = y
-        crop_bottom = (self._max_sizey or disp_h * disp_bin) - (y + h)
+        crop_bottom = sensor_h - (y + h)
 
-        # Diagnostic log — helps verify coordinate mapping is correct
         self._log_message(
-            f"ROI px: x={x} y={y} w={w} h={h} "
-            f"(disp {disp_w}×{disp_h} bin={disp_bin} "
-            f"flip_h={flip_h} flip_v={flip_v} T={transpose})"
+            f"ROI sensor: x={x} y={y} w={w} h={h}  "
+            f"fracs c=[{frac_c0:.3f},{frac_c1:.3f}] r=[{frac_r0:.3f},{frac_r1:.3f}]  "
+            f"flip_h={flip_h} flip_v={flip_v} T={transpose}"
         )
         self._log_message(
             f"Crop: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}"
