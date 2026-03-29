@@ -572,29 +572,29 @@ class DetectorControlDialog(QtWidgets.QDialog):
         if do_transp:
             sx, sx1 = int(px0), int(px1)     # sensor columns
             sy, sy1 = int(py0), int(py1)     # sensor rows
+            total_w = int(img_w)             # sensor width  = first axis
+            total_h = int(img_h)             # sensor height = second axis
         else:
             sx, sx1 = int(py0), int(py1)     # sensor columns ← from y
             sy, sy1 = int(px0), int(px1)     # sensor rows    ← from x
+            total_w = int(img_h)             # sensor width  = second axis
+            total_h = int(img_w)             # sensor height = first axis
 
-        return sx, sy, sx1, sy1
+        return sx, sy, sx1, sy1, total_w, total_h
 
     def _on_roi_changed(self):
         if self.roi is None:
             return
         result = self._roi_to_sensor()
         if result is not None:
-            sx, sy, sx1, sy1 = result
-            sw = max(1, sx1 - sx)
-            sh = max(1, sy1 - sy)
-            sensor_w = self._max_sizex or 0
-            sensor_h = self._max_sizey or 0
+            sx, sy, sx1, sy1, total_w, total_h = result
             cl = sx
-            cr = max(0, sensor_w - sx1)
+            cr = max(0, total_w - sx1)
             ct = sy
-            cb = max(0, sensor_h - sy1)
+            cb = max(0, total_h - sy1)
             self.roi_info_label.setText(
                 f"Crop L={cl} R={cr} T={ct} B={cb}  "
-                f"(ROI {sw}×{sh})")
+                f"(ROI {sx1-sx}×{sy1-sy})")
             return
         pos  = self.roi.pos()
         size = self.roi.size()
@@ -609,20 +609,13 @@ class DetectorControlDialog(QtWidgets.QDialog):
                 "Please draw an ROI first.")
             return
 
-        sensor_w = self._max_sizex
-        sensor_h = self._max_sizey
-        if not sensor_w or not sensor_h:
-            QtWidgets.QMessageBox.warning(self, "Error",
-                "Sensor size unknown. Click 'Read Current' first.")
-            return
-
         result = self._roi_to_sensor()
         if result is None:
             QtWidgets.QMessageBox.warning(self, "Error",
                 "Cannot compute ROI. Is an image displayed?")
             return
 
-        sx, sy, sx1, sy1 = result
+        sx, sy, sx1, sy1, sensor_w, sensor_h = result
 
         # Vertical flip checkbox
         if self.vertical_flip_check.isChecked():
@@ -639,7 +632,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
         self._log_message(
             f"Crop: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}  "
-            f"ROI {sw}×{sh}  sensor {sensor_w}×{sensor_h}"
+            f"ROI {sw}×{sh}  image {sensor_w}×{sensor_h}"
         )
 
         crop_prefix = self.crop_prefix_input.text()
@@ -665,7 +658,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
                 f"ROI applied:\n"
                 f"CropLeft={crop_left}  CropRight={crop_right}\n"
                 f"CropTop={crop_top}  CropBottom={crop_bottom}\n"
-                f"(sensor region: x={sx} y={sy} w={sw} h={sh})")
+                f"(ROI: {sw}×{sh} in {sensor_w}×{sensor_h})")
         else:
             QtWidgets.QMessageBox.warning(self, "Error",
                 "Failed to apply ROI. Check log for details.")
