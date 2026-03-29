@@ -10,7 +10,7 @@ import subprocess
 import logging
 from typing import Optional
 import pyqtgraph as pg
-from PyQt5 import QtWidgets
+from PyQt5 import QtWidgets, QtCore
 
 
 class DetectorControlDialog(QtWidgets.QDialog):
@@ -339,6 +339,12 @@ class DetectorControlDialog(QtWidgets.QDialog):
             self.apply_roi_btn.setEnabled(False)
             self._log_message("ROI drawing disabled")
 
+    def _get_scene(self):
+        parent_viewer = self.parent()
+        if parent_viewer and hasattr(parent_viewer, 'image_view'):
+            return parent_viewer.image_view.ui.graphicsView.scene()
+        return None
+
     def _create_or_show_roi(self):
         """Create or show the ROI on the image."""
         parent_viewer = self.parent()
@@ -349,30 +355,42 @@ class DetectorControlDialog(QtWidgets.QDialog):
         image_view = parent_viewer.image_view
 
         if self.roi is None:
-            # Create ROI if it doesn't exist
-            if hasattr(parent_viewer, 'image_view'):
-                image_item = image_view.getImageItem()
-                if image_item is not None:
-                    image = image_item.image
-                    if image is not None:
-                        h, w = image.shape[:2]
-                        # Create ROI in center, 50% of image size
-                        rw = max(10, w // 2)
-                        rh = max(10, h // 2)
-                        rx = (w - rw) // 2
-                        ry = (h - rh) // 2
+            image_item = image_view.getImageItem()
+            if image_item is None or image_item.image is None:
+                self._log_message("Error: No image available")
+                return
 
-                        self.roi = pg.ROI([rx, ry], [rw, rh], pen='r')
-                        self.roi.addScaleHandle([1, 1], [0, 0])
-                        self.roi.addScaleHandle([0, 0], [1, 1])
-                        self.roi.addScaleHandle([1, 0], [0, 1])
-                        self.roi.addScaleHandle([0, 1], [1, 0])
+            sc = image_view.ui.graphicsView.scene()
+            if sc is None:
+                return
 
-                        image_view.addItem(self.roi)
-                        self.roi.sigRegionChanged.connect(self._on_roi_changed)
-                        self._log_message(f"ROI created at ({rx}, {ry}) size ({rw}, {rh})")
+            image = image_item.image
+            h, w = image.shape[:2]
+            rw = max(10, w // 2)
+            rh = max(10, h // 2)
+            rx = (w - rw) // 2
+            ry = (h - rh) // 2
+
+            # Convert image-pixel coords to scene coords so the ROI
+            # appears at the correct position regardless of y-axis orientation.
+            p_tl = image_item.mapToScene(QtCore.QPointF(rx, ry))
+            p_br = image_item.mapToScene(QtCore.QPointF(rx + rw, ry + rh))
+            sx = min(p_tl.x(), p_br.x())
+            sy = min(p_tl.y(), p_br.y())
+            sw = abs(p_br.x() - p_tl.x())
+            sh = abs(p_br.y() - p_tl.y())
+
+            self.roi = pg.ROI([0, 0], [sw, sh], pen='r')
+            self.roi.addScaleHandle([1, 1], [0, 0])
+            self.roi.addScaleHandle([0, 0], [1, 1])
+            self.roi.addScaleHandle([1, 0], [0, 1])
+            self.roi.addScaleHandle([0, 1], [1, 0])
+            self.roi.setZValue(1000)
+            sc.addItem(self.roi)
+            self.roi.setPos(sx, sy)
+            self.roi.sigRegionChanged.connect(self._on_roi_changed)
+            self._log_message(f"ROI created at image ({rx},{ry}) size ({rw},{rh})")
         else:
-            # Show existing ROI
             self.roi.setVisible(True)
 
     def _reset_roi(self):
@@ -383,19 +401,24 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
         image_view = parent_viewer.image_view
         image_item = image_view.getImageItem()
-        if image_item is not None:
+        if image_item is not None and image_item.image is not None and self.roi:
             image = image_item.image
-            if image is not None:
-                h, w = image.shape[:2]
-                rw = max(10, w // 2)
-                rh = max(10, h // 2)
-                rx = (w - rw) // 2
-                ry = (h - rh) // 2
+            h, w = image.shape[:2]
+            rw = max(10, w // 2)
+            rh = max(10, h // 2)
+            rx = (w - rw) // 2
+            ry = (h - rh) // 2
 
-                if self.roi:
-                    self.roi.setPos([rx, ry])
-                    self.roi.setSize([rw, rh])
-                    self._log_message(f"ROI reset to ({rx}, {ry}) size ({rw}, {rh})")
+            p_tl = image_item.mapToScene(QtCore.QPointF(rx, ry))
+            p_br = image_item.mapToScene(QtCore.QPointF(rx + rw, ry + rh))
+            sx = min(p_tl.x(), p_br.x())
+            sy = min(p_tl.y(), p_br.y())
+            sw = abs(p_br.x() - p_tl.x())
+            sh = abs(p_br.y() - p_tl.y())
+
+            self.roi.setPos([sx, sy])
+            self.roi.setSize([sw, sh])
+            self._log_message(f"ROI reset to image ({rx},{ry}) size ({rw},{rh})")
 
     def _on_roi_changed(self):
         """Called when ROI is moved or resized."""
@@ -417,46 +440,41 @@ class DetectorControlDialog(QtWidgets.QDialog):
             )
             return
 
-        # Get the ROI position and size
-        pos = self.roi.pos()
-        size = self.roi.size()
-
-        x = int(pos[0])
-        y = int(pos[1])
-        w = int(size[0])
-        h = int(size[1])
-
-        # Get image dimensions to calculate crop values
+        # Get image and convert ROI (scene coords) → image pixel coords
+        # via getArraySlice, which handles all coordinate transforms correctly.
         parent_viewer = self.parent()
         if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "Cannot access image view to determine image dimensions."
-            )
+            QtWidgets.QMessageBox.warning(self, "Error",
+                "Cannot access image view.")
             return
 
         image_view = parent_viewer.image_view
         image_item = image_view.getImageItem()
         if image_item is None or image_item.image is None:
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "No image available to determine dimensions."
-            )
+            QtWidgets.QMessageBox.warning(self, "Error",
+                "No image available.")
             return
 
         image = image_item.image
         img_h, img_w = image.shape[:2]
 
-        # Convert ROI rectangle to crop values (pixels from each edge)
-        crop_left = x
-        crop_right = img_w - (x + w)
-        crop_top = y
-        crop_bottom = img_h - (y + h)
+        try:
+            roi_slice, _ = self.roi.getArraySlice(image, image_item)
+            # roi_slice[0] = row (y) slice, roi_slice[1] = col (x) slice
+            row_sl = roi_slice[0]
+            col_sl = roi_slice[1]
+            x = max(0, col_sl.start or 0)
+            y = max(0, row_sl.start or 0)
+            w = max(1, (col_sl.stop or img_w) - x)
+            h = max(1, (row_sl.stop or img_h) - y)
+        except Exception as e:
+            self._log_message(f"getArraySlice failed: {e}")
+            return
 
-        # Apply vertical flip if enabled (swap top and bottom)
-        if self.vertical_flip_check.isChecked():
-            crop_top, crop_bottom = crop_bottom, crop_top
-            self._log_message("Vertical flip enabled: swapping top and bottom")
+        crop_left   = x
+        crop_right  = img_w - (x + w)
+        crop_top    = y
+        crop_bottom = img_h - (y + h)
 
         # Apply to crop PVs
         crop_prefix = self.crop_prefix_input.text()
@@ -538,12 +556,11 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         """Handle dialog close event."""
-        # Remove ROI from image view
         if self.roi:
-            parent_viewer = self.parent()
-            if parent_viewer and hasattr(parent_viewer, 'image_view'):
+            sc = self._get_scene()
+            if sc:
                 try:
-                    parent_viewer.image_view.removeItem(self.roi)
+                    sc.removeItem(self.roi)
                 except Exception:
                     pass
             self.roi = None

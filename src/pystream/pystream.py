@@ -66,65 +66,113 @@ except Exception:
     _HAS_ADU = False
 
 
-# Background TIFF writer thread for recording
-class TiffWriterThread(threading.Thread):
-    """Background thread that writes TIFF frames from a queue to disk."""
+# High-throughput parallel TIFF recorder
+class _RecordingPool:
+    """
+    N worker threads all pull from the same bounded queue and write TIFF files
+    in parallel.  No compression by default — this is the single biggest
+    throughput win (DEFLATE caps at ~200 MB/s; raw I/O can reach GB/s on NVMe).
 
-    def __init__(self, output_dir: str, frame_queue: queue.Queue, prefix: str = "frame"):
-        super().__init__(daemon=True)
+    Usage:
+        pool = _RecordingPool(out_dir, prefix="frame", n_workers=4, compress=False)
+        pool.start()
+        pool.put(idx, frame_array)   # non-blocking, drops frame if queue full
+        pool.stop()                  # send poison pill
+        pool.wait()                  # block until all workers finish
+    """
+
+    def __init__(self, output_dir: str, prefix: str = "frame",
+                 n_workers: int = 4, max_queue: int = 512, compress: bool = False):
         self.output_dir = output_dir
-        self.frame_queue = frame_queue
-        self.prefix = prefix
-        self.running = True
-        self.frames_written = 0
+        self.prefix     = prefix
+        self.compress   = compress
+        self._q         = queue.Queue(maxsize=max_queue)
+        self._n_written = 0
+        self._n_dropped = 0
+        self._lock      = threading.Lock()
+        self._workers   = [
+            threading.Thread(target=self._worker, daemon=True, name=f"rec-w{i}")
+            for i in range(max(1, n_workers))
+        ]
 
-    def run(self):
-        """Process frames from queue and write to disk."""
-        from PIL import Image
+    def start(self):
+        for w in self._workers:
+            w.start()
 
-        while self.running or not self.frame_queue.empty():
+    def put(self, idx: int, frame: np.ndarray) -> bool:
+        """Non-blocking enqueue.  Returns False (frame dropped) if queue full."""
+        try:
+            self._q.put_nowait((idx, frame))
+            return True
+        except queue.Full:
+            with self._lock:
+                self._n_dropped += 1
+            return False
+
+    def _worker(self):
+        while True:
             try:
-                # Get frame from queue with timeout
-                item = self.frame_queue.get(timeout=0.5)
-
-                if item is None:  # Poison pill to stop thread
-                    break
-
-                frame_idx, frame_data = item
-
-                # Convert to uint16 for TIFF
-                if frame_data.dtype != np.uint16:
-                    img_min = frame_data.min()
-                    img_max = frame_data.max()
-                    if img_max > img_min:
-                        normalized = (frame_data - img_min) / (img_max - img_min)
-                        frame_u16 = (normalized * 65535).astype(np.uint16)
-                    else:
-                        frame_u16 = np.zeros_like(frame_data, dtype=np.uint16)
-                else:
-                    frame_u16 = frame_data
-
-                # Save to disk
-                filename = f"{self.prefix}_{frame_idx:06d}.tiff"
-                filepath = os.path.join(self.output_dir, filename)
-
-                pil_image = Image.fromarray(frame_u16)
-                pil_image.save(filepath, compression="tiff_deflate")
-
-                self.frames_written += 1
-                self.frame_queue.task_done()
-
+                item = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
+            if item is None:                    # poison pill
+                self._q.put(None)              # propagate to sibling workers
+                break
+            idx, frame = item
+            try:
+                self._write(idx, frame)
             except Exception as e:
                 if LOGGER:
-                    LOGGER.error(f"Error writing frame: {e}")
-                    log_exception(LOGGER, e)
-                break
+                    LOGGER.error("RecordingPool write error frame %d: %s", idx, e)
+            finally:
+                self._q.task_done()
+
+    def _write(self, idx: int, frame: np.ndarray):
+        if frame.dtype != np.uint16:
+            fmin = float(frame.min())
+            fmax = float(frame.max())
+            if fmax > fmin:
+                frame = ((frame.astype(np.float32) - fmin) / (fmax - fmin) * 65535).astype(np.uint16)
+            else:
+                frame = np.zeros(frame.shape, dtype=np.uint16)
+        path = os.path.join(self.output_dir, f"{self.prefix}_{idx:06d}.tiff")
+        try:
+            import tifffile
+            tifffile.imwrite(path, frame, compression="deflate" if self.compress else None)
+        except ImportError:
+            from PIL import Image
+            pil = Image.fromarray(frame)
+            pil.save(path, compression="tiff_deflate" if self.compress else None)
+        with self._lock:
+            self._n_written += 1
 
     def stop(self):
-        """Signal thread to stop."""
-        self.running = False
+        """Send one poison pill; each worker re-queues it for its siblings."""
+        try:
+            self._q.put(None, timeout=2.0)
+        except queue.Full:
+            pass
+
+    def wait(self, timeout: float = 60.0):
+        for w in self._workers:
+            w.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return any(w.is_alive() for w in self._workers)
+
+    @property
+    def frames_written(self) -> int:
+        with self._lock:
+            return self._n_written
+
+    @property
+    def frames_dropped(self) -> int:
+        with self._lock:
+            return self._n_dropped
+
+    @property
+    def qsize(self) -> int:
+        return self._q.qsize()
 
 
 # ----------------------- Config I/O -----------------------
@@ -394,8 +442,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.recorded_frame_count = 0
         self.record_path = ""
         self.record_dir = ""
-        self.recording_queue = None
-        self.recording_thread = None
+        self.recording_pool: Optional[_RecordingPool] = None
 
         self.motor_scan_dialog = None
         self.roi_manager = None
@@ -1059,9 +1106,29 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_prefix_entry = QtWidgets.QLineEdit()
         self.record_prefix_entry.setText("frame")
         self.record_prefix_entry.setPlaceholderText("frame")
-        self.record_prefix_entry.setToolTip("File prefix (files saved as prefix_000001.tiff, prefix_000002.tiff, ...)")
+        self.record_prefix_entry.setToolTip("File prefix (files saved as prefix_000001.tiff, …)")
         prefix_layout.addWidget(self.record_prefix_entry)
         record_layout.addLayout(prefix_layout)
+
+        # Writer threads + compression
+        rec_opt_layout = QtWidgets.QHBoxLayout()
+        rec_opt_layout.setSpacing(4)
+        rec_opt_layout.addWidget(QtWidgets.QLabel("Writers:"))
+        self.record_workers_spin = QtWidgets.QSpinBox()
+        self.record_workers_spin.setRange(1, 16)
+        self.record_workers_spin.setValue(4)
+        self.record_workers_spin.setMaximumWidth(50)
+        self.record_workers_spin.setToolTip(
+            "Parallel writer threads. More threads = higher throughput on fast NVMe.")
+        rec_opt_layout.addWidget(self.record_workers_spin)
+        self.record_compress_check = QtWidgets.QCheckBox("Compress")
+        self.record_compress_check.setChecked(False)
+        self.record_compress_check.setToolTip(
+            "DEFLATE compression: smaller files but ~5–10× slower. "
+            "Leave off for high frame rates.")
+        rec_opt_layout.addWidget(self.record_compress_check)
+        rec_opt_layout.addStretch()
+        record_layout.addLayout(rec_opt_layout)
 
         # Status label with instructions
         self.lbl_record_status = QtWidgets.QLabel(
@@ -1217,29 +1284,49 @@ class PvViewerApp(QtWidgets.QMainWindow):
     def _pump_queue(self):
         if self.paused:
             return
-        
+
         now = time.time()
-        if self.max_fps > 0 and (now - self.last_draw < self.frame_interval):
-            return
-        
+
         latest = None
         try:
             while True:
                 latest = self.queue.get_nowait()
         except Exception:
             pass
-        
-        if latest is not None:
-            ts, uid, img = latest
-            if PIPE is not None:
-                try:
-                    img = PIPE.apply(img, {"uid": uid, "timestamp": ts})
-                except Exception as e:
-                    if LOGGER:
-                        LOGGER.error("[Plugins] pipeline error")
-                        log_exception(LOGGER, e)
-            self.image_ready.emit(uid, img, ts)
-            self.last_draw = now
+
+        if latest is None:
+            return
+
+        ts, uid, img = latest
+        if PIPE is not None:
+            try:
+                img = PIPE.apply(img, {"uid": uid, "timestamp": ts})
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.error("[Plugins] pipeline error")
+                    log_exception(LOGGER, e)
+
+        # ── Recording: before display throttle so every frame is captured ──
+        if self.recording and self.recording_pool is not None:
+            frame_copy = img.copy()
+            self.recording_pool.put(self.recorded_frame_count, frame_copy)
+            self.recorded_frame_count += 1
+            nd = self.recording_pool.frames_dropped
+            nw = self.recording_pool.frames_written
+            nq = self.recording_pool.qsize
+            status = f"🔴 REC  {self.recorded_frame_count} frm"
+            if nd:
+                status += f"\n⚠ {nd} dropped"
+            else:
+                status += f"\nWritten: {nw}  Q: {nq}"
+            self.lbl_record_status.setText(status)
+
+        # ── Display throttle ──
+        if self.max_fps > 0 and (now - self.last_draw < self.frame_interval):
+            return
+
+        self.image_ready.emit(uid, img, ts)
+        self.last_draw = now
     
     # ------------- Image update -------------
     def _auto_display_bin(self, img) -> int:
@@ -1351,37 +1438,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             f"Mean: {img.mean():.2f}"
         )
         
-        # Recording - add frame to queue for background writer
-        if self.recording and self.recording_queue is not None:
-            try:
-                # Add frame copy to queue (non-blocking)
-                # Make a copy to avoid reference issues
-                # Use astype to ensure contiguous copy
-                frame_copy = img.astype(img.dtype, order='C', copy=True)
-                self.recording_queue.put_nowait((self.recorded_frame_count, frame_copy))
-
-                self.recorded_frame_count += 1
-                queued = self.recording_queue.qsize()
-                self.lbl_record_status.setText(
-                    f"🔴 REC\nFrames: {self.recorded_frame_count}\nQueued: {queued}"
-                )
-            except queue.Full:
-                # Queue is full - skip this frame
-                if LOGGER:
-                    LOGGER.warning("Recording queue full - frame dropped")
-                self.lbl_record_status.setText(
-                    f"🔴 REC\nFrames: {self.recorded_frame_count}\n⚠ Queue full!"
-                )
-            except Exception as e:
-                # Stop recording on error
-                self.recording = False
-                self.btn_record.setChecked(False)
-                self.btn_record.setText("⏺" if self.is_small_screen else "Record")
-                self.btn_record.setStyleSheet("")
-                self.lbl_record_status.setText("✗ Recording error!")
-                if LOGGER:
-                    LOGGER.error("Recording error:")
-                    log_exception(LOGGER, e)
+        # Recording is handled in _pump_queue before the display throttle.
         
         # Histogram update (throttled)
         if (now - self._last_hist_t) >= self.hist_interval:
@@ -1716,18 +1773,22 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.btn_record.setChecked(False)
                 return
 
-            # Start background writer thread with queue
-            self.recording_queue = queue.Queue(maxsize=100)  # Buffer up to 100 frames in RAM
-            self.recording_thread = TiffWriterThread(self.record_dir, self.recording_queue, prefix)
-            self.recording_thread.start()
+            n_workers = self.record_workers_spin.value() if hasattr(self, 'record_workers_spin') else 4
+            compress  = self.record_compress_check.isChecked() if hasattr(self, 'record_compress_check') else False
+            self.recording_pool = _RecordingPool(
+                self.record_dir, prefix,
+                n_workers=n_workers, max_queue=512, compress=compress,
+            )
+            self.recording_pool.start()
 
             self.recording = True
             self.recorded_frame_count = 0
             self.btn_record.setText("⏹" if self.is_small_screen else "Stop Recording")
             self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
-            self.lbl_record_status.setText("🔴 REC\nFrames: 0")
+            self.lbl_record_status.setText("🔴 REC  0 frm")
             if LOGGER:
-                LOGGER.info("Started recording to %s", self.record_dir)
+                LOGGER.info("Started recording to %s (workers=%d compress=%s)",
+                            self.record_dir, n_workers, compress)
         else:
             # Stop recording
             self.recording = False
@@ -1737,57 +1798,45 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if self.recorded_frame_count == 0:
                 self.lbl_record_status.setText("Not recording")
                 QtWidgets.QMessageBox.information(
-                    self, "Stop Recording",
-                    "No frames were recorded."
-                )
+                    self, "Stop Recording", "No frames were recorded.")
                 return
 
-            # Wait for background writer to finish (non-blocking)
-            if self.recording_thread and self.recording_thread.is_alive():
-                queued_frames = self.recording_queue.qsize()
-                self.lbl_record_status.setText(f"Flushing {queued_frames} frames...")
-
-                # Signal thread to stop
-                try:
-                    self.recording_queue.put_nowait(None)  # Poison pill
-                except queue.Full:
-                    pass
-
-                # Use a timer to check when thread finishes (non-blocking)
+            if self.recording_pool and self.recording_pool.is_alive():
+                self.lbl_record_status.setText(
+                    f"Flushing {self.recording_pool.qsize} frames…")
+                self.recording_pool.stop()
                 self._finish_recording_async()
             else:
-                # Thread already done
                 self._show_recording_complete()
-    
+
     def _finish_recording_async(self):
-        """Check if recording thread finished (non-blocking with timer)."""
-        if self.recording_thread and self.recording_thread.is_alive():
-            # Still running, check again in 500ms
-            queued = self.recording_queue.qsize() if self.recording_queue else 0
-            written = self.recording_thread.frames_written if self.recording_thread else 0
-            self.lbl_record_status.setText(f"Flushing...\nWritten: {written}\nQueued: {queued}")
+        if self.recording_pool and self.recording_pool.is_alive():
+            nw = self.recording_pool.frames_written
+            nq = self.recording_pool.qsize
+            self.lbl_record_status.setText(f"Flushing…\nWritten: {nw}  Q: {nq}")
             QtCore.QTimer.singleShot(500, self._finish_recording_async)
         else:
-            # Thread finished
             self._show_recording_complete()
 
     def _show_recording_complete(self):
-        """Show recording completion message."""
-        frames_written = self.recording_thread.frames_written if self.recording_thread else self.recorded_frame_count
+        pool = self.recording_pool
+        nw  = pool.frames_written if pool else self.recorded_frame_count
+        nd  = pool.frames_dropped if pool else 0
         record_dir = self.record_dir
 
-        self.lbl_record_status.setText(f"✓ Saved {frames_written} frames")
+        msg = f"Saved {nw} frames"
+        if nd:
+            msg += f"  ({nd} dropped)"
+        self.lbl_record_status.setText(f"✓ {msg}")
         if LOGGER:
-            LOGGER.info("Recording stopped: %d frames saved to %s", frames_written, record_dir)
+            LOGGER.info("Recording stopped: %s to %s", msg, record_dir)
 
-        QtWidgets.QMessageBox.information(
-            self, "Recording Stopped",
-            f"Successfully saved {frames_written} frames\n"
-            f"as individual TIFF files to:\n\n{record_dir}"
-        )
+        body = f"{msg}\nTIFF files in:\n\n{record_dir}"
+        if nd:
+            body += f"\n\n⚠ {nd} frames were dropped (queue full).\nUse more writer threads or faster storage."
+        QtWidgets.QMessageBox.information(self, "Recording Stopped", body)
 
-        self.recording_thread = None
-        self.recording_queue = None
+        self.recording_pool = None
 
     # ------------- Other commands -------------
     def _toggle_pause(self):
@@ -1930,25 +1979,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.recording = False
                 self.btn_record.setChecked(False)
 
-                # Wait for background writer to finish
-                if self.recording_thread and self.recording_thread.is_alive():
+                if self.recording_pool and self.recording_pool.is_alive():
                     if LOGGER:
-                        LOGGER.info("Waiting for recording thread to finish...")
-
-                    # Signal thread to stop and wait for queue to empty
-                    try:
-                        self.recording_queue.put(None, timeout=1)  # Poison pill
-                    except Exception:
-                        pass
-
-                    self.recording_thread.join(timeout=5)  # Wait up to 5 seconds on close
-
-                    if self.recording_thread.is_alive():
-                        if LOGGER:
-                            LOGGER.warning("Recording thread did not finish in time during close")
-
-                self.recording_thread = None
-                self.recording_queue = None
+                        LOGGER.info("Waiting for recording pool to flush…")
+                    self.recording_pool.stop()
+                    self.recording_pool.wait(timeout=10)
+                    if self.recording_pool.is_alive() and LOGGER:
+                        LOGGER.warning("Recording pool did not finish in time on close")
+                self.recording_pool = None
         
         # Stop pump timer first to avoid processing during cleanup
         if self.pump_timer:
