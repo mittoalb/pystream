@@ -518,83 +518,100 @@ class DetectorControlDialog(QtWidgets.QDialog):
 
     # ── ROI changed callback ──────────────────────────────────────────────
 
-    def _scene_roi_fracs(self, img_item):
-        """Return (cf0, cf1, rf0, rf1) — fractions of the image's local
-        bounding rect [0..1] covered by the current ROI in scene space.
-        cf = fraction along local x-axis (first array dimension),
-        rf = fraction along local y-axis (second array dimension).
-        Works regardless of ViewBox Y-inversion or zoom level."""
-        if self.roi is None or img_item is None:
+    def _roi_to_sensor(self):
+        """Convert current scene-space ROI → sensor pixel box (sx, sy, sx1, sy1).
+
+        Uses mapSceneToView to get data coordinates, undoes pystream display
+        transforms, and accounts for any existing crop offset so the mapping
+        is correct even when the displayed image is already cropped.
+
+        Returns (sx, sy, sx1, sy1) in full-sensor pixels, or None on failure.
+        """
+        p = self.parent()
+        if self.roi is None or p is None or not hasattr(p, 'image_view'):
             return None
-        br   = img_item.boundingRect()
-        p_tl = img_item.mapToScene(br.topLeft())
-        p_br = img_item.mapToScene(br.bottomRight())
-        sc_dx = p_br.x() - p_tl.x()
-        sc_dy = p_br.y() - p_tl.y()
-        if abs(sc_dx) < 1e-6 or abs(sc_dy) < 1e-6:
+        iv       = p.image_view
+        view     = iv.getView()
+        img_item = iv.getImageItem()
+        if img_item is None or img_item.image is None:
             return None
+
+        sensor_w = self._max_sizex
+        sensor_h = self._max_sizey
+        if not sensor_w or not sensor_h:
+            return None
+
+        # ── ROI scene → data coordinates via mapSceneToView ──────────────
         pos  = self.roi.pos()
         size = self.roi.size()
-        cf0_raw = (pos[0]           - p_tl.x()) / sc_dx
-        cf1_raw = (pos[0] + size[0] - p_tl.x()) / sc_dx
-        rf0_raw = (pos[1]           - p_tl.y()) / sc_dy
-        rf1_raw = (pos[1] + size[1] - p_tl.y()) / sc_dy
-        cf0 = max(0.0, min(1.0, min(cf0_raw, cf1_raw)))
-        cf1 = max(0.0, min(1.0, max(cf0_raw, cf1_raw)))
-        rf0 = max(0.0, min(1.0, min(rf0_raw, rf1_raw)))
-        rf1 = max(0.0, min(1.0, max(rf0_raw, rf1_raw)))
-        return cf0, cf1, rf0, rf1
+        d0 = view.mapSceneToView(QtCore.QPointF(pos[0], pos[1]))
+        d1 = view.mapSceneToView(QtCore.QPointF(pos[0] + size[0],
+                                                  pos[1] + size[1]))
+        img_w = float(img_item.width())    # col-major: first axis extent
+        img_h = float(img_item.height())   # second axis extent
+        if img_w < 1 or img_h < 1:
+            return None
 
-    def _fracs_to_sensor(self, cf0, cf1, rf0, rf1):
-        """Convert image-local fracs → sensor pixel box (sx, sy, sw, sh).
-        Undoes pystream display transforms (transpose / flip_h / flip_v).
-        With transpose=True: local x-axis = sensor columns, y-axis = sensor rows.
-        With transpose=False: local x-axis = sensor rows,   y-axis = sensor cols."""
+        # Sort and clamp to image bounds → fractions [0..1]
+        fx0 = max(0.0, min(1.0, min(d0.x(), d1.x()) / img_w))
+        fx1 = max(0.0, min(1.0, max(d0.x(), d1.x()) / img_w))
+        fy0 = max(0.0, min(1.0, min(d0.y(), d1.y()) / img_h))
+        fy1 = max(0.0, min(1.0, max(d0.y(), d1.y()) / img_h))
+
+        # ── Undo pystream display transforms ─────────────────────────────
+        # pystream applies: transpose(swapaxes 0,1) → flip_h([:, ::-1]) → flip_v([::-1, :])
+        # col-major: first axis → x on screen, second axis → y on screen
         viewer    = self.parent()
         flip_h    = getattr(viewer, 'flip_h',        False)
         flip_v    = getattr(viewer, 'flip_v',        False)
         do_transp = getattr(viewer, 'transpose_img', False)
-        sensor_w  = self._max_sizex
-        sensor_h  = self._max_sizey
-        if not sensor_w or not sensor_h:
-            return None
 
-        # undo flip_v (flips local y-axis)
+        # flip_v reverses first axis (x in col-major display)
         if flip_v:
-            rf0, rf1 = 1.0 - rf1, 1.0 - rf0
-        # undo flip_h (flips local x-axis)
+            fx0, fx1 = 1.0 - fx1, 1.0 - fx0
+        # flip_h reverses second axis (y in col-major display)
         if flip_h:
-            cf0, cf1 = 1.0 - cf1, 1.0 - cf0
+            fy0, fy1 = 1.0 - fy1, 1.0 - fy0
 
+        # Map display axes → sensor axes
         if do_transp:
-            # local x → sensor col, local y → sensor row
-            col0_f, col1_f = cf0, cf1
-            row0_f, row1_f = rf0, rf1
+            # after transpose: first axis = sensor cols, second = sensor rows
+            col_f0, col_f1 = fx0, fx1
+            row_f0, row_f1 = fy0, fy1
         else:
-            # local x → sensor row, local y → sensor col — swap axes
-            col0_f, col1_f = rf0, rf1
-            row0_f, row1_f = cf0, cf1
+            # no transpose: first axis = sensor rows, second = sensor cols
+            col_f0, col_f1 = fy0, fy1
+            row_f0, row_f1 = fx0, fx1
 
-        sx  = int(col0_f * sensor_w)
-        sx1 = int(col1_f * sensor_w)
-        sy  = int(row0_f * sensor_h)
-        sy1 = int(row1_f * sensor_h)
-        return sx, sy, max(1, sx1 - sx), max(1, sy1 - sy)
+        # ── Account for existing crop offset ─────────────────────────────
+        # The displayed image may already be a cropped sub-region of the sensor.
+        # Fractions are relative to the VISIBLE region, not the full sensor.
+        crop_prefix = self.crop_prefix_input.text()
+        cur_left   = int(float(self._get_pv_value(f"{crop_prefix}:CropLeft")   or 0))
+        cur_right  = int(float(self._get_pv_value(f"{crop_prefix}:CropRight")  or 0))
+        cur_top    = int(float(self._get_pv_value(f"{crop_prefix}:CropTop")    or 0))
+        cur_bottom = int(float(self._get_pv_value(f"{crop_prefix}:CropBottom") or 0))
+
+        vis_w = sensor_w - cur_left - cur_right
+        vis_h = sensor_h - cur_top  - cur_bottom
+
+        sx  = cur_left + int(col_f0 * vis_w)
+        sx1 = cur_left + int(col_f1 * vis_w)
+        sy  = cur_top  + int(row_f0 * vis_h)
+        sy1 = cur_top  + int(row_f1 * vis_h)
+        return sx, sy, sx1, sy1
 
     def _on_roi_changed(self):
         if self.roi is None:
             return
-        p = self.parent()
-        if p and hasattr(p, 'image_view'):
-            img_item = p.image_view.getImageItem()
-            fracs = self._scene_roi_fracs(img_item)
-            if fracs is not None and self._max_sizex and self._max_sizey:
-                result = self._fracs_to_sensor(*fracs)
-                if result:
-                    sx, sy, sw, sh = result
-                    self.roi_info_label.setText(
-                        f"ROI  x={sx}  y={sy}  w={sw}  h={sh}  (sensor px)")
-                    return
+        result = self._roi_to_sensor()
+        if result is not None:
+            sx, sy, sx1, sy1 = result
+            sw = max(1, sx1 - sx)
+            sh = max(1, sy1 - sy)
+            self.roi_info_label.setText(
+                f"ROI  x={sx}  y={sy}  w={sw}  h={sh}  (sensor px)")
+            return
         pos  = self.roi.pos()
         size = self.roi.size()
         self.roi_info_label.setText(
@@ -608,26 +625,6 @@ class DetectorControlDialog(QtWidgets.QDialog):
                 "Please draw an ROI first.")
             return
 
-        p = self.parent()
-        if not p or not hasattr(p, 'image_view'):
-            QtWidgets.QMessageBox.warning(self, "Error", "Cannot access image view.")
-            return
-
-        iv       = p.image_view
-        img_item = iv.getImageItem()
-        if img_item is None or img_item.image is None:
-            QtWidgets.QMessageBox.warning(self, "Error", "No image available.")
-            return
-
-        # ── Compute ROI fractions from scene space ───────────────────────
-        # Uses mapToScene on image corners — independent of display resolution,
-        # so it works even when the displayed image is tiny due to existing crop.
-        fracs = self._scene_roi_fracs(img_item)
-        if fracs is None:
-            self._log_message("Cannot compute ROI — image has zero extent")
-            return
-        cf0, cf1, rf0, rf1 = fracs
-
         sensor_w = self._max_sizex
         sensor_h = self._max_sizey
         if not sensor_w or not sensor_h:
@@ -635,34 +632,34 @@ class DetectorControlDialog(QtWidgets.QDialog):
                 "Sensor size unknown. Click 'Read Current' first.")
             return
 
-        # ── Convert fractions → sensor pixel ROI ─────────────────────────
-        result = self._fracs_to_sensor(cf0, cf1, rf0, rf1)
+        result = self._roi_to_sensor()
         if result is None:
+            QtWidgets.QMessageBox.warning(self, "Error",
+                "Cannot compute ROI. Is an image displayed?")
             return
-        sx, sy, sw, sh = result
-        sx1 = sx + sw
-        sy1 = sy + sh
+
+        sx, sy, sx1, sy1 = result
 
         # Vertical flip checkbox: tick if sensor hardware row 0 is at bottom
         if self.vertical_flip_check.isChecked():
-            sy  = sensor_h - sy1
-            sy1 = sy + sh
+            sy, sy1 = sensor_h - sy1, sensor_h - sy
 
         # Crop = pixels removed from each border
-        crop_left   = sx
-        crop_right  = sensor_w - sx1
-        crop_top    = sy
-        crop_bottom = sensor_h - sy1
+        crop_left   = max(0, sx)
+        crop_right  = max(0, sensor_w - sx1)
+        crop_top    = max(0, sy)
+        crop_bottom = max(0, sensor_h - sy1)
 
-        self._log_message(
-            f"Fracs: col=[{cf0:.3f},{cf1:.3f}] row=[{rf0:.3f},{rf1:.3f}]"
-        )
+        sw = max(1, sx1 - sx)
+        sh = max(1, sy1 - sy)
+
         self._log_message(
             f"Sensor ROI: x={sx} y={sy} w={sw} h={sh} "
             f"(sensor {sensor_w}×{sensor_h})"
         )
         self._log_message(
-            f"Crop: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}"
+            f"Crop: L={crop_left} R={crop_right} T={crop_top} B={crop_bottom}  "
+            f"sum_h={crop_left + sw + crop_right}  sum_v={crop_top + sh + crop_bottom}"
         )
 
         crop_prefix = self.crop_prefix_input.text()
