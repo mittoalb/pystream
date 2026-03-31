@@ -1399,9 +1399,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Update PyQtGraph image - FAST rendering
         self.image_view.setImage(img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
 
-        # Lock view range to image extent so it can't be dragged away
+        # Lock view range to image extent with margin so it can't be dragged away
         h, w = img.shape[:2]
-        self.image_view.view.setLimits(xMin=0, xMax=w, yMin=0, yMax=h)
+        pad_x = w * 0.05
+        pad_y = h * 0.05
+        self.image_view.view.setLimits(
+            xMin=-pad_x, xMax=w + pad_x,
+            yMin=-pad_y, yMax=h + pad_y,
+            minXRange=10, minYRange=10)
 
         # Update crosshair if enabled - ALWAYS CENTER IT
         if self.crosshair_enabled:
