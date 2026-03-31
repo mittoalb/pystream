@@ -572,9 +572,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
         self.image_view.view.setMouseMode(pg.ViewBox.PanMode)
-        # Allow scroll-wheel zoom but disable mouse-drag panning
-        self.image_view.view.setMouseEnabled(x=False, y=False)
-        self.image_view.view.wheelEvent = self._view_wheel_event
+        # Scroll-wheel zoom enabled, left-drag panning disabled
+        self.image_view.view.setMouseEnabled(x=True, y=True)
+        self.image_view.view.mouseDragEvent = lambda ev: ev.accept()
         
         # Add crosshair lines
         self.crosshair_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=2))
@@ -1654,15 +1654,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
         except (IndexError, ValueError):
             pass
     
-    def _view_wheel_event(self, ev):
-        """Handle scroll-wheel zoom while drag-panning is disabled."""
-        delta = ev.angleDelta().y()
-        if delta == 0:
-            return
-        factor = 1.1 if delta > 0 else 1 / 1.1
-        self.image_view.view.scaleBy((1 / factor, 1 / factor))
-        ev.accept()
-
     def _on_mouse_move(self, pos):
         if self._last_display_img is None:
             return
