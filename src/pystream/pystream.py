@@ -572,9 +572,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
         self.image_view.view.setMouseMode(pg.ViewBox.PanMode)
-        # Scroll-wheel zoom enabled, left-drag panning disabled
+        # Zoom and pan enabled; view range locked to image bounds
         self.image_view.view.setMouseEnabled(x=True, y=True)
-        self.image_view.view.mouseDragEvent = lambda ev: ev.accept()
         
         # Add crosshair lines
         self.crosshair_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=2))
@@ -1399,7 +1398,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Update PyQtGraph image - FAST rendering
         self.image_view.setImage(img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
-        
+
+        # Lock view range to image extent so it can't be dragged away
+        h, w = img.shape[:2]
+        self.image_view.view.setLimits(xMin=0, xMax=w, yMin=0, yMax=h)
+
         # Update crosshair if enabled - ALWAYS CENTER IT
         if self.crosshair_enabled:
             self.crosshair_y = img.shape[0] / 2.0
