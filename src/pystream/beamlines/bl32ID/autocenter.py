@@ -43,11 +43,11 @@ class AutoCenterDialog(QtWidgets.QDialog):
         # Per-element config: motor PVs and calibration
         self.element_configs = {
             "Pinhole":    {"x_pv": "32idb:m17", "y_pv": "32idb:m18",
-                           "mm_px_x": 0.000766, "mm_px_y": 0.000766},
+                           "mm_px_x": -0.000766, "mm_px_y": -0.000766},
             "Condenser":  {"x_pv": "32idb:m19", "y_pv": "32idb:m20",
-                           "mm_px_x": 0.000766, "mm_px_y": 0.000766},
+                           "mm_px_x": -0.000766, "mm_px_y": -0.000766},
             "Zone Plate": {"x_pv": "32idb:m25", "y_pv": "32idb:m26",
-                           "mm_px_x": 0.000766, "mm_px_y": 0.000766},
+                           "mm_px_x": -0.000766, "mm_px_y": -0.000766},
         }
 
         self._init_ui()
@@ -166,6 +166,9 @@ class AutoCenterDialog(QtWidgets.QDialog):
         self.cal_y_spin.setSuffix(" mm/px")
         self.cal_y_spin.valueChanged.connect(self._save_current_config)
         cl.addRow("Y calibration:", self.cal_y_spin)
+        self.swap_axes_check = QtWidgets.QCheckBox("Swap X/Y motor axes")
+        cl.addRow("", self.swap_axes_check)
+
         cal_group.setLayout(cl)
         vl.addWidget(cal_group)
 
@@ -528,6 +531,9 @@ class AutoCenterDialog(QtWidgets.QDialog):
             self._log("Motor PVs not configured")
             return
 
+        if self.swap_axes_check.isChecked():
+            dx_mm, dy_mm = dy_mm, dx_mm
+
         self._log(f"Moving: Δx={dx_mm:+.6f} mm  Δy={dy_mm:+.6f} mm")
         ok_x = self._move_relative(x_pv, dx_mm)
         ok_y = self._move_relative(y_pv, dy_mm)
@@ -599,6 +605,9 @@ class AutoCenterDialog(QtWidgets.QDialog):
             self._log("Motor PVs not configured — stopping")
             self._on_stop()
             return
+
+        if self.swap_axes_check.isChecked():
+            dx_mm, dy_mm = dy_mm, dx_mm
 
         self._move_relative(x_pv, dx_mm)
         self._move_relative(y_pv, dy_mm)
