@@ -571,10 +571,44 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view = pg.ImageView()
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
-        self.image_view.view.setMouseMode(pg.ViewBox.PanMode)
         self.image_view.view.setMouseEnabled(x=True, y=True)
-        self.image_view.getImageItem().setFlag(
-            self.image_view.getImageItem().ItemIsMovable, False)
+        # Custom drag: pan only when zoomed in, clamped to image bounds
+        self._img_full_range = None
+        _orig_drag = self.image_view.view.mouseDragEvent
+        def _clamped_drag(ev, orig=_orig_drag):
+            if ev.button() == QtCore.Qt.LeftButton:
+                vb = self.image_view.view
+                vr = vb.viewRange()
+                img_item = self.image_view.getImageItem()
+                if img_item is None or img_item.image is None:
+                    ev.accept()
+                    return
+                iw = img_item.width()
+                ih = img_item.height()
+                # Only allow pan if zoomed in (view range < image size)
+                if (vr[0][1] - vr[0][0]) >= iw and (vr[1][1] - vr[1][0]) >= ih:
+                    ev.accept()
+                    return
+                # Let pyqtgraph do the pan
+                orig(ev)
+                # Clamp view to image bounds
+                vr = vb.viewRange()
+                x0, x1 = vr[0]
+                y0, y1 = vr[1]
+                w = x1 - x0
+                h = y1 - y0
+                if x0 < 0:
+                    x0, x1 = 0, w
+                if x1 > iw:
+                    x0, x1 = iw - w, iw
+                if y0 < 0:
+                    y0, y1 = 0, h
+                if y1 > ih:
+                    y0, y1 = ih - h, ih
+                vb.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+            else:
+                orig(ev)
+        self.image_view.view.mouseDragEvent = _clamped_drag
 
         # Add crosshair lines
         self.crosshair_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=2))
