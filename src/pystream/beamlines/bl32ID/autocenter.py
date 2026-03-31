@@ -43,11 +43,11 @@ class AutoCenterDialog(QtWidgets.QDialog):
         # Per-element config: motor PVs and calibration
         self.element_configs = {
             "Pinhole":    {"x_pv": "32idb:m17", "y_pv": "32idb:m18",
-                           "um_px_x": 0.065, "um_px_y": 0.065},
+                           "mm_px_x": 0.000766, "mm_px_y": 0.000766},
             "Condenser":  {"x_pv": "32idb:m19", "y_pv": "32idb:m20",
-                           "um_px_x": 0.065, "um_px_y": 0.065},
+                           "mm_px_x": 0.000766, "mm_px_y": 0.000766},
             "Zone Plate": {"x_pv": "32idb:m25", "y_pv": "32idb:m26",
-                           "um_px_x": 0.065, "um_px_y": 0.065},
+                           "mm_px_x": 0.000766, "mm_px_y": 0.000766},
         }
 
         self._init_ui()
@@ -107,7 +107,7 @@ class AutoCenterDialog(QtWidgets.QDialog):
         sl.addRow("Detected center:", self.lbl_detected)
         sl.addRow("Target:", self.lbl_target)
         sl.addRow("Offset (px):", self.lbl_offset_px)
-        sl.addRow("Offset (µm):", self.lbl_offset_um)
+        sl.addRow("Offset (mm):", self.lbl_offset_um)
         status_group.setLayout(sl)
         vl.addWidget(status_group)
 
@@ -156,14 +156,14 @@ class AutoCenterDialog(QtWidgets.QDialog):
         self.cal_x_spin = QtWidgets.QDoubleSpinBox()
         self.cal_x_spin.setRange(-1000, 1000)
         self.cal_x_spin.setDecimals(4)
-        self.cal_x_spin.setSuffix(" µm/px")
+        self.cal_x_spin.setSuffix(" mm/px")
         self.cal_x_spin.valueChanged.connect(self._save_current_config)
         cl.addRow("X calibration:", self.cal_x_spin)
 
         self.cal_y_spin = QtWidgets.QDoubleSpinBox()
         self.cal_y_spin.setRange(-1000, 1000)
         self.cal_y_spin.setDecimals(4)
-        self.cal_y_spin.setSuffix(" µm/px")
+        self.cal_y_spin.setSuffix(" mm/px")
         self.cal_y_spin.valueChanged.connect(self._save_current_config)
         cl.addRow("Y calibration:", self.cal_y_spin)
         cal_group.setLayout(cl)
@@ -231,16 +231,16 @@ class AutoCenterDialog(QtWidgets.QDialog):
         cfg = self.element_configs.get(name, {})
         self.pv_x_input.setText(cfg.get("x_pv", ""))
         self.pv_y_input.setText(cfg.get("y_pv", ""))
-        self.cal_x_spin.setValue(cfg.get("um_px_x", 1.0))
-        self.cal_y_spin.setValue(cfg.get("um_px_y", 1.0))
+        self.cal_x_spin.setValue(cfg.get("mm_px_x", 1.0))
+        self.cal_y_spin.setValue(cfg.get("mm_px_y", 1.0))
 
     def _save_current_config(self):
         name = self.element_combo.currentText()
         self.element_configs[name] = {
             "x_pv": self.pv_x_input.text(),
             "y_pv": self.pv_y_input.text(),
-            "um_px_x": self.cal_x_spin.value(),
-            "um_px_y": self.cal_y_spin.value(),
+            "mm_px_x": self.cal_x_spin.value(),
+            "mm_px_y": self.cal_y_spin.value(),
         }
 
     def _current_config(self):
@@ -268,13 +268,13 @@ class AutoCenterDialog(QtWidgets.QDialog):
             self._log(f"caput {pv} failed: {e}")
             return False
 
-    def _move_relative(self, pv: str, delta_um: float) -> bool:
+    def _move_relative(self, pv: str, delta_mm: float) -> bool:
         cur = self._get_pv(f"{pv}.RBV")
         if cur is None:
             self._log(f"Cannot read {pv}.RBV")
             return False
-        new = cur + delta_um
-        self._log(f"Move {pv}: {cur:.4f} → {new:.4f} (Δ{delta_um:+.4f} µm)")
+        new = cur + delta_mm
+        self._log(f"Move {pv}: {cur:.4f} → {new:.4f} (Δ{delta_mm:+.4f} mm)")
         return self._set_pv(pv, new)
 
     # ── Image access ─────────────────────────────────────────────────────
@@ -493,14 +493,14 @@ class AutoCenterDialog(QtWidgets.QDialog):
         target = self._get_target(img)
         dx, dy = self._compute_offset(detected, target)
         cfg = self._current_config()
-        dx_um = dx * cfg.get("um_px_x", 1.0)
-        dy_um = dy * cfg.get("um_px_y", 1.0)
+        dx_mm = dx * cfg.get("mm_px_x", 1.0)
+        dy_mm = dy * cfg.get("mm_px_y", 1.0)
 
         self.lbl_detected.setText(f"({detected[0]:.1f}, {detected[1]:.1f})")
         self.lbl_target.setText(f"({target[0]:.1f}, {target[1]:.1f})")
         self.lbl_offset_px.setText(f"Δx={dx:.1f}  Δy={dy:.1f}  "
                                    f"dist={math.hypot(dx, dy):.1f}")
-        self.lbl_offset_um.setText(f"Δx={dx_um:.2f}  Δy={dy_um:.2f} µm")
+        self.lbl_offset_um.setText(f"Δx={dx_mm:.2f}  Δy={dy_mm:.2f} mm")
         self._draw_overlay(detected, target)
 
     def _on_center(self):
@@ -519,8 +519,8 @@ class AutoCenterDialog(QtWidgets.QDialog):
         target = self._get_target(img)
         dx, dy = self._compute_offset(self.last_detection, target)
         cfg = self._current_config()
-        dx_um = dx * cfg.get("um_px_x", 1.0)
-        dy_um = dy * cfg.get("um_px_y", 1.0)
+        dx_mm = dx * cfg.get("mm_px_x", 1.0)
+        dy_mm = dy * cfg.get("mm_px_y", 1.0)
 
         x_pv = cfg.get("x_pv", "")
         y_pv = cfg.get("y_pv", "")
@@ -528,9 +528,9 @@ class AutoCenterDialog(QtWidgets.QDialog):
             self._log("Motor PVs not configured")
             return
 
-        self._log(f"Moving: Δx={dx_um:+.3f} µm  Δy={dy_um:+.3f} µm")
-        ok_x = self._move_relative(x_pv, dx_um)
-        ok_y = self._move_relative(y_pv, dy_um)
+        self._log(f"Moving: Δx={dx_mm:+.6f} mm  Δy={dy_mm:+.6f} mm")
+        ok_x = self._move_relative(x_pv, dx_mm)
+        ok_y = self._move_relative(y_pv, dy_mm)
         if ok_x and ok_y:
             self._log("Move complete")
         else:
@@ -590,8 +590,8 @@ class AutoCenterDialog(QtWidgets.QDialog):
 
         # Move
         cfg = self._current_config()
-        dx_um = dx * cfg.get("um_px_x", 1.0)
-        dy_um = dy * cfg.get("um_px_y", 1.0)
+        dx_mm = dx * cfg.get("mm_px_x", 1.0)
+        dy_mm = dy * cfg.get("mm_px_y", 1.0)
         x_pv = cfg.get("x_pv", "")
         y_pv = cfg.get("y_pv", "")
 
@@ -600,8 +600,8 @@ class AutoCenterDialog(QtWidgets.QDialog):
             self._on_stop()
             return
 
-        self._move_relative(x_pv, dx_um)
-        self._move_relative(y_pv, dy_um)
+        self._move_relative(x_pv, dx_mm)
+        self._move_relative(y_pv, dy_mm)
 
         # Wait for settle then repeat
         settle_ms = int(self.settle_spin.value() * 1000)
