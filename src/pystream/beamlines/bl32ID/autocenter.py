@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
+from .plugin_settings import load_settings, save_settings
 
 try:
     from scipy.ndimage import gaussian_filter, label as ndimage_label
@@ -51,6 +52,7 @@ class AutoCenterDialog(QtWidgets.QDialog):
         }
 
         self._init_ui()
+        self._restore_settings()
 
     # ── UI ────────────────────────────────────────────────────────────────
 
@@ -678,7 +680,41 @@ class AutoCenterDialog(QtWidgets.QDialog):
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 
+    def _restore_settings(self):
+        s = load_settings("AutoCenterDialog")
+        if not s:
+            return
+        # Per-element configs
+        for name in self.ELEMENTS:
+            if name in s.get("elements", {}):
+                self.element_configs[name] = s["elements"][name]
+        self.swap_axes_check.setChecked(s.get("swap_axes", False))
+        self.thresh_mode.setCurrentIndex(s.get("thresh_mode", 0))
+        self.thresh_spin.setValue(s.get("thresh_manual", 30))
+        self.target_x_spin.setValue(s.get("target_x", 0))
+        self.target_y_spin.setValue(s.get("target_y", 0))
+        self.tol_spin.setValue(s.get("tolerance", 2.0))
+        self.max_iter_spin.setValue(s.get("max_iter", 10))
+        self.settle_spin.setValue(s.get("settle", 1.0))
+        # Refresh UI for current element
+        self._on_element_changed(self.element_combo.currentText())
+
+    def _persist_settings(self):
+        self._save_current_config()  # flush current element fields to dict
+        save_settings("AutoCenterDialog", {
+            "elements": self.element_configs,
+            "swap_axes": self.swap_axes_check.isChecked(),
+            "thresh_mode": self.thresh_mode.currentIndex(),
+            "thresh_manual": self.thresh_spin.value(),
+            "target_x": self.target_x_spin.value(),
+            "target_y": self.target_y_spin.value(),
+            "tolerance": self.tol_spin.value(),
+            "max_iter": self.max_iter_spin.value(),
+            "settle": self.settle_spin.value(),
+        })
+
     def closeEvent(self, event):
         self.is_centering = False
         self._clear_overlay()
+        self._persist_settings()
         event.accept()

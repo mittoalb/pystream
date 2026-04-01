@@ -12,6 +12,7 @@ from typing import Optional, Deque
 from collections import deque
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
+from .plugin_settings import load_settings, save_settings
 
 
 class RotationAxisDialog(QtWidgets.QDialog):
@@ -33,6 +34,7 @@ class RotationAxisDialog(QtWidgets.QDialog):
         self.axis_history = []
 
         self._init_ui()
+        self._restore_settings()
 
     def _init_ui(self):
         """Initialize the user interface."""
@@ -469,4 +471,20 @@ class RotationAxisDialog(QtWidgets.QDialog):
         # Remove axis line from image view
         self._hide_axis_line()
 
+        self._persist_settings()
         event.accept()
+
+    def _restore_settings(self):
+        s = load_settings("RotationAxisDialog")
+        if not s:
+            return
+        self.buffer_size_spin.setValue(s.get("buffer_size", self.buffer_size_spin.value()))
+        self.show_axis_checkbox.setChecked(s.get("show_axis", True))
+        self.auto_update_checkbox.setChecked(s.get("auto_update", True))
+
+    def _persist_settings(self):
+        save_settings("RotationAxisDialog", {
+            "buffer_size": self.buffer_size_spin.value(),
+            "show_axis": self.show_axis_checkbox.isChecked(),
+            "auto_update": self.auto_update_checkbox.isChecked(),
+        })

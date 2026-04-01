@@ -18,6 +18,7 @@ import logging
 import numpy as np
 from typing import Optional
 from PyQt5 import QtWidgets, QtCore
+from .plugin_settings import load_settings, save_settings
 
 
 class SoftBPMDialog(QtWidgets.QDialog):
@@ -389,12 +390,33 @@ class SoftBPMDialog(QtWidgets.QDialog):
             self.plot_curve.setData(self.time_data, self.intensity_data)
 
     def _load_settings(self):
-        """Load settings from config file."""
-        pass
+        s = load_settings("SoftBPMDialog")
+        if not s:
+            return
+        self.threshold_input.setValue(s.get("threshold", self.threshold_input.value()))
+        self.test_mode_checkbox.setChecked(s.get("test_mode", False))
+        self.poll_interval_input.setValue(s.get("poll_interval", self.poll_interval_input.value()))
+        self.motor1_step.setValue(s.get("motor1_step", self.motor1_step.value()))
+        self.motor2_step.setValue(s.get("motor2_step", self.motor2_step.value()))
+        self.hdf5_location_pv.setText(s.get("hdf5_location_pv", self.hdf5_location_pv.text()))
+        self.image_pv_input.setText(s.get("image_pv", self.image_pv_input.text()))
+        self.beam_current_pv_input.setText(s.get("beam_current_pv", self.beam_current_pv_input.text()))
+        self.motor1_pv.setText(s.get("motor1_pv", self.motor1_pv.text()))
+        self.motor2_pv.setText(s.get("motor2_pv", self.motor2_pv.text()))
 
     def _save_settings(self):
-        """Save settings to config file."""
-        pass
+        save_settings("SoftBPMDialog", {
+            "threshold": self.threshold_input.value(),
+            "test_mode": self.test_mode_checkbox.isChecked(),
+            "poll_interval": self.poll_interval_input.value(),
+            "motor1_step": self.motor1_step.value(),
+            "motor2_step": self.motor2_step.value(),
+            "hdf5_location_pv": self.hdf5_location_pv.text(),
+            "image_pv": self.image_pv_input.text(),
+            "beam_current_pv": self.beam_current_pv_input.text(),
+            "motor1_pv": self.motor1_pv.text(),
+            "motor2_pv": self.motor2_pv.text(),
+        })
 
     def closeEvent(self, event):
         """Handle dialog close event."""
@@ -409,10 +431,12 @@ class SoftBPMDialog(QtWidgets.QDialog):
 
             if reply == QtWidgets.QMessageBox.Yes:
                 self._stop_monitoring()
+                self._save_settings()
                 event.accept()
             else:
                 event.ignore()
         else:
+            self._save_settings()
             event.accept()
 
 

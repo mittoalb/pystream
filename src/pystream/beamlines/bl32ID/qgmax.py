@@ -13,6 +13,7 @@ import time
 from typing import Optional, Tuple
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
+from .plugin_settings import load_settings, save_settings
 
 
 class QGMaxDialog(QtWidgets.QDialog):
@@ -60,6 +61,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.fine_multiplier = 1.0  # Fine step = step_size * 1
 
         self._init_ui()
+        self._restore_settings()
         self._load_current_values()
 
     def _init_ui(self):
@@ -798,4 +800,34 @@ class QGMaxDialog(QtWidgets.QDialog):
             self.optimization_timer.stop()
             self._log_message("Stopped optimization (dialog closed)")
 
+        self._persist_settings()
         event.accept()
+
+    def _restore_settings(self):
+        s = load_settings("QGMaxDialog")
+        if not s:
+            return
+        self.motor1_pv_input.setText(s.get("motor1_pv", self.motor1_pv_input.text()))
+        self.motor1_step_input.setValue(s.get("motor1_step", self.motor1_step_input.value()))
+        self.motor2_pv_input.setText(s.get("motor2_pv", self.motor2_pv_input.text()))
+        self.motor2_step_input.setValue(s.get("motor2_step", self.motor2_step_input.value()))
+        self.interval_input.setValue(s.get("interval", self.interval_input.value()))
+        self.max_iterations_input.setValue(s.get("max_iterations", self.max_iterations_input.value()))
+        self.convergence_threshold_input.setValue(s.get("convergence_threshold", self.convergence_threshold_input.value()))
+        self.hdf5_location_pv_input.setText(s.get("hdf5_location_pv", self.hdf5_location_pv_input.text()))
+        self.tomoscan_pause_pv_input.setText(s.get("tomoscan_pause_pv", self.tomoscan_pause_pv_input.text()))
+        self.run_every_input.setValue(s.get("run_every", self.run_every_input.value()))
+
+    def _persist_settings(self):
+        save_settings("QGMaxDialog", {
+            "motor1_pv": self.motor1_pv_input.text(),
+            "motor1_step": self.motor1_step_input.value(),
+            "motor2_pv": self.motor2_pv_input.text(),
+            "motor2_step": self.motor2_step_input.value(),
+            "interval": self.interval_input.value(),
+            "max_iterations": self.max_iterations_input.value(),
+            "convergence_threshold": self.convergence_threshold_input.value(),
+            "hdf5_location_pv": self.hdf5_location_pv_input.text(),
+            "tomoscan_pause_pv": self.tomoscan_pause_pv_input.text(),
+            "run_every": self.run_every_input.value(),
+        })

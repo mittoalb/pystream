@@ -11,6 +11,7 @@ import logging
 from typing import Optional
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
+from .plugin_settings import load_settings, save_settings
 
 
 class DetectorControlDialog(QtWidgets.QDialog):
@@ -32,6 +33,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self._max_sizey = None
 
         self._init_ui()
+        self._restore_settings()
         self._load_current_values()
 
     def _init_ui(self):
@@ -694,7 +696,23 @@ class DetectorControlDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Error",
                 "Failed to remove ROI. Check log for details.")
 
+    def _restore_settings(self):
+        s = load_settings("DetectorControlDialog")
+        if not s:
+            return
+        self.pv_prefix_input.setText(s.get("pv_prefix", self.pv_prefix_input.text()))
+        self.crop_prefix_input.setText(s.get("crop_prefix", self.crop_prefix_input.text()))
+        self.vertical_flip_check.setChecked(s.get("vertical_flip", False))
+
+    def _persist_settings(self):
+        save_settings("DetectorControlDialog", {
+            "pv_prefix": self.pv_prefix_input.text(),
+            "crop_prefix": self.crop_prefix_input.text(),
+            "vertical_flip": self.vertical_flip_check.isChecked(),
+        })
+
     def closeEvent(self, event):
+        self._persist_settings()
         self._roi_erase()
         self._uninstall_filter()
         event.accept()
