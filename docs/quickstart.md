@@ -111,13 +111,13 @@ PyStream includes a high-performance recording system with RAM buffering for cap
    - Shows completion summary with total frames and output directory
 
 **Recording Features:**
-- **Non-blocking I/O**: Background thread prevents GUI freezes during high-speed capture
-- **TIFF format**: Saves as 16-bit TIFF with deflate compression
-- **RAM buffering**: 100-frame queue for smooth capture at high frame rates
+- **Parallel writer pool**: Configurable number of writer threads (1-16, default 4)
+- **TIFF format**: Saves as individual TIFF files (compression optional)
+- **Large queue**: Up to 512 frames buffered for burst capture
 - **Live monitoring**: Real-time display of frames captured and queue depth
-- **Async flush**: Non-blocking completion with progress feedback
+- **Decoupled from display**: Recording captures every frame before display FPS throttle
 
-**Performance:** Successfully tested at 50 FPS with 2048×2048 images
+**Performance:** Tested at 100 FPS with 2400x3200 images using 4 parallel writers
 
 ### Flat-Field Correction
 - **Capture**: save current frame as flat reference
@@ -139,9 +139,15 @@ PyStream includes a high-performance recording system with RAM buffering for cap
 - **Scalebar**: Visual scale reference overlay
 - **Metrics**: Image quality and information metrics
 
-### Beamline-Specific Tools
-- **Mosalign** (bl32ID): 2D motor scanning with image stitching and tomoscan integration
-- Additional beamline tools are automatically discovered from the beamlines directory
+### Beamline-Specific Tools (bl32ID)
+- **Detector Control**: Camera binning, ROI drawing, crop PV control
+- **SoftBPM**: Software beam position monitor with automatic motor adjustment
+- **QGMax**: Beam intensity optimizer (gradient-based motor optimization)
+- **AutoCenter**: Automatic centering of optical elements (pinhole, condenser, zone plate)
+- **AutoROT**: Rotation axis detection for tomography alignment
+- **TXM Optics**: Optics calculator with effective pixel size PV setter
+- **Mosalign**: 2D motor scanning with image stitching
+- All plugin settings (PVs, calibrations) persist between sessions
 
 ---
 

@@ -1,6 +1,6 @@
 # bl32ID Beamline Plugins
 
-Advanced Photon Source beamline 32-ID specialized tools for tomography and imaging.
+Advanced Photon Source beamline 32-ID specialized tools for TXM tomography and imaging.
 
 ## Overview
 
@@ -8,77 +8,75 @@ The bl32ID beamline package provides built-in tools and launchers for optional e
 
 ### Built-in Tools (Always Available)
 
-- **Detector Control**: Manage camera binning and ROI settings
+- **Detector Control**: Camera binning, ROI drawing, and crop PV control
 - **SoftBPM**: Software beam position monitor with automatic motor adjustment
+- **QGMax**: Beam intensity optimizer using gradient-based motor optimization
+- **AutoCenter**: Automatic centering of optical elements (pinhole, condenser, zone plate)
+- **AutoROT**: Rotation axis detection for tomography alignment
 - **Mosalign**: 2D motor scanning with image stitching
 
 ### Optional External Tools (Install Separately)
 
 - **XANES GUI**: Energy calibration and XANES scanning control
-- **Optics Calculator**: TXM optics parameter calculator
+- **TXM Optics**: Optics parameter calculator with effective pixel size PV setter
 
 External tools are optional packages installed separately. Click the button to launch - if not installed, you'll see installation instructions.
 
+### Settings Persistence
+
+All plugins automatically save their configuration (PV names, calibration values, thresholds, etc.) to `~/.pystream_bl32ID_settings.json` when closed, and restore them on next open.
+
 ## Detector Control
 
-Controls detector binning and region-of-interest (ROI) for the area detector camera.
+Controls detector binning, region-of-interest, and crop settings for the area detector camera.
 
 ### Features
 
 - **Binning Control**: Set X and Y binning factors (1-16)
-- **ROI Drawing**: Interactive ROI rectangle on live image
-- **Direct PV Control**: Apply settings directly to detector PVs
-- **Real-time Feedback**: Read and display current detector settings
+- **ROI Drawing**: Press-drag-release ROI drawing on live image with 8 resize handles
+- **Crop PV Control**: Sets CropLeft/Right/Top/Bottom (pixels removed from each border)
+- **Vertical Flip**: Swap top/bottom for sensors with inverted row orientation
+- **Real-time Feedback**: Live crop values displayed as you drag the ROI
+- **Settings Persistence**: PV prefixes and flip state saved between sessions
 
 ### Controlled PVs
 
-The plugin controls the following EPICS PVs (default prefix: `32idbSP1:cam1`):
+| PV Prefix | PV | Description |
+|---|---|---|
+| Camera (`32idbSP1:cam1`) | `BinX`, `BinY` | Binning factors |
+| Camera | `SizeX`, `SizeY` | Image dimensions (auto-computed) |
+| Camera | `MaxSizeX_RBV`, `MaxSizeY_RBV` | Full sensor size readback |
+| Crop (`32id:TXMOptics`) | `CropLeft`, `CropRight` | Pixels removed from left/right borders |
+| Crop | `CropTop`, `CropBottom` | Pixels removed from top/bottom borders |
+| Crop | `Crop` | Apply crop trigger (set to 1) |
 
-| PV | Description |
-|---|---|
-| `BinX` | X-axis binning factor |
-| `BinY` | Y-axis binning factor |
-| `MinX` | ROI minimum X position (unbinned pixels) |
-| `MinY` | ROI minimum Y position (unbinned pixels) |
-| `SizeX` | ROI width (automatically updated with binning) |
-| `SizeY` | ROI height (automatically updated with binning) |
+### ROI Drawing
+
+1. Click **Enable ROI Drawing** - cursor changes to crosshair
+2. Press left mouse button at one corner
+3. Drag to opposite corner (live red preview rectangle)
+4. Release to create ROI with 8 resize handles (4 corners + 4 edges)
+5. Drag handles to adjust, or drag body to move
+6. Click **Apply ROI to Detector** to set crop PVs
+
+### Crop Logic
+
+Crop values are distances from each sensor border to the ROI edge:
+
+```
+CropLeft + ROI_width + CropRight = sensor_width
+CropTop + ROI_height + CropBottom = sensor_height
+```
+
+Example: 2000px ROI centered on 3232px sensor:
+- CropLeft = CropRight = (3232 - 2000) / 2 = 616
 
 ### Usage
 
-1. **Open the Plugin**
-   - Click "Detectorcontrol" button in the bl32ID beamlines toolbar
-
-2. **Set Binning**
-   - Adjust BinX and BinY spinboxes (range: 1-16)
-   - Click "Apply Binning" to push values to detector
-   - Click "Read Current" to verify settings
-
-3. **Draw and Apply ROI**
-   - Click "Enable ROI Drawing" to show interactive ROI
-   - Red rectangle appears on the live image
-   - Drag corners/edges to resize
-   - Drag center to reposition
-   - Click "Apply ROI to Detector" to push coordinates to detector PVs
-
-4. **Reset ROI**
-   - Click "Reset ROI" to center ROI at 50% of image size
-
-### Notes
-
-- **Binning updates Size**: When binning changes, SizeX/SizeY automatically update to reflect the binned dimensions
-- **Unbinned coordinates**: ROI coordinates (MinX, MinY) are always in unbinned pixel units
-- **PV Prefix**: The camera PV prefix can be changed in the dialog if using a different detector
-- **Live image required**: ROI drawing requires a live image from the parent viewer
-
-### Example Workflow
-
-```
-1. Set binning to 2x2 for faster readout
-2. Enable ROI drawing
-3. Adjust ROI to region of interest (e.g., sample area)
-4. Apply ROI to detector
-5. Detector now acquires binned 2x2 images of the selected region
-```
+1. Click **Read Current** to load detector settings and sensor size
+2. Click **Remove ROI (Full Frame)** to start from the full sensor
+3. Click **Enable ROI Drawing** and draw the desired region
+4. Click **Apply ROI to Detector** to set crop PVs
 
 ## SoftBPM (Software Beam Position Monitor)
 
@@ -184,13 +182,131 @@ The algorithm performs simple gradient ascent to find the intensity maximum.
 7. Monitor continues and adjusts motors as needed
 ```
 
+## QGMax (Beam Intensity Optimizer)
+
+Optimizes two motors to maximize image mean value using a two-stage gradient-based algorithm.
+
+### Features
+
+- **Two-Stage Optimization**: Coarse scan (5x step) then fine scan (1x step)
+- **Two-Motor Support**: Alternates between Motor 1 and Motor 2
+- **Direction Auto-Detection**: Reverses direction on consecutive decreases
+- **Manual and Automated Mode**: Run once or continuously synchronized with TomoScan
+- **Status PV**: External monitoring via `32id:pystream:qgmax`
+
+### Default PVs
+
+| PV | Description |
+|---|---|
+| `32id:m1` | Motor 1 for optimization |
+| `32id:m2` | Motor 2 for optimization |
+| `32id:TomoScan:HDF5Location` | Trigger PV for automated mode |
+| `32id:TomoScan:Pause` | Pause PV for synchronized optimization |
+
+### Settings
+
+| Parameter | Default | Description |
+|---|---|---|
+| Motor Step Size | 0.01 | Base step size for each motor |
+| Optimization Interval | 60 s | Interval between optimization cycles |
+| Max Iterations | 5 | Maximum steps per motor per cycle |
+| Convergence Threshold | 0.5% | Stop when improvement < threshold |
+| Run Every N | 1 | Run every N `/exchange/data` triggers |
+
+### Algorithm
+
+1. Motor 1 Coarse Stage: try direction at 5x step, track best position
+2. Motor 1 Fine Stage: refine at 1x step
+3. After 2 consecutive decreases, return to best position and switch motors
+4. Motor 2: repeat coarse + fine stages
+
+---
+
+## AutoCenter (Optical Element Centering)
+
+Automatically detects and centers optical elements (pinhole, condenser, zone plate) by analyzing the camera image and moving X/Y motors.
+
+### Features
+
+- **Three Element Types**: Pinhole, Condenser, Zone Plate with per-element motor PVs and calibration
+- **Detection Algorithms**: Threshold + center-of-mass, edge detection + circle fitting
+- **Visual Overlay**: Red cross at detected center, green circle at target, crosshair lines
+- **Single or Iterative Centering**: One-shot or automatic detect-move-repeat loop
+- **Swap Axes**: Checkbox to swap X/Y motor assignments if needed
+
+### Detection Algorithms
+
+| Element | Algorithm |
+|---|---|
+| Pinhole | Otsu threshold, center of mass of bright pixels |
+| Condenser | Largest connected component center of mass |
+| Zone Plate | Gradient edge detection + Kasa circle fit with outlier rejection (ignores bright square) |
+
+### Calibration
+
+- **mm/px**: Motor movement (mm) per pixel of image offset
+- **Sign matters**: Negative if motor direction is opposite to image shift
+- **Default**: -0.000766 mm/px (0.766 um pixel size)
+- **Note**: Motors at 32-ID are in mm. Adjust calibration for actual magnification between element and camera.
+
+### Settings
+
+| Parameter | Default | Description |
+|---|---|---|
+| Calibration (mm/px) | -0.000766 | Per element, per axis |
+| Swap X/Y | Off | Swap motor axis assignments |
+| Threshold | Auto (Otsu) | Automatic or manual |
+| Target | Image center | Target position (0 = image center) |
+| Tolerance | 2.0 px | Stop iterating when offset < tolerance |
+| Max Iterations | 10 | Maximum centering iterations |
+| Settle Time | 1.0 s | Wait between move and re-detect |
+
+### Usage
+
+1. Select element type (Pinhole, Condenser, Zone Plate)
+2. Set motor PVs and calibration in Settings tab
+3. Click **Detect** to find the element and show overlay
+4. Click **Center** for a single move toward target
+5. Click **Auto Center** for iterative centering until within tolerance
+
+---
+
+## AutoROT (Rotation Axis Detection)
+
+Detects the vertical rotation axis position in tomography image sequences using variance analysis.
+
+### Features
+
+- **Variance-Based Detection**: Finds rotation axis as minimum of column-variance profile
+- **Parabola Fitting**: Sub-pixel accuracy via quadratic fit
+- **Confidence Score**: R-squared from fit quality
+- **Visual Overlay**: Vertical line on image at detected axis position
+- **Auto Update**: Continuously updates as new images arrive
+
+### Algorithm
+
+1. Buffers N recent images (configurable, default 10)
+2. Computes per-pixel variance across the image stack
+3. Projects to 1D variance profile (mean variance per column)
+4. Fits parabola to find the minimum (rotation axis)
+
+---
+
+## TXM Optics Calculator
+
+Launches the external TXM Optics Calculator and provides a button to write the effective pixel size to `32id:TXMOptics:ImagePixelSize`.
+
+The **Set Pixel Size PV** button is next to Calculate/Reset/Export in the calculator. It reads the computed "Effective Pixel (nm)" value and writes it to the PV.
+
+---
+
 ## Mosalign
 
 2D motor scanning with image stitching and tomoscan integration. See [Mosalign Documentation](../plugins/mosalign.md) for complete details.
 
-## Installation Notes
+## Settings File
 
-All bl32ID plugins are automatically discovered and loaded by PyStream. No additional installation or configuration is required beyond installing PyStream itself.
+All plugin settings are stored in `~/.pystream_bl32ID_settings.json`. This file is created automatically on first use and updated whenever a plugin dialog is closed. Delete this file to reset all plugins to defaults.
 
 ## Requirements
 
@@ -198,6 +314,7 @@ All bl32ID plugins are automatically discovered and loaded by PyStream. No addit
 - pyqtgraph
 - pvaccess (for PVAccess image data)
 - numpy
+- scipy (optional, improves zone plate detection and condenser blob detection)
 - EPICS environment properly configured
 
 ## Troubleshooting
@@ -207,55 +324,58 @@ All bl32ID plugins are automatically discovered and loaded by PyStream. No addit
 **ROI not appearing:**
 - Ensure a live image is displayed in the viewer
 - Check that "Enable ROI Drawing" is toggled on
-- Verify parent viewer has `image_view` attribute
 
-**PV connection fails:**
-- Verify camera PV prefix is correct
-- Test with `caget 32idbSP1:cam1:BinX`
-- Check EPICS environment variables
+**Crop values seem wrong:**
+- Click "Remove ROI (Full Frame)" first to start from the full sensor
+- The ROI drawn on an already-cropped image only selects within the visible region
 
-### SoftBPM
+### AutoCenter
 
-**No data updating:**
-- Verify viewer is receiving and displaying images
-- Check HDF5Location PV is set to `/exchange/data_white`
-- Verify beam current PV is readable
-- Check log for connection errors
+**Element not detected:**
+- Switch threshold from Auto to Manual and adjust the percentage
+- Ensure the element is visible with sufficient contrast
 
-**Empty frames triggering adjustment:**
-- Plugin automatically skips frames < 70% of reference
-- Adjust threshold if needed
+**Motor moves wrong direction:**
+- Change the sign of the calibration (positive <-> negative)
+- If X/Y are swapped, check the "Swap X/Y motor axes" checkbox
+
+**Centering takes many iterations:**
+- The calibration (mm/px) is likely wrong for the current magnification
+- Measure: move motor by known amount, count pixel shift, recompute
+
+### SoftBPM / QGMax
 
 **Motors not moving:**
-- Check Test Mode is disabled
+- Check Test Mode is disabled (SoftBPM)
 - Verify motor PVs are correct and writable
 - Check motor permissions in EPICS
 
 ### General
 
 **Plugin not appearing in toolbar:**
-- Check bl32ID directory exists in `src/pystream/beamlines/`
-- Verify `__init__.py` properly exports dialog classes
+- Verify `__init__.py` exports the dialog class
 - Check PyStream log for import errors
+
+**Settings not saving:**
+- Check write permissions to `~/.pystream_bl32ID_settings.json`
+- Settings save on dialog close, not on every change
 
 **EPICS connectivity:**
 - Set EPICS environment: `EPICS_CA_ADDR_LIST`, `EPICS_CA_AUTO_ADDR_LIST`
-- Test PV access: `caget <PV_NAME>`
-- Check IOC status and network connectivity
+- Test with `caget <PV_NAME>`
 
 ## Development
 
-To modify or extend bl32ID plugins:
+To add a new plugin:
 
-1. Navigate to `src/pystream/beamlines/bl32ID/`
-2. Edit the plugin file (e.g., `detectorcontrol.py`)
-3. Update `__init__.py` if adding new dialog classes
-4. Restart PyStream to load changes
-
-For hot-reloading during development, consider using Python's `importlib.reload()`.
+1. Create `my_plugin.py` in `src/pystream/beamlines/bl32ID/`
+2. Class inherits `QtWidgets.QDialog` with `BUTTON_TEXT` and `HANDLER_TYPE = 'singleton'`
+3. Use `from .plugin_settings import load_settings, save_settings` for persistence
+4. Add to `__init__.py`: import and append to `__all__`
+5. Restart PyStream
 
 ## See Also
 
 - [Beamlines Plugin System](index.md) - Overview of the beamlines architecture
-- [Mosalign Documentation](../plugins/mosalign.md) - Detailed mosalign guide
+- [Configuration Guide](configuration.md) - Beamline configuration
 - [PyStream API](../api.md) - Core PyStream API reference

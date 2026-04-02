@@ -47,6 +47,33 @@
    :no-index:
 ```
 
+### bl32ID - QGMax
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.qgmax
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
+### bl32ID - AutoCenter
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.autocenter
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
+### bl32ID - Rotation Axis
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.rotationaxis
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
 ## Note
 
 Full API documentation requires the package to be installed. Install with:

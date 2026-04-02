@@ -53,11 +53,13 @@ Real-time statistics for pixels inside the ellipse:
 
 ### Basic Workflow
 
-1. Enable the ellipse ROI checkbox
-2. A default ellipse appears at the image center
-3. Drag handles to resize or reshape the ellipse
-4. Drag the center to reposition
-5. View real-time statistics in the side panel
+1. Enable the ellipse ROI checkbox - cursor changes to crosshair
+2. **Press** left mouse button at one corner of the bounding box
+3. **Drag** to the opposite corner (live preview ellipse)
+4. **Release** to place the ellipse with 8 resize handles
+5. Drag handles to resize or reshape
+6. Drag the body to reposition
+7. View real-time statistics in the side panel
 
 ### Python API
 

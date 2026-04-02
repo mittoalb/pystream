@@ -48,12 +48,14 @@ Real-time statistics for pixels inside the rectangle:
 
 ### Basic Workflow
 
-1. Enable the rectangle ROI checkbox
-2. A default rectangle appears at the image center
-3. Drag corner handles for diagonal resizing
-4. Drag edge handles for single-axis resizing
-5. Drag the center to reposition
-6. View real-time statistics in the side panel
+1. Enable the rectangle ROI checkbox - cursor changes to crosshair
+2. **Press** left mouse button at one corner of the desired region
+3. **Drag** to the opposite corner (live yellow preview rectangle)
+4. **Release** to place the ROI with 8 resize handles
+5. Drag corner handles for diagonal resizing
+6. Drag edge handles for single-axis resizing
+7. Drag the body to reposition
+8. View real-time statistics in the side panel
 
 ### Python API
 

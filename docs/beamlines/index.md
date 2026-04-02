@@ -96,11 +96,17 @@ To add your own beamline-specific tools:
 
 ### bl32ID
 
-Advanced Photon Source beamline 32-ID with specialized tools for tomography and imaging:
+Advanced Photon Source beamline 32-ID with specialized tools for TXM tomography and imaging:
 
-- **Detector Control**: Manage camera binning and ROI settings
+- **Detector Control**: Camera binning, ROI drawing, and crop PV control
 - **SoftBPM**: Software beam position monitor with automatic motor adjustment
+- **QGMax**: Beam intensity optimizer using gradient-based motor optimization
+- **AutoCenter**: Automatic centering of optical elements (pinhole, condenser, zone plate)
+- **AutoROT**: Rotation axis detection for tomography alignment
+- **TXM Optics**: Optics calculator launcher with effective pixel size PV setter
 - **Mosalign**: 2D motor scanning with image stitching and tomoscan integration
+
+All plugins persist their settings (PV names, calibrations, thresholds) to `~/.pystream_bl32ID_settings.json`.
 
 See [bl32ID Documentation](bl32ID.md) for complete details on all plugins.
 
