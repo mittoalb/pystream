@@ -677,9 +677,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.btn_record)
         
         self.chk_autoscale = QtWidgets.QCheckBox("Auto")
-        self.chk_autoscale.setChecked(True)
+        self.chk_autoscale.setChecked(False)
         self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
         top_layout.addWidget(self.chk_autoscale)
+
+        self.chk_roi_contrast = QtWidgets.QCheckBox("ROI Contrast")
+        self.chk_roi_contrast.setChecked(False)
+        self.chk_roi_contrast.setToolTip("Adjust contrast based on ROI region")
+        top_layout.addWidget(self.chk_roi_contrast)
 
         btn_reset_view = QtWidgets.QPushButton("Reset View")
         btn_reset_view.setMaximumWidth(120)
@@ -1566,8 +1571,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.sld_max.blockSignals(False)
     
     def _autoscale_values_fast(self, img: np.ndarray):
-        step = max(1, int(max(img.shape) / 512))
-        samp = img[::step, ::step]
+        # Use ROI sub-region for contrast if enabled and ROI is active
+        source = img
+        if self.chk_roi_contrast.isChecked():
+            roi_data = self.roi_manager.get_roi_data(img)
+            if roi_data is not None and roi_data.size > 0:
+                source = roi_data
+        step = max(1, int(max(source.shape) / 512))
+        samp = source[::step, ::step] if source.ndim >= 2 else source
         lo = float(np.percentile(samp, 0.5))
         hi = float(np.percentile(samp, 99.5))
         if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
