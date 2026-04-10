@@ -247,6 +247,7 @@ class EllipseROIManager:
         sc = self._sc()
         if sc is None:
             return
+        self._remove_roi()  # always clean up any existing ROI first
 
         pen        = pg.mkPen((255, 255, 0), width=self.roi_pen_width + 1)
         hover_pen  = pg.mkPen((255, 200, 0), width=self.roi_pen_width + 2)

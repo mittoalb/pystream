@@ -31,6 +31,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self._last_image = None
         self._max_sizex = None
         self._max_sizey = None
+        self._center_overlays = []  # crosshairs for ROI center + image center
 
         self._init_ui()
         self._restore_settings()
@@ -439,6 +440,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
     # ── build / erase ROI ─────────────────────────────────────────────────
 
     def _roi_erase(self):
+        self._clear_center_overlays()
         sc = self._sc()
         if self.roi is not None:
             try:
@@ -593,6 +595,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
     def _on_roi_changed(self):
         if self.roi is None:
             return
+        self._update_center_overlays()
         result = self._roi_to_sensor()
         if result is not None:
             sx, sy, sx1, sy1, total_w, total_h = result
@@ -608,6 +611,65 @@ class DetectorControlDialog(QtWidgets.QDialog):
         size = self.roi.size()
         self.roi_info_label.setText(
             f"ROI  pos ({pos[0]:.0f}, {pos[1]:.0f})  size {size[0]:.0f}×{size[1]:.0f}")
+
+    # ── center crosshair overlays ──────────────────────────────────────────
+
+    def _update_center_overlays(self):
+        """Draw crosshairs at ROI center and image center."""
+        self._clear_center_overlays()
+        if self.roi is None:
+            return
+        p = self.parent()
+        if not p or not hasattr(p, 'image_view'):
+            return
+        iv = p.image_view
+        img_item = iv.getImageItem()
+        if img_item is None or img_item.image is None:
+            return
+
+        sc = self._sc()
+        if sc is None:
+            return
+
+        # Image center in scene coords
+        br = img_item.boundingRect()
+        img_cx_scene = img_item.mapToScene(br.center())
+
+        # ROI center in scene coords
+        pos = self.roi.pos()
+        size = self.roi.size()
+        roi_cx = pos[0] + size[0] / 2.0
+        roi_cy = pos[1] + size[1] / 2.0
+
+        # Image center crosshair — green dashed
+        pen_img = pg.mkPen('g', width=1, style=QtCore.Qt.DashLine)
+        vline_img = pg.InfiniteLine(pos=img_cx_scene.x(), angle=90, pen=pen_img)
+        hline_img = pg.InfiniteLine(pos=img_cx_scene.y(), angle=0, pen=pen_img)
+        vline_img.setZValue(999)
+        hline_img.setZValue(999)
+        sc.addItem(vline_img)
+        sc.addItem(hline_img)
+        self._center_overlays.extend([vline_img, hline_img])
+
+        # ROI center crosshair — yellow solid
+        pen_roi = pg.mkPen('y', width=1, style=QtCore.Qt.SolidLine)
+        vline_roi = pg.InfiniteLine(pos=roi_cx, angle=90, pen=pen_roi)
+        hline_roi = pg.InfiniteLine(pos=roi_cy, angle=0, pen=pen_roi)
+        vline_roi.setZValue(999)
+        hline_roi.setZValue(999)
+        sc.addItem(vline_roi)
+        sc.addItem(hline_roi)
+        self._center_overlays.extend([vline_roi, hline_roi])
+
+    def _clear_center_overlays(self):
+        sc = self._sc()
+        for item in self._center_overlays:
+            try:
+                if sc:
+                    sc.removeItem(item)
+            except Exception:
+                pass
+        self._center_overlays.clear()
 
     # ── apply ROI to PVs ─────────────────────────────────────────────────
 

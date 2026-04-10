@@ -245,6 +245,7 @@ class ROIManager:
         sc = self._sc()
         if sc is None:
             return
+        self._remove_roi()  # always clean up any existing ROI first
 
         pen       = pg.mkPen('y', width=self.roi_pen_width)
         hover_pen = pg.mkPen((255, 255, 100), width=self.roi_pen_width + 1)
