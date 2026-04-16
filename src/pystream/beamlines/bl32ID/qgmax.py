@@ -256,13 +256,13 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.spot_center_radius_input.setRange(1, 4096)
         self.spot_center_radius_input.setValue(50)
         self.spot_center_radius_input.setSuffix(" px")
-        spot_layout.addRow("Center radius:", self.spot_center_radius_input)
+        spot_layout.addRow("Spot radius:", self.spot_center_radius_input)
 
         self.spot_outer_radius_input = QtWidgets.QSpinBox()
         self.spot_outer_radius_input.setRange(2, 8192)
         self.spot_outer_radius_input.setValue(150)
         self.spot_outer_radius_input.setSuffix(" px")
-        spot_layout.addRow("Outer annulus inner radius:", self.spot_outer_radius_input)
+        spot_layout.addRow("Background inner radius:", self.spot_outer_radius_input)
 
         self.spot_max_corrections_input = QtWidgets.QSpinBox()
         self.spot_max_corrections_input.setRange(1, 10)
@@ -372,31 +372,56 @@ class QGMaxDialog(QtWidgets.QDialog):
             return None
         return float(np.mean(image))
 
-    def _compute_center_outer_ratio(self, image: np.ndarray) -> Optional[float]:
-        """Ratio of mean intensity in the central disk vs the outer annulus.
+    def _find_bright_spot(self, image: np.ndarray) -> Optional[Tuple[float, int, int]]:
+        """Locate the brightest localized spot in the image.
 
-        A ratio > 1 indicates a brighter feature at the image center.
-        Radii are in pixels.
+        Returns (ratio, peak_y, peak_x) where ratio is the mean intensity inside
+        a disk of `spot_radius` around the peak divided by the mean of the
+        background (pixels farther than `background_inner_radius` from the peak).
+        Returns None if the image is too small or parameters are invalid.
         """
         if image.ndim == 3:
             image = image.mean(axis=-1)
+        image = np.asarray(image, dtype=np.float32)
         h, w = image.shape[:2]
-        cy, cx = h / 2.0, w / 2.0
-        center_radius = float(self.spot_center_radius_input.value())
-        outer_radius = float(self.spot_outer_radius_input.value())
-        if center_radius < 1 or outer_radius <= center_radius:
+        spot_radius = float(self.spot_center_radius_input.value())
+        bg_radius = float(self.spot_outer_radius_input.value())
+        if spot_radius < 1 or bg_radius <= spot_radius:
             return None
+        if min(h, w) < 2 * bg_radius:
+            return None
+
+        # Coarse block-mean smoothing to suppress single-pixel noise before
+        # locating the peak. Block size ~spot radius keeps the peak stable.
+        block = max(1, int(spot_radius))
+        bh = h // block
+        bw = w // block
+        if bh < 2 or bw < 2:
+            py, px = np.unravel_index(int(np.argmax(image)), image.shape)
+        else:
+            coarse = image[: bh * block, : bw * block].reshape(
+                bh, block, bw, block
+            ).mean(axis=(1, 3))
+            by, bx = np.unravel_index(int(np.argmax(coarse)), coarse.shape)
+            py = int((by + 0.5) * block)
+            px = int((bx + 0.5) * block)
+
+        # Keep the spot disk fully inside the image.
+        r = int(spot_radius)
+        py = min(max(py, r), h - r - 1)
+        px = min(max(px, r), w - r - 1)
+
         y, x = np.ogrid[:h, :w]
-        dist = np.sqrt((y - cy) ** 2 + (x - cx) ** 2)
-        center_mask = dist < center_radius
-        outer_mask = dist >= outer_radius
-        if not np.any(center_mask) or not np.any(outer_mask):
+        dist_sq = (y - py) ** 2 + (x - px) ** 2
+        spot_mask = dist_sq < spot_radius ** 2
+        bg_mask = dist_sq >= bg_radius ** 2
+        if not np.any(spot_mask) or not np.any(bg_mask):
             return None
-        center_mean = float(np.mean(image[center_mask]))
-        outer_mean = float(np.mean(image[outer_mask]))
-        if outer_mean <= 0:
+        spot_mean = float(np.mean(image[spot_mask]))
+        bg_mean = float(np.mean(image[bg_mask]))
+        if bg_mean <= 0:
             return None
-        return center_mean / outer_mean
+        return spot_mean / bg_mean, py, px
 
     def _load_current_values(self):
         """Load current motor positions and image mean."""
@@ -819,17 +844,18 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._complete_optimization()
             return
 
-        ratio = self._compute_center_outer_ratio(image)
-        if ratio is None:
+        result = self._find_bright_spot(image)
+        if result is None:
             self._log_message("Bright-spot check: could not compute ratio - skipping")
             self._complete_optimization()
             return
+        ratio, peak_y, peak_x = result
 
         threshold = self.spot_threshold_input.value()
         max_corrections = self.spot_max_corrections_input.value()
         self._log_message(
-            f"Bright-spot check: center/outer ratio = {ratio:.2f} "
-            f"(threshold {threshold:.2f})"
+            f"Bright-spot check: peak at ({peak_x}, {peak_y}) "
+            f"spot/background ratio = {ratio:.2f} (threshold {threshold:.2f})"
         )
 
         if ratio <= threshold:
