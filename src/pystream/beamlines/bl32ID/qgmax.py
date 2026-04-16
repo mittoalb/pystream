@@ -60,6 +60,11 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.coarse_multiplier = 5.0  # Coarse step = step_size * 5
         self.fine_multiplier = 1.0  # Fine step = step_size * 1
 
+        # Central bright-spot correction state
+        self.bright_spot_correction_count = 0
+        self.bright_spot_nudge_steps = 2  # Number of motor1 step units per correction
+        self.bright_spot_nudge_direction = +1  # +1 or -1, toggled on retry
+
         self._init_ui()
         self._restore_settings()
         self._load_current_values()
@@ -232,6 +237,41 @@ class QGMaxDialog(QtWidgets.QDialog):
         opt_settings_group.setLayout(opt_settings_layout)
         settings_layout.addWidget(opt_settings_group)
 
+        # Central Bright-Spot Correction
+        spot_group = QtWidgets.QGroupBox("Central Bright-Spot Correction")
+        spot_layout = QtWidgets.QFormLayout()
+
+        self.spot_check_enabled_input = QtWidgets.QCheckBox("Enabled")
+        self.spot_check_enabled_input.setChecked(True)
+        spot_layout.addRow("Post-optimization check:", self.spot_check_enabled_input)
+
+        self.spot_threshold_input = QtWidgets.QDoubleSpinBox()
+        self.spot_threshold_input.setDecimals(2)
+        self.spot_threshold_input.setRange(1.0, 10.0)
+        self.spot_threshold_input.setSingleStep(0.05)
+        self.spot_threshold_input.setValue(1.30)
+        spot_layout.addRow("Center/outer ratio threshold:", self.spot_threshold_input)
+
+        self.spot_center_radius_input = QtWidgets.QSpinBox()
+        self.spot_center_radius_input.setRange(1, 4096)
+        self.spot_center_radius_input.setValue(50)
+        self.spot_center_radius_input.setSuffix(" px")
+        spot_layout.addRow("Center radius:", self.spot_center_radius_input)
+
+        self.spot_outer_radius_input = QtWidgets.QSpinBox()
+        self.spot_outer_radius_input.setRange(2, 8192)
+        self.spot_outer_radius_input.setValue(150)
+        self.spot_outer_radius_input.setSuffix(" px")
+        spot_layout.addRow("Outer annulus inner radius:", self.spot_outer_radius_input)
+
+        self.spot_max_corrections_input = QtWidgets.QSpinBox()
+        self.spot_max_corrections_input.setRange(1, 10)
+        self.spot_max_corrections_input.setValue(3)
+        spot_layout.addRow("Max corrections:", self.spot_max_corrections_input)
+
+        spot_group.setLayout(spot_layout)
+        settings_layout.addWidget(spot_group)
+
         # Automated Mode Settings
         auto_settings_group = QtWidgets.QGroupBox("Automated Mode Settings")
         auto_settings_layout = QtWidgets.QFormLayout()
@@ -311,22 +351,52 @@ class QGMaxDialog(QtWidgets.QDialog):
             # Don't log PV errors to avoid spam, just fail silently
             pass
 
-    def _get_image_mean(self) -> Optional[float]:
-        """Get the current mean value of the image."""
+    def _get_image(self) -> Optional[np.ndarray]:
+        """Get the current image from the parent viewer."""
         parent_viewer = self.parent()
         if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
-            self._log_message("Error: Cannot access image view")
             return None
 
         image_view = parent_viewer.image_view
         image_item = image_view.getImageItem()
         if image_item is None or image_item.image is None:
-            self._log_message("Error: No image available")
             return None
 
-        image = image_item.image
-        mean_value = float(np.mean(image))
-        return mean_value
+        return image_item.image
+
+    def _get_image_mean(self) -> Optional[float]:
+        """Get the current mean value of the image."""
+        image = self._get_image()
+        if image is None:
+            self._log_message("Error: No image available")
+            return None
+        return float(np.mean(image))
+
+    def _compute_center_outer_ratio(self, image: np.ndarray) -> Optional[float]:
+        """Ratio of mean intensity in the central disk vs the outer annulus.
+
+        A ratio > 1 indicates a brighter feature at the image center.
+        Radii are in pixels.
+        """
+        if image.ndim == 3:
+            image = image.mean(axis=-1)
+        h, w = image.shape[:2]
+        cy, cx = h / 2.0, w / 2.0
+        center_radius = float(self.spot_center_radius_input.value())
+        outer_radius = float(self.spot_outer_radius_input.value())
+        if center_radius < 1 or outer_radius <= center_radius:
+            return None
+        y, x = np.ogrid[:h, :w]
+        dist = np.sqrt((y - cy) ** 2 + (x - cx) ** 2)
+        center_mask = dist < center_radius
+        outer_mask = dist >= outer_radius
+        if not np.any(center_mask) or not np.any(outer_mask):
+            return None
+        center_mean = float(np.mean(image[center_mask]))
+        outer_mean = float(np.mean(image[outer_mask]))
+        if outer_mean <= 0:
+            return None
+        return center_mean / outer_mean
 
     def _load_current_values(self):
         """Load current motor positions and image mean."""
@@ -726,9 +796,86 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._finish_optimization()
 
     def _finish_optimization(self):
-        """Complete the optimization cycle."""
-        self.optimization_active = False
+        """Both motors optimized - run bright-spot correction, then clean up."""
         self.waiting_for_image = False
+        self._log_message("=== Optimization done - checking central bright spot ===")
+        self.bright_spot_correction_count = 0
+        self.bright_spot_nudge_direction = +1
+        # Let the detector see the image at the optimized position first.
+        QtCore.QTimer.singleShot(1000, self._check_central_bright_spot)
+
+    def _check_central_bright_spot(self):
+        """Detect a bright circular feature at image center and correct it."""
+        if not self.optimization_active:
+            return
+
+        if not self.spot_check_enabled_input.isChecked():
+            self._complete_optimization()
+            return
+
+        image = self._get_image()
+        if image is None:
+            self._log_message("Bright-spot check: no image available - skipping")
+            self._complete_optimization()
+            return
+
+        ratio = self._compute_center_outer_ratio(image)
+        if ratio is None:
+            self._log_message("Bright-spot check: could not compute ratio - skipping")
+            self._complete_optimization()
+            return
+
+        threshold = self.spot_threshold_input.value()
+        max_corrections = self.spot_max_corrections_input.value()
+        self._log_message(
+            f"Bright-spot check: center/outer ratio = {ratio:.2f} "
+            f"(threshold {threshold:.2f})"
+        )
+
+        if ratio <= threshold:
+            self._log_message("No central bright spot - optimization finalized")
+            self._complete_optimization()
+            return
+
+        if self.bright_spot_correction_count >= max_corrections:
+            self._log_message(
+                f"Bright spot persists after {self.bright_spot_correction_count} "
+                f"corrections - stopping"
+            )
+            self._complete_optimization()
+            return
+
+        # Flip direction on the second attempt so we don't drift monotonically.
+        if self.bright_spot_correction_count == 1:
+            self.bright_spot_nudge_direction = -1
+
+        pv = self.motor1_pv_input.text()
+        step_size = self.motor1_step_input.value()
+        current_pos = self._get_pv_value(pv)
+        if current_pos is None:
+            self._log_message("Bright-spot check: cannot read motor1 - skipping")
+            self._complete_optimization()
+            return
+
+        shift = self.bright_spot_nudge_direction * self.bright_spot_nudge_steps * step_size
+        new_pos = current_pos + shift
+        self.bright_spot_correction_count += 1
+        self._log_message(
+            f"Bright spot detected - motor1 nudge {shift:+.4f} → {new_pos:.4f} "
+            f"({self.bright_spot_correction_count}/{max_corrections})"
+        )
+
+        if not self._set_pv_value(pv, new_pos):
+            self._log_message("Bright-spot check: motor1 move failed - stopping")
+            self._complete_optimization()
+            return
+
+        # Wait for motor to settle and a fresh image to arrive.
+        QtCore.QTimer.singleShot(1000, self._check_central_bright_spot)
+
+    def _complete_optimization(self):
+        """Final cleanup after optimization and bright-spot correction."""
+        self.optimization_active = False
 
         # Set status PV to Done
         self._set_status_pv("Done")
@@ -817,6 +964,11 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.hdf5_location_pv_input.setText(s.get("hdf5_location_pv", self.hdf5_location_pv_input.text()))
         self.tomoscan_pause_pv_input.setText(s.get("tomoscan_pause_pv", self.tomoscan_pause_pv_input.text()))
         self.run_every_input.setValue(s.get("run_every", self.run_every_input.value()))
+        self.spot_check_enabled_input.setChecked(s.get("spot_check_enabled", self.spot_check_enabled_input.isChecked()))
+        self.spot_threshold_input.setValue(s.get("spot_threshold", self.spot_threshold_input.value()))
+        self.spot_center_radius_input.setValue(int(s.get("spot_center_radius_px", self.spot_center_radius_input.value())))
+        self.spot_outer_radius_input.setValue(int(s.get("spot_outer_radius_px", self.spot_outer_radius_input.value())))
+        self.spot_max_corrections_input.setValue(s.get("spot_max_corrections", self.spot_max_corrections_input.value()))
 
     def _persist_settings(self):
         save_settings("QGMaxDialog", {
@@ -830,4 +982,9 @@ class QGMaxDialog(QtWidgets.QDialog):
             "hdf5_location_pv": self.hdf5_location_pv_input.text(),
             "tomoscan_pause_pv": self.tomoscan_pause_pv_input.text(),
             "run_every": self.run_every_input.value(),
+            "spot_check_enabled": self.spot_check_enabled_input.isChecked(),
+            "spot_threshold": self.spot_threshold_input.value(),
+            "spot_center_radius_px": self.spot_center_radius_input.value(),
+            "spot_outer_radius_px": self.spot_outer_radius_input.value(),
+            "spot_max_corrections": self.spot_max_corrections_input.value(),
         })
