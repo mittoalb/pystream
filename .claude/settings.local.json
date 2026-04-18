@@ -11,7 +11,8 @@
       "Bash(done)",
       "Bash(mosalign:*)",
       "Bash(tree:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(python -m py_compile /home/beams0/AMITTONE/Software/txm_calc/optics_calc.py)"
     ],
     "deny": [],
     "ask": []
