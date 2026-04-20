@@ -18,7 +18,8 @@ from PyQt5 import QtWidgets, QtCore
 from .plugin_settings import load_settings, save_settings
 
 
-QGMAX_TRIGGER_FILE = os.path.expanduser("~/.pystream_qgmax_trigger.json")
+QGMAX_REQUEST_FILE = os.path.expanduser("~/.pystream_qgmax_request.json")
+QGMAX_RESPONSE_FILE = os.path.expanduser("~/.pystream_qgmax_response.json")
 
 
 class QGMaxDialog(QtWidgets.QDialog):
@@ -357,48 +358,21 @@ class QGMaxDialog(QtWidgets.QDialog):
         File handshake is used instead of a CA PV because the PV isn't always
         routable from subprocesses and a shared file is trivially reliable on
         the local machine."""
+        if self.optimization_active:
+            return
         try:
-            with open(QGMAX_TRIGGER_FILE) as fh:
+            with open(QGMAX_REQUEST_FILE) as fh:
                 state = json.load(fh)
         except (FileNotFoundError, json.JSONDecodeError):
             return
         except Exception:
             return
-
-        status = state.get("status")
-        request = state.get("request")
         req_ts = float(state.get("ts", 0) or 0)
-
-        # Self-heal: file says RUNNING but we're not actually running. That
-        # means QGMax crashed/was restarted mid-cycle or hit an early-exit
-        # path. Mark DONE so the waiting caller unblocks.
-        if status == "RUNNING" and not self.optimization_active:
-            try:
-                with open(QGMAX_TRIGGER_FILE, "w") as fh:
-                    json.dump({"status": "DONE", "ts": time.time(),
-                               "request_ts": req_ts,
-                               "note": "recovered stale RUNNING"}, fh)
-            except Exception:
-                pass
-            return
-
-        if self.optimization_active:
-            return
-        if request != "START":
-            return
-        # Ignore a request we already processed (e.g. if the caller didn't
-        # overwrite the file with a fresh ts).
         if req_ts <= getattr(self, "_qgmax_last_handled_ts", 0):
             return
-
         self._qgmax_trigger_ts = req_ts
         self._qgmax_last_handled_ts = req_ts
-        try:
-            with open(QGMAX_TRIGGER_FILE, "w") as fh:
-                json.dump({"status": "RUNNING", "ts": req_ts}, fh)
-        except Exception:
-            pass
-        self._log_message("External START trigger received (file)")
+        self._log_message(f"External START trigger received (ts={req_ts:.3f})")
         self.status_label.setText("Status: Optimizing (External)")
         self._run_optimization_cycle()
 
@@ -971,14 +945,16 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Set status PV to Done
         self._set_status_pv("Done")
 
-        # If this cycle was triggered by the external trigger file, write
-        # a completion record so the caller can unblock.
+        # If this cycle was triggered by the external request file, bump the
+        # response file's last_completed_ts so the caller unblocks. Using a
+        # separate response file means XANES2D's next request write doesn't
+        # clobber our completion record (and vice versa).
         trigger_ts = getattr(self, "_qgmax_trigger_ts", None)
         if trigger_ts is not None:
             try:
-                with open(QGMAX_TRIGGER_FILE, "w") as fh:
-                    json.dump({"status": "DONE", "ts": time.time(),
-                               "request_ts": trigger_ts}, fh)
+                with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                    json.dump({"last_completed_ts": trigger_ts,
+                               "completed_at": time.time()}, fh)
             except Exception:
                 pass
             self._qgmax_trigger_ts = None
