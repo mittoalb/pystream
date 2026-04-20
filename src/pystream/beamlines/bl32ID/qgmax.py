@@ -357,8 +357,6 @@ class QGMaxDialog(QtWidgets.QDialog):
         File handshake is used instead of a CA PV because the PV isn't always
         routable from subprocesses and a shared file is trivially reliable on
         the local machine."""
-        if self.optimization_active:
-            return
         try:
             with open(QGMAX_TRIGGER_FILE) as fh:
                 state = json.load(fh)
@@ -366,14 +364,38 @@ class QGMaxDialog(QtWidgets.QDialog):
             return
         except Exception:
             return
-        if state.get("request") != "START":
+
+        status = state.get("status")
+        request = state.get("request")
+        req_ts = float(state.get("ts", 0) or 0)
+
+        # Self-heal: file says RUNNING but we're not actually running. That
+        # means QGMax crashed/was restarted mid-cycle or hit an early-exit
+        # path. Mark DONE so the waiting caller unblocks.
+        if status == "RUNNING" and not self.optimization_active:
+            try:
+                with open(QGMAX_TRIGGER_FILE, "w") as fh:
+                    json.dump({"status": "DONE", "ts": time.time(),
+                               "request_ts": req_ts,
+                               "note": "recovered stale RUNNING"}, fh)
+            except Exception:
+                pass
             return
-        # Remember the request timestamp so we can stamp completion against it.
-        self._qgmax_trigger_ts = float(state.get("ts", time.time()))
-        # Immediately claim the request so repeat polls don't re-trigger.
+
+        if self.optimization_active:
+            return
+        if request != "START":
+            return
+        # Ignore a request we already processed (e.g. if the caller didn't
+        # overwrite the file with a fresh ts).
+        if req_ts <= getattr(self, "_qgmax_last_handled_ts", 0):
+            return
+
+        self._qgmax_trigger_ts = req_ts
+        self._qgmax_last_handled_ts = req_ts
         try:
             with open(QGMAX_TRIGGER_FILE, "w") as fh:
-                json.dump({"status": "RUNNING", "ts": self._qgmax_trigger_ts}, fh)
+                json.dump({"status": "RUNNING", "ts": req_ts}, fh)
         except Exception:
             pass
         self._log_message("External START trigger received (file)")
@@ -671,8 +693,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         initial_mean = self._get_image_mean()
         if initial_mean is None:
             self._log_message("ERROR: Cannot get image mean")
-            self.optimization_active = False
-            self._set_status_pv("Done")
+            # Route through _complete_optimization so the trigger file is
+            # updated to DONE and any external waiter (XANES2D) unblocks.
+            self._complete_optimization()
             return
 
         self._log_message(f"Initial mean: {initial_mean:.2f}")
