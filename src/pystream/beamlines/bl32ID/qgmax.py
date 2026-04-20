@@ -7,6 +7,8 @@ Monitors the image mean value and optimizes two motors to maximize it.
 - Uses simple gradient-based optimization
 """
 
+import json
+import os
 import subprocess
 import logging
 import time
@@ -14,6 +16,9 @@ from typing import Optional, Tuple
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
 from .plugin_settings import load_settings, save_settings
+
+
+QGMAX_TRIGGER_FILE = os.path.expanduser("~/.pystream_qgmax_trigger.json")
 
 
 class QGMaxDialog(QtWidgets.QDialog):
@@ -34,6 +39,12 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         # Status PV for external monitoring
         self.status_pv = "32id:pystream:qgmax"
+
+        # Poll the status PV so external clients (e.g. the XANES2D scan) can
+        # request an optimization cycle by writing "START" to it.
+        self.trigger_poll_timer = QtCore.QTimer()
+        self.trigger_poll_timer.timeout.connect(self._check_trigger_pv)
+        self.trigger_poll_timer.start(500)
 
         # Automated mode monitoring
         self.auto_mode_enabled = False
@@ -337,6 +348,37 @@ class QGMaxDialog(QtWidgets.QDialog):
         except Exception as e:
             self._log_message(f"Error setting PV {pv_name}: {e}")
             return False
+
+    def _check_trigger_pv(self):
+        """If an external client (e.g. the XANES2D scan) wrote a START request
+        to the trigger file, kick off an optimization cycle. QGMax owns its
+        own motors/steps/thresholds — the caller only says when to run.
+
+        File handshake is used instead of a CA PV because the PV isn't always
+        routable from subprocesses and a shared file is trivially reliable on
+        the local machine."""
+        if self.optimization_active:
+            return
+        try:
+            with open(QGMAX_TRIGGER_FILE) as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        except Exception:
+            return
+        if state.get("request") != "START":
+            return
+        # Remember the request timestamp so we can stamp completion against it.
+        self._qgmax_trigger_ts = float(state.get("ts", time.time()))
+        # Immediately claim the request so repeat polls don't re-trigger.
+        try:
+            with open(QGMAX_TRIGGER_FILE, "w") as fh:
+                json.dump({"status": "RUNNING", "ts": self._qgmax_trigger_ts}, fh)
+        except Exception:
+            pass
+        self._log_message("External START trigger received (file)")
+        self.status_label.setText("Status: Optimizing (External)")
+        self._run_optimization_cycle()
 
     def _set_status_pv(self, status: str):
         """Set the status PV to RUN or STOP."""
@@ -906,6 +948,18 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Set status PV to Done
         self._set_status_pv("Done")
 
+        # If this cycle was triggered by the external trigger file, write
+        # a completion record so the caller can unblock.
+        trigger_ts = getattr(self, "_qgmax_trigger_ts", None)
+        if trigger_ts is not None:
+            try:
+                with open(QGMAX_TRIGGER_FILE, "w") as fh:
+                    json.dump({"status": "DONE", "ts": time.time(),
+                               "request_ts": trigger_ts}, fh)
+            except Exception:
+                pass
+            self._qgmax_trigger_ts = None
+
         # If in automated mode, resume TomoScan
         if self.auto_mode_enabled:
             tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
@@ -963,6 +1017,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         """Handle dialog close event."""
         # Set status PV to Done when closing
         self._set_status_pv("Done")
+
+        # Stop trigger polling
+        self.trigger_poll_timer.stop()
 
         # Stop automated mode if running
         if self.auto_mode_enabled:
