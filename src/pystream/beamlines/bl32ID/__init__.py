@@ -9,8 +9,9 @@ from .opticscalc import OpticsCalcDialog
 from .rotationaxis import RotationAxisDialog
 from .qgmax import QGMaxDialog, ensure_qgmax_background_watcher
 from .autocenter import AutoCenterDialog
+from .blgui import BLGuiDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog']
+__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog']
 
 
 def start_background_services(parent_window):
