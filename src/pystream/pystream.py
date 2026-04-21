@@ -765,6 +765,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 bar_layout.addStretch()
                 return bar
 
+            # Start any background services the beamline declares (e.g. the
+            # QGMax trigger watcher — runs without the dialog being open).
+            start_bg = getattr(beamline_module, "start_background_services", None)
+            if callable(start_bg):
+                try:
+                    start_bg(self)
+                except Exception as e:
+                    if LOGGER:
+                        LOGGER.warning(f"start_background_services({active_beamline}) failed: {e}")
+
             # Get all exported dialog classes
             if hasattr(beamline_module, '__all__'):
                 dialog_classes = beamline_module.__all__

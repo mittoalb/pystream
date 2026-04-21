@@ -22,6 +22,65 @@ QGMAX_REQUEST_FILE = os.path.expanduser("~/.pystream_qgmax_request.json")
 QGMAX_RESPONSE_FILE = os.path.expanduser("~/.pystream_qgmax_response.json")
 
 
+class QGMaxBackgroundWatcher(QtCore.QObject):
+    """Polls the QGMax request file in the background so external triggers
+    (e.g. XANES2D) work *without* the QGMax dialog being open. Creates the
+    dialog hidden on first trigger so its optimization machinery is reused."""
+
+    _instance = None
+
+    def __init__(self, parent_window):
+        super().__init__()
+        self._parent_window = parent_window
+        self._dialog = None
+        self._last_handled_ts = 0.0
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(500)
+
+    def _ensure_dialog(self):
+        if self._dialog is None:
+            logger = getattr(self._parent_window, "logger", None)
+            self._dialog = QGMaxDialog(parent=self._parent_window, logger=logger)
+            # Do NOT show it — background mode.
+        return self._dialog
+
+    def _poll(self):
+        try:
+            with open(QGMAX_REQUEST_FILE) as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        except Exception:
+            return
+        req_ts = float(state.get("ts", 0) or 0)
+        if req_ts <= self._last_handled_ts:
+            return
+        dlg = self._ensure_dialog()
+        if dlg.optimization_active:
+            return
+        self._last_handled_ts = req_ts
+        dlg._qgmax_trigger_ts = req_ts
+        dlg._qgmax_last_handled_ts = req_ts
+        dlg._log_message(f"Background trigger ts={req_ts:.3f}")
+        # Write ack to response file so callers know QGMax picked it up.
+        try:
+            with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                json.dump({"last_completed_ts": 0,
+                           "started_ts": req_ts,
+                           "started_at": time.time()}, fh)
+        except Exception:
+            pass
+        dlg._run_optimization_cycle()
+
+
+def ensure_qgmax_background_watcher(parent_window):
+    """Idempotent: create the singleton watcher if not already running."""
+    if QGMaxBackgroundWatcher._instance is None:
+        QGMaxBackgroundWatcher._instance = QGMaxBackgroundWatcher(parent_window)
+    return QGMaxBackgroundWatcher._instance
+
+
 class QGMaxDialog(QtWidgets.QDialog):
     """Dialog for optimizing image mean by adjusting two motors."""
 
@@ -374,6 +433,16 @@ class QGMaxDialog(QtWidgets.QDialog):
         self._qgmax_last_handled_ts = req_ts
         self._log_message(f"External START trigger received (ts={req_ts:.3f})")
         self.status_label.setText("Status: Optimizing (External)")
+        # Acknowledge receipt in the response file so the caller can verify
+        # that QGMax is actually listening (separate from completion).
+        try:
+            with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                json.dump({"last_completed_ts": getattr(
+                              self, "_last_completed_ts_cached", 0),
+                           "started_ts": req_ts,
+                           "started_at": time.time()}, fh)
+        except Exception:
+            pass
         self._run_optimization_cycle()
 
     def _set_status_pv(self, status: str):
