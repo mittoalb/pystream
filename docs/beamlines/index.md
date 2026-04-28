@@ -105,10 +105,12 @@ Advanced Photon Source beamline 32-ID with specialized tools for TXM tomography 
 - **AutoROT**: Rotation axis detection for tomography alignment
 - **TXM Optics**: Optics calculator launcher with effective pixel size PV setter
 - **Mosalign**: 2D motor scanning with image stitching and tomoscan integration
+- **TXMBot (AI)**: LLM chat assistant with read-only beamline introspection
+  tools and gated IOC-recovery actions
 
 All plugins persist their settings (PV names, calibrations, thresholds) to `~/.pystream_bl32ID_settings.json`.
 
-See [bl32ID Documentation](bl32ID.md) for complete details on all plugins.
+See [bl32ID Documentation](bl32ID.md) and [TXMBot](txmbot.md) for complete details on all plugins.
 
 ## Auto-Discovery Mechanism
 
@@ -256,5 +258,6 @@ Potential future improvements to the beamlines system:
 
 configuration
 bl32ID
+txmbot
 launcher_guide
 ```

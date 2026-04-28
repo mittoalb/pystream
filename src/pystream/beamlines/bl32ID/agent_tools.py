@@ -155,6 +155,12 @@ DOCS_DIR_DEFAULT = os.path.expanduser("~/.pystream_docs")
 PV_ALIASES_FILE = os.path.expanduser("~/.pystream_pv_aliases.json")
 PYSTREAM_SETTINGS_FILE = os.path.expanduser("~/.pystream_bl32ID_settings.json")
 DOC_URLS_FILE = os.path.expanduser("~/.pystream_doc_urls.json")
+IOC_SCRIPTS_FILE = os.path.expanduser("~/.pystream_ioc_scripts.json")
+
+
+# Tools that mutate state — the dispatcher in agent.py wraps these in a
+# user-confirmation dialog before running them.
+WRITE_TOOLS = {"restart_ioc"}
 
 
 def tool_list_url_docs() -> dict:
@@ -395,6 +401,266 @@ def tool_get_plugin_settings(plugin_name: str,
         return {"plugin": plugin_name, "settings": redacted}
     except Exception as ex:
         return {"error": f"{type(ex).__name__}: {ex}"}
+
+
+# ── IOC restart (write tool, gated by user confirmation) ───────────────
+
+def _load_ioc_scripts() -> dict:
+    """Read the allowlist of restart scripts. Returns {} on any failure."""
+    try:
+        if not os.path.isfile(IOC_SCRIPTS_FILE):
+            return {}
+        import json as _json
+        with open(IOC_SCRIPTS_FILE) as f:
+            data = _json.load(f)
+        return data.get("scripts", {}) or {}
+    except Exception:
+        return {}
+
+
+def tool_list_ioc_scripts() -> dict:
+    """List the IOC restart scripts the user has registered in
+    ~/.pystream_ioc_scripts.json. This is the allowlist — only IOCs that
+    appear here can be restarted. Use this to discover what the agent is
+    permitted to do."""
+    try:
+        if not os.path.isfile(IOC_SCRIPTS_FILE):
+            return {"error": f"allowlist not found: {IOC_SCRIPTS_FILE}",
+                    "hint": "create the file with a 'scripts' dict mapping "
+                            "ioc_name → {path, description} to authorize "
+                            "restart actions."}
+        scripts = _load_ioc_scripts()
+        out = []
+        for name, entry in scripts.items():
+            if not isinstance(entry, dict):
+                continue
+            out.append({
+                "ioc_name": name,
+                "description": entry.get("description", ""),
+                "path": entry.get("path"),
+                "exists": bool(entry.get("path")
+                               and os.path.isfile(os.path.expanduser(entry["path"]))),
+            })
+        return {"file": IOC_SCRIPTS_FILE, "scripts": out, "count": len(out)}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
+def tool_restart_ioc(ioc_name: str, timeout: float = 30.0) -> dict:
+    """Restart an IOC by running its registered script.
+
+    SAFETY GATE: this tool is wrapped in a user-confirmation dialog before
+    it executes. The user sees the IOC name and script path, must click Yes.
+    Only IOCs listed in ~/.pystream_ioc_scripts.json are permitted.
+    """
+    if not ioc_name:
+        return {"error": "ioc_name is required"}
+    scripts = _load_ioc_scripts()
+    entry = scripts.get(ioc_name)
+    if not entry or not isinstance(entry, dict):
+        return {
+            "error": f"IOC {ioc_name!r} is not in the allowlist "
+                     f"({IOC_SCRIPTS_FILE}). Available: "
+                     f"{sorted(scripts.keys())}",
+        }
+    raw_path = entry.get("path")
+    if not raw_path:
+        return {"error": f"no 'path' configured for {ioc_name!r}"}
+    script = os.path.expanduser(raw_path)
+    if not os.path.isfile(script):
+        return {"error": f"script does not exist on disk: {script}"}
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            [script],
+            capture_output=True, text=True,
+            timeout=float(timeout), shell=False,
+        )
+        return {
+            "ioc_name": ioc_name,
+            "script": script,
+            "returncode": result.returncode,
+            "success": result.returncode == 0,
+            "stdout": (result.stdout or "")[-2000:],
+            "stderr": (result.stderr or "")[-2000:],
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": f"script timed out after {timeout}s: {script}",
+                "ioc_name": ioc_name}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "ioc_name": ioc_name}
+
+
+# ── device-health diagnostics ───────────────────────────────────────────
+
+# CA alarm severity codes
+_SEVR = {0: "NO_ALARM", 1: "MINOR", 2: "MAJOR", 3: "INVALID"}
+
+# Motor record .MSTA bit names (subset of what's actually useful)
+_MSTA_BITS = {
+    0:  "DIRECTION",      # 0=neg, 1=pos last move
+    1:  "DONE",
+    2:  "PLUS_LS",        # at + limit
+    3:  "HOME_LS",
+    5:  "POSITION",
+    6:  "SLIP_STALL",     # stalled / slipping
+    7:  "AT_HOME",
+    8:  "ENCODER_PRESENT",
+    9:  "PROBLEM",        # general fault
+    10: "MOVING",
+    11: "GAIN_SUPPORT",
+    12: "COMM_ERR",       # comm error
+    13: "MINUS_LS",       # at - limit
+    14: "HOMED",
+}
+
+
+def tool_check_pv_health(pv_name: str, connect_timeout: float = 2.0) -> dict:
+    """Connect to a PV briefly and report whether it's alive: connected,
+    last update time, alarm severity, age of last value. Use this when the
+    user suspects a device has stopped communicating."""
+    if not pv_name:
+        return {"error": "pv_name is required"}
+    try:
+        import epics
+        pv = epics.PV(pv_name, auto_monitor=False)
+        connected = pv.wait_for_connection(timeout=connect_timeout)
+        if not connected:
+            return {
+                "pv_name": pv_name,
+                "connected": False,
+                "diagnosis": "PV did not connect — IOC down, network issue, "
+                             "or PV name typo.",
+            }
+        v = pv.get(timeout=connect_timeout)
+        sevr = pv.severity if pv.severity is not None else -1
+        stat = pv.status if pv.status is not None else -1
+        ts = pv.timestamp or 0
+        age = time.time() - ts if ts else None
+        diag = []
+        if v is None:
+            diag.append("connected but get() returned None")
+        if sevr in (2, 3):
+            diag.append(f"alarm severity {_SEVR.get(sevr, sevr)}")
+        if age is not None and age > 60:
+            diag.append(f"value is {age:.0f}s old (no recent updates)")
+        return {
+            "pv_name": pv_name,
+            "connected": True,
+            "value": v.tolist() if hasattr(v, "tolist") else v,
+            "severity": _SEVR.get(sevr, str(sevr)),
+            "status_code": stat,
+            "last_update_age_s": round(age, 1) if age is not None else None,
+            "host": pv.host,
+            "diagnosis": "; ".join(diag) if diag else "ok",
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
+def tool_check_motor_health(motor_pv: str) -> dict:
+    """Check a motor's health. Reads .RBV, .MSTA (status bits), .DMOV
+    (done-moving), and decodes flags like at-limit / comm-error / problem.
+    Use when the user reports a motor not moving, hitting a limit, or
+    the IOC reporting an error."""
+    if not motor_pv:
+        return {"error": "motor_pv is required"}
+    try:
+        import epics
+        rbv = epics.caget(f"{motor_pv}.RBV", timeout=2.0)
+        dmov = epics.caget(f"{motor_pv}.DMOV", timeout=2.0)
+        msta = epics.caget(f"{motor_pv}.MSTA", timeout=2.0)
+        sevr = epics.caget(f"{motor_pv}.SEVR", timeout=2.0)
+        if rbv is None and msta is None:
+            return {
+                "motor_pv": motor_pv,
+                "connected": False,
+                "diagnosis": "Motor PV did not respond — IOC down or name typo.",
+            }
+        bits = []
+        if msta is not None:
+            try:
+                msta_int = int(msta)
+                for bit, name in _MSTA_BITS.items():
+                    if msta_int & (1 << bit):
+                        bits.append(name)
+            except (TypeError, ValueError):
+                msta_int = None
+        else:
+            msta_int = None
+        problems = []
+        if "PROBLEM" in bits:
+            problems.append("MSTA reports PROBLEM (general fault)")
+        if "COMM_ERR" in bits:
+            problems.append("MSTA reports COMM_ERR (lost contact with controller)")
+        if "PLUS_LS" in bits:
+            problems.append("at + limit switch")
+        if "MINUS_LS" in bits:
+            problems.append("at − limit switch")
+        if "SLIP_STALL" in bits:
+            problems.append("encoder slip/stall detected")
+        sevr_int = int(sevr) if sevr is not None else -1
+        if sevr_int in (2, 3):
+            problems.append(f"alarm severity {_SEVR.get(sevr_int, sevr_int)}")
+        return {
+            "motor_pv": motor_pv,
+            "connected": True,
+            "rbv": float(rbv) if rbv is not None else None,
+            "done_moving": bool(int(dmov)) if dmov is not None else None,
+            "msta_int": msta_int,
+            "msta_bits": bits,
+            "severity": _SEVR.get(sevr_int, str(sevr_int)),
+            "diagnosis": "; ".join(problems) if problems else "ok",
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
+def tool_check_detector_stream(detector_pv: str = "32idbSP1:Pva1:Image",
+                               settle_s: float = 0.5) -> dict:
+    """Check whether the detector's PVA stream is alive. Grabs the current
+    uniqueId, waits, grabs again — if it advanced, frames are arriving;
+    otherwise the camera is idle, stuck, or disconnected."""
+    try:
+        ch = _pva_channel(detector_pv)
+        st1 = ch.get()
+        try:
+            uid1 = int(st1["uniqueId"])
+        except Exception:
+            uid1 = None
+        time.sleep(max(0.05, settle_s))
+        st2 = ch.get()
+        try:
+            uid2 = int(st2["uniqueId"])
+        except Exception:
+            uid2 = None
+        if uid1 is None or uid2 is None:
+            return {
+                "detector_pv": detector_pv,
+                "alive": False,
+                "diagnosis": "PVA channel responded but uniqueId field missing — "
+                             "non-standard NTNDArray.",
+            }
+        advanced = uid2 != uid1
+        return {
+            "detector_pv": detector_pv,
+            "alive": advanced,
+            "uid_first": uid1,
+            "uid_second": uid2,
+            "delta_id": uid2 - uid1,
+            "diagnosis": (
+                f"frames are arriving (Δuid={uid2 - uid1} over {settle_s}s)"
+                if advanced
+                else "uniqueId did not advance — camera is idle, paused, or "
+                     "detector server is wedged. Check Acquire_RBV and the "
+                     "detector IOC."
+            ),
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}",
+                "diagnosis": "PVA channel could not be reached — detector "
+                             "server (e.g. AD plugin) likely down."}
 
 
 def tool_read_scan_metadata(path: str) -> dict:
@@ -673,6 +939,95 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["url"],
         },
         "func": tool_fetch_url,
+    },
+    {
+        "name": "check_pv_health",
+        "description": (
+            "Diagnose a single PV: connected? alarm severity? how stale is "
+            "the last value? Use when the user suspects a device has "
+            "stopped communicating, or to verify any PV is healthy. The "
+            "'diagnosis' field summarizes the result in one sentence."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "pv_name": {"type": "string",
+                            "description": "Full PV name."},
+            },
+            "required": ["pv_name"],
+        },
+        "func": tool_check_pv_health,
+    },
+    {
+        "name": "check_motor_health",
+        "description": (
+            "Diagnose a motor: read RBV, DMOV, decode the .MSTA bits "
+            "(comm error, at limit, slip/stall, problem flag), and report "
+            "alarm severity. Use when a motor isn't moving, looks stuck, "
+            "or the user reports an error. Returns a 'diagnosis' string."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "motor_pv": {"type": "string",
+                             "description": "Motor PV without .RBV suffix."},
+            },
+            "required": ["motor_pv"],
+        },
+        "func": tool_check_motor_health,
+    },
+    {
+        "name": "check_detector_stream",
+        "description": (
+            "Check whether the detector's PVA image stream is producing "
+            "new frames (uniqueId advancing). Use when the live image "
+            "looks frozen, the user reports no acquisition, or to confirm "
+            "the camera is actually sending data."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "detector_pv": {
+                    "type": "string",
+                    "description": "PVA NTNDArray PV. Defaults to "
+                                   "'32idbSP1:Pva1:Image'.",
+                },
+            },
+            "required": [],
+        },
+        "func": tool_check_detector_stream,
+    },
+    {
+        "name": "list_ioc_scripts",
+        "description": (
+            "List IOCs you are allowed to restart. The user maintains this "
+            "allowlist in ~/.pystream_ioc_scripts.json — anything NOT on it "
+            "cannot be restarted. Call this BEFORE calling restart_ioc so "
+            "you know what you're allowed to do."
+        ),
+        "schema": {"type": "object", "properties": {}, "required": []},
+        "func": tool_list_ioc_scripts,
+    },
+    {
+        "name": "restart_ioc",
+        "description": (
+            "Restart an IOC by running its allowlisted script. THIS IS A "
+            "WRITE ACTION: the user gets a Yes/No confirmation dialog "
+            "before the script runs. Only IOCs returned by list_ioc_scripts "
+            "are permitted; any other name will be rejected. Returns "
+            "{returncode, stdout, stderr, success}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ioc_name": {
+                    "type": "string",
+                    "description": "Name as listed by list_ioc_scripts.",
+                },
+            },
+            "required": ["ioc_name"],
+        },
+        "func": tool_restart_ioc,
     },
 ]
 

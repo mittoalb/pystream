@@ -14,6 +14,9 @@ The bl32ID beamline package provides built-in tools and launchers for optional e
 - **AutoCenter**: Automatic centering of optical elements (pinhole, condenser, zone plate)
 - **AutoROT**: Rotation axis detection for tomography alignment
 - **Mosalign**: 2D motor scanning with image stitching
+- **TXMBot (AI)**: LLM chat assistant with read-only beamline introspection
+  tools (PV reads, device health, image stats, scan inspection, local docs,
+  web docs) and gated IOC-recovery actions. See [TXMBot](txmbot.md).
 
 ### Optional External Tools (Install Separately)
 

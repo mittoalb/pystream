@@ -17,6 +17,7 @@ Network calls run on a QThread worker so the GUI thread stays responsive.
 
 import json
 import logging
+import os
 from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
@@ -27,7 +28,42 @@ from .agent_tools import (
     anthropic_tool_specs,
     openai_tool_specs,
     get_tool,
+    WRITE_TOOLS,
 )
+
+
+# ── confirmation bridge (worker thread → GUI thread) ────────────────────
+
+class _ConfirmHelper(QtCore.QObject):
+    """Lives on the GUI thread. Worker threads call its `ask` slot via
+    BlockingQueuedConnection to pop a Yes/No QMessageBox and get the
+    user's answer back. Used to gate write-class tools."""
+
+    @QtCore.pyqtSlot(str, str, result=bool)
+    def ask(self, title: str, message: str) -> bool:
+        reply = QtWidgets.QMessageBox.question(
+            None, title, message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        return reply == QtWidgets.QMessageBox.Yes
+
+
+def _confirmation_message(name: str, args: dict) -> str:
+    """Format a clear, scannable confirmation message per write tool."""
+    if name == "restart_ioc":
+        ioc = args.get("ioc_name", "?")
+        return (
+            f"The agent wants to RESTART an IOC.\n\n"
+            f"  IOC: {ioc}\n\n"
+            f"This will run the script registered for '{ioc}' in "
+            f"~/.pystream_ioc_scripts.json. Continue?"
+        )
+    return (
+        f"The agent wants to call:\n\n"
+        f"  {name}({json.dumps(args, default=str)})\n\n"
+        f"Allow this?"
+    )
 
 
 PROTOCOL_ANTHROPIC = "anthropic"
@@ -49,6 +85,21 @@ LIVE STATE
 - read_pv(pv_name) — current value of any EPICS PV
 - read_motor(motor_pv) — motor .RBV
 - get_detector_image_stats() — current detector frame stats (no new acquire)
+
+DEVICE HEALTH (use when something seems stuck, frozen, or unresponsive)
+- check_pv_health(pv_name) — connected? alarm? how stale is the value?
+- check_motor_health(motor_pv) — decodes .MSTA: comm error, at limit,
+  slip/stall, fault. Returns a one-sentence diagnosis.
+- check_detector_stream(detector_pv) — checks if frames are still flowing
+  (uniqueId advancing). Use when the live image looks frozen.
+
+IOC RECOVERY (write actions — user gets a Yes/No dialog before they run)
+- list_ioc_scripts() — see which IOCs you're allowed to restart
+- restart_ioc(ioc_name) — runs the user's local restart script for that
+  IOC. Only suggest this if a tool result clearly indicates the IOC is
+  down/wedged (e.g. PVs disconnected, no PVA frames). Always call
+  list_ioc_scripts FIRST and confirm the IOC is on the allowlist; never
+  guess names.
 
 LOCAL KNOWLEDGE BASE
 - list_docs() / read_doc(name) / search_docs(query) — markdown reference
@@ -87,14 +138,33 @@ WORKFLOW
 
 # ── tool dispatch helper ────────────────────────────────────────────────
 
-def _execute_tool(name: str, arguments: dict) -> dict:
+def _execute_tool(name: str, arguments: dict, confirm=None) -> dict:
     """Run a tool by name with the model-provided arguments. Always returns
-    a JSON-serializable dict — tools wrap their own exceptions."""
+    a JSON-serializable dict — tools wrap their own exceptions.
+
+    If `name` is in WRITE_TOOLS, `confirm(title, message) -> bool` is
+    called BEFORE the tool runs. If the user clicks No (or no confirm
+    callback was provided), the call is rejected with an error result the
+    model can read."""
     func = get_tool(name)
     if func is None:
         return {"error": f"unknown tool: {name}"}
     if not isinstance(arguments, dict):
         return {"error": f"arguments must be an object, got {type(arguments).__name__}"}
+
+    if name in WRITE_TOOLS:
+        if confirm is None:
+            return {"error": f"{name} is a write tool but no confirmation "
+                             f"channel is available — refusing."}
+        approved = False
+        try:
+            approved = bool(confirm("Confirm action", _confirmation_message(name, arguments)))
+        except Exception as ex:
+            return {"error": f"confirmation prompt failed: {ex}"}
+        if not approved:
+            return {"error": "user denied the action",
+                    "denied": True, "tool": name, "arguments": arguments}
+
     try:
         result = func(**arguments)
     except TypeError as ex:
@@ -107,7 +177,7 @@ def _execute_tool(name: str, arguments: dict) -> dict:
 # ── chat: Anthropic protocol ────────────────────────────────────────────
 
 def _chat_anthropic(base_url, api_key, model, system_prompt,
-                    history, user_text, emit_tool):
+                    history, user_text, emit_tool, confirm):
     """Agentic loop on the Anthropic Messages API. `emit_tool` is a callback
     `(name, arguments, result_or_None) -> None` invoked once at call-start
     (result=None) and once at completion."""
@@ -151,7 +221,7 @@ def _chat_anthropic(base_url, api_key, model, system_prompt,
         for b in response.content:
             if getattr(b, "type", None) == "tool_use":
                 emit_tool(b.name, b.input, None)
-                result = _execute_tool(b.name, b.input)
+                result = _execute_tool(b.name, b.input, confirm=confirm)
                 emit_tool(b.name, b.input, result)
                 tool_results.append({
                     "type": "tool_result",
@@ -166,7 +236,7 @@ def _chat_anthropic(base_url, api_key, model, system_prompt,
 # ── chat: OpenAI protocol ───────────────────────────────────────────────
 
 def _chat_openai(base_url, api_key, model, system_prompt,
-                 history, user_text, emit_tool):
+                 history, user_text, emit_tool, confirm):
     """Agentic loop on OpenAI Chat Completions."""
     from openai import OpenAI
     client = OpenAI(base_url=base_url, api_key=api_key,
@@ -213,7 +283,7 @@ def _chat_openai(base_url, api_key, model, system_prompt,
             except Exception:
                 args = {}
             emit_tool(tc.function.name, args, None)
-            result = _execute_tool(tc.function.name, args)
+            result = _execute_tool(tc.function.name, args, confirm=confirm)
             emit_tool(tc.function.name, args, result)
             messages.append({
                 "role": "tool",
@@ -235,7 +305,7 @@ class _ChatWorker(QtCore.QThread):
     tool_event = pyqtSignal(str, dict, object)  # (name, args, result-or-None)
 
     def __init__(self, protocol, base_url, api_key, model,
-                 system_prompt, history, user_text):
+                 system_prompt, history, user_text, confirm_helper=None):
         super().__init__()
         self.protocol = protocol
         self.base_url = base_url
@@ -244,9 +314,23 @@ class _ChatWorker(QtCore.QThread):
         self.system_prompt = system_prompt
         self.history = history
         self.user_text = user_text
+        self.confirm_helper = confirm_helper
 
     def _emit_tool(self, name, args, result):
         self.tool_event.emit(name, dict(args), result)
+
+    def _confirm(self, title, message) -> bool:
+        """Block this worker thread, ask the GUI thread for Yes/No."""
+        if self.confirm_helper is None:
+            return False
+        result = QtCore.QMetaObject.invokeMethod(
+            self.confirm_helper, "ask",
+            QtCore.Qt.BlockingQueuedConnection,
+            QtCore.Q_RETURN_ARG(bool),
+            QtCore.Q_ARG(str, title),
+            QtCore.Q_ARG(str, message),
+        )
+        return bool(result)
 
     def run(self):
         try:
@@ -254,13 +338,13 @@ class _ChatWorker(QtCore.QThread):
                 text, usage = _chat_anthropic(
                     self.base_url, self.api_key, self.model,
                     self.system_prompt, self.history, self.user_text,
-                    self._emit_tool,
+                    self._emit_tool, self._confirm,
                 )
             elif self.protocol == PROTOCOL_OPENAI:
                 text, usage = _chat_openai(
                     self.base_url, self.api_key, self.model,
                     self.system_prompt, self.history, self.user_text,
-                    self._emit_tool,
+                    self._emit_tool, self._confirm,
                 )
             else:
                 self.error.emit(f"unknown protocol: {self.protocol!r}")
@@ -306,9 +390,12 @@ class AgentDialog(QtWidgets.QDialog):
         self._history: list[dict] = []
         self._worker: Optional[_ChatWorker] = None
         self._pending_user_text: str = ""
+        # Lives on the GUI thread; workers route confirmation prompts through it.
+        self._confirm_helper = _ConfirmHelper(self)
 
         self._build_ui()
         self._restore_settings()
+        self._bootstrap_knowledge_base()
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -475,6 +562,7 @@ class AgentDialog(QtWidgets.QDialog):
             system_prompt=self.system_edit.toPlainText(),
             history=list(self._history),
             user_text=text,
+            confirm_helper=self._confirm_helper,
         )
         self._worker.tool_event.connect(self._on_tool_event)
         self._worker.done.connect(self._on_worker_done)
@@ -584,6 +672,58 @@ class AgentDialog(QtWidgets.QDialog):
             "system_prompt": self.system_edit.toPlainText(),
             "model": self.model_combo.currentText(),
         })
+
+    # ── knowledge-base bootstrap ────────────────────────────────────────
+    def _bootstrap_knowledge_base(self):
+        """Create empty starter files for the user-editable knowledge base
+        the first time the dialog opens. Never overwrites existing files."""
+        docs_dir = os.path.expanduser("~/.pystream_docs")
+        aliases_file = os.path.expanduser("~/.pystream_pv_aliases.json")
+        urls_file = os.path.expanduser("~/.pystream_doc_urls.json")
+        ioc_file = os.path.expanduser("~/.pystream_ioc_scripts.json")
+        try:
+            if not os.path.isdir(docs_dir):
+                os.makedirs(docs_dir, exist_ok=True)
+                readme = os.path.join(docs_dir, "README.md")
+                if not os.path.isfile(readme):
+                    with open(readme, "w") as f:
+                        f.write(
+                            "# pystream agent — local docs\n\n"
+                            "Drop markdown files in this directory and the AI "
+                            "plugin (TXMBot) reads them on demand via "
+                            "list_docs / search_docs / read_doc. One topic per "
+                            "file works best — short titles, concrete facts.\n"
+                        )
+            if not os.path.isfile(aliases_file):
+                with open(aliases_file, "w") as f:
+                    json.dump(
+                        {"_comment": "friendly_name → PV ; "
+                                     "EPICS macros expand $(NAME) substitutions",
+                         "aliases": {},
+                         "macros": {}},
+                        f, indent=2,
+                    )
+            if not os.path.isfile(urls_file):
+                with open(urls_file, "w") as f:
+                    json.dump(
+                        {"_comment": "friendly_name → URL ; "
+                                     "agent fetches via fetch_url(url)",
+                         "links": {}},
+                        f, indent=2,
+                    )
+            if not os.path.isfile(ioc_file):
+                with open(ioc_file, "w") as f:
+                    json.dump(
+                        {"_comment": "Allowlist of IOCs the agent may "
+                                     "restart. Each entry: ioc_name → "
+                                     "{path: <script>, description: <why>}. "
+                                     "Empty by default — add entries to "
+                                     "authorize.",
+                         "scripts": {}},
+                        f, indent=2,
+                    )
+        except Exception:
+            pass  # best-effort; user can create the files themselves
 
     def closeEvent(self, event):
         self._persist_settings()
