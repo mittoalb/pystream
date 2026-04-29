@@ -1145,6 +1145,18 @@ TOOLS: list[dict[str, Any]] = [
         },
         "func": tool_get_detector_image_stats,
     },
+    {
+        "name": "list_status_pages",
+        "description": (
+            "Return the user's registered live web status URLs (IOC monitor, "
+            "machine status, etc.) from ~/.pystream/status_pages.json. "
+            "PRIMARY tool for 'list IOCs', 'IOC status', 'machine status', "
+            "'is the beam up' — use this FIRST, then fetch_url(url) on the "
+            "right entry, BEFORE going hunting with bash."
+        ),
+        "schema": {"type": "object", "properties": {}, "required": []},
+        "func": tool_list_status_pages,
+    },
 ]
 
 
