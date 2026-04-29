@@ -164,7 +164,44 @@ STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 
 # Tools that mutate state — the dispatcher in agent.py wraps these in a
 # user-confirmation dialog before running them.
-WRITE_TOOLS = {"restart_ioc"}
+#
+# `bash` is conditionally gated: read-only commands run without confirmation,
+# destructive ones trigger the dialog (see _bash_is_destructive below).
+WRITE_TOOLS = {"caput"}
+
+
+# Patterns that should pop a confirmation dialog when seen in a bash command.
+# Read-only stuff (ls, cat, ps, ping, curl, etc.) sails through; anything
+# that could mutate the filesystem, kill processes, or hit the network with
+# a write needs the user to click Yes. Compiled at module load.
+_DESTRUCTIVE_BASH_RE = None
+def _bash_is_destructive(command: str) -> bool:
+    """Heuristic: True if this bash command should pop the confirmation
+    dialog. Conservative — when in doubt, returns True. Two parts:
+    (1) destructive command words at command-position (after start, ; & | `)
+    (2) certain patterns ANYWHERE in the line (.sh invocations, > redirects)."""
+    global _DESTRUCTIVE_BASH_RE
+    if _DESTRUCTIVE_BASH_RE is None:
+        import re
+        cmd_pos = (
+            r"rm\b", r"rmdir\b", r"dd\b", r"kill\b", r"pkill\b", r"killall\b",
+            r"chmod\b", r"chown\b", r"chgrp\b", r"mv\b", r"cp\s+-[a-zA-Z]*r\b",
+            r"truncate\b", r"shutdown\b", r"reboot\b", r"halt\b", r"poweroff\b",
+            r"systemctl\b", r"service\b", r"sudo\b", r"su\s",
+            r"caput\b",
+            r"git\s+(?:push|reset\s+--hard|clean\s+-)",
+        )
+        anywhere = (
+            r"\.sh\b",         # any shell-script invocation, path or bare
+            r">{1,2}\s*\S",    # > / >> redirect to a file
+            r"\|\s*tee\b",     # tee
+        )
+        pattern = (
+            r"(?:^|[\s;&|`(])(?:" + "|".join(cmd_pos) + ")"
+            + "|(?:" + "|".join(anywhere) + ")"
+        )
+        _DESTRUCTIVE_BASH_RE = re.compile(pattern, re.IGNORECASE)
+    return bool(_DESTRUCTIVE_BASH_RE.search(command or ""))
 
 
 def tool_list_url_docs() -> dict:
@@ -407,6 +444,73 @@ def tool_get_plugin_settings(plugin_name: str,
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
+# ── general-purpose: shell, file IO, EPICS write ──────────────────────
+
+def tool_bash(command: str, timeout: float = 30.0) -> dict:
+    """Run a shell command via `bash -c`. Captures stdout + stderr + exit
+    code. Read-only commands run without confirmation; commands matching
+    the destructive-pattern set (rm, kill, chmod, sudo, *.sh, redirects,
+    git push, etc.) trigger the user's Yes/No dialog before executing.
+    Always run as the current user (no privilege escalation)."""
+    if not command or not command.strip():
+        return {"error": "command is required"}
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True, text=True,
+            timeout=float(timeout), shell=False,
+        )
+        return {
+            "command": command,
+            "returncode": result.returncode,
+            "success": result.returncode == 0,
+            "stdout": (result.stdout or "")[-4000:],
+            "stderr": (result.stderr or "")[-2000:],
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": f"command timed out after {timeout}s",
+                "command": command}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "command": command}
+
+
+def tool_read_file(path: str, max_chars: int = 50000) -> dict:
+    """Read a text file (any path the user has access to). Truncates after
+    `max_chars` to keep responses bounded."""
+    if not path:
+        return {"error": "path is required"}
+    try:
+        p = os.path.expanduser(path)
+        if not os.path.isfile(p):
+            return {"error": f"file does not exist: {p}"}
+        with open(p, encoding="utf-8", errors="replace") as f:
+            text = f.read(max_chars + 1)
+        return {
+            "path": p,
+            "content": text[:max_chars],
+            "truncated": len(text) > max_chars,
+            "char_count": len(text) if len(text) <= max_chars else max_chars,
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
+def tool_caput(pv_name: str, value, timeout: float = 5.0) -> dict:
+    """Write a value to an EPICS PV. WRITE action — gated by user
+    confirmation. Returns {success: bool}. The model should explain WHY
+    it wants to write before calling this; the confirmation dialog is the
+    user's chance to veto."""
+    if not pv_name:
+        return {"error": "pv_name is required"}
+    try:
+        import epics
+        ok = epics.caput(pv_name, value, timeout=float(timeout), wait=True)
+        return {"pv_name": pv_name, "value": value, "success": bool(ok)}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
 # ── network diagnostics (no sudo, read-only) ───────────────────────────
 
 def _validate_host(host: str) -> str | None:
@@ -514,6 +618,41 @@ def tool_tcp_check(host: str, port: int, timeout: float = 3.0) -> dict:
                 "diagnosis": f"{type(ex).__name__}: {ex}"}
 
 
+def tool_traceroute(host: str, max_hops: int = 15,
+                    timeout: float = 30.0) -> dict:
+    """Show the network path (hops) to a host. Use to diagnose where
+    packets are being dropped or routed unexpectedly — especially when
+    `ping` says unreachable and you need to know if the problem is the
+    target host or somewhere on the way."""
+    err = _validate_host(host)
+    if err:
+        return {"error": err}
+    try:
+        max_hops = max(1, min(int(max_hops), 30))
+    except (TypeError, ValueError):
+        max_hops = 15
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["traceroute", "-n", "-m", str(max_hops), "-w", "2", host],
+            capture_output=True, text=True,
+            timeout=float(timeout), shell=False,
+        )
+    except FileNotFoundError:
+        return {"error": "`traceroute` not installed on this host"}
+    except subprocess.TimeoutExpired:
+        return {"error": f"traceroute timed out after {timeout}s",
+                "host": host}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "host": host}
+    return {
+        "host": host,
+        "returncode": result.returncode,
+        "output": (result.stdout or "")[-2000:],
+        "stderr": (result.stderr or "")[-200:],
+    }
+
+
 def tool_dns_lookup(host: str) -> dict:
     """Resolve a hostname to its IP, and (if possible) reverse-resolve.
     Use to verify DNS is working before blaming the network."""
@@ -609,15 +748,17 @@ def tool_list_restartable_iocs() -> dict:
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
-def tool_restart_ioc(ioc_name: str, timeout: float = 30.0) -> dict:
-    """Restart an IOC by running its registered script.
+_IOC_ALLOWED_ACTIONS = ("start", "stop", "restart", "status")
 
-    SAFETY GATE: this tool is wrapped in a user-confirmation dialog before
-    it executes. The user sees the IOC name and script path, must click Yes.
-    Only IOCs listed in ~/.pystream_ioc_scripts.json are permitted.
-    """
+
+def _run_ioc_script(ioc_name: str, action: str, timeout: float) -> dict:
+    """Shared dispatcher: validate the IOC + script, run it with `action`
+    as argv[1], capture and truncate the output."""
     if not ioc_name:
         return {"error": "ioc_name is required"}
+    if action not in _IOC_ALLOWED_ACTIONS:
+        return {"error": f"action must be one of {_IOC_ALLOWED_ACTIONS}, "
+                         f"got {action!r}"}
     scripts = _load_ioc_scripts()
     entry = scripts.get(ioc_name)
     if not entry or not isinstance(entry, dict):
@@ -636,12 +777,13 @@ def tool_restart_ioc(ioc_name: str, timeout: float = 30.0) -> dict:
     import subprocess
     try:
         result = subprocess.run(
-            [script],
+            [script, action],
             capture_output=True, text=True,
             timeout=float(timeout), shell=False,
         )
         return {
             "ioc_name": ioc_name,
+            "action": action,
             "script": script,
             "returncode": result.returncode,
             "success": result.returncode == 0,
@@ -650,9 +792,37 @@ def tool_restart_ioc(ioc_name: str, timeout: float = 30.0) -> dict:
         }
     except subprocess.TimeoutExpired:
         return {"error": f"script timed out after {timeout}s: {script}",
-                "ioc_name": ioc_name}
+                "ioc_name": ioc_name, "action": action}
     except Exception as ex:
-        return {"error": f"{type(ex).__name__}: {ex}", "ioc_name": ioc_name}
+        return {"error": f"{type(ex).__name__}: {ex}",
+                "ioc_name": ioc_name, "action": action}
+
+
+def tool_ioc_action(ioc_name: str, action: str,
+                    timeout: float = 30.0) -> dict:
+    """Run start, stop, or restart on an IOC's registered script.
+
+    SAFETY GATE: this tool is wrapped in a user-confirmation dialog before
+    it executes. The user sees the IOC name, action, and script path, and
+    must click Yes. Only IOCs listed in ~/.pystream/ioc_scripts.json are
+    permitted, and only the actions {start, stop, restart} are allowed
+    here. For non-destructive status checks, use ioc_status instead.
+    """
+    if action == "status":
+        return {"error": "use ioc_status (non-gated) for status checks; "
+                         "ioc_action is for start/stop/restart only."}
+    if action not in ("start", "stop", "restart"):
+        return {"error": f"action must be one of: start, stop, restart "
+                         f"(got {action!r})"}
+    return _run_ioc_script(ioc_name, action, timeout)
+
+
+def tool_ioc_status(ioc_name: str, timeout: float = 30.0) -> dict:
+    """Check whether an IOC is currently running by invoking its registered
+    script with the 'status' action. READ-ONLY — no confirmation dialog.
+    Returns the script's stdout (typically a 'is running' / 'not running'
+    line plus PID info) and the returncode."""
+    return _run_ioc_script(ioc_name, "status", timeout)
 
 
 # ── device-health diagnostics ───────────────────────────────────────────
@@ -866,250 +1036,67 @@ def tool_read_scan_metadata(path: str) -> dict:
 # model decides when to use the tool.
 TOOLS: list[dict[str, Any]] = [
     {
-        "name": "read_pv",
+        "name": "bash",
         "description": (
-            "Read the current value of an EPICS Process Variable. "
-            "Use this to inspect any PV the user mentions, or to verify the "
-            "state of a device. Returns {pv_name, value, ts} or {error}."
+            "Run any shell command. The agent's general-purpose Swiss-army "
+            "knife — use this for ping/traceroute/dns lookups, listing "
+            "files, reading docs (cat / grep), running IOC restart scripts, "
+            "querying the iocs_monitor scripts directory, or anything else "
+            "that's a regular shell operation. Read-only commands run "
+            "freely; destructive ones (rm, mv, kill, chmod, sudo, *.sh "
+            "executions, redirects to files, git push) trigger a Yes/No "
+            "confirmation dialog. Returns {returncode, success, stdout, "
+            "stderr}."
         ),
         "schema": {
             "type": "object",
             "properties": {
-                "pv_name": {"type": "string",
-                            "description": "Full PV name, e.g. '32id:m1.RBV'."},
+                "command": {"type": "string",
+                            "description": "Shell command to run."},
             },
-            "required": ["pv_name"],
+            "required": ["command"],
         },
-        "func": tool_read_pv,
+        "func": tool_bash,
     },
     {
-        "name": "read_motor",
+        "name": "read_file",
         "description": (
-            "Read a motor's position (the .RBV field, falling back to the "
-            "base PV). Use this to check where a motor currently is."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "motor_pv": {"type": "string",
-                             "description": "Motor PV without .RBV suffix, "
-                                            "e.g. '32id:m1'."},
-            },
-            "required": ["motor_pv"],
-        },
-        "func": tool_read_motor,
-    },
-    {
-        "name": "get_detector_image_stats",
-        "description": (
-            "Sample the current detector frame from PVA and return summary "
-            "stats: shape, dtype, min/max/mean/std and 1/50/99 percentiles. "
-            "Does NOT trigger a new acquisition — returns the latest "
-            "published frame. Use this when the user asks about beam "
-            "intensity, saturation, alignment quality, or unusual image "
-            "behaviour."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "detector_pv": {
-                    "type": "string",
-                    "description": "PVA NTNDArray PV name. Defaults to "
-                                   "'32idbSP1:Pva1:Image' if omitted.",
-                },
-            },
-            "required": [],
-        },
-        "func": tool_get_detector_image_stats,
-    },
-    {
-        "name": "list_recent_scans",
-        "description": (
-            "List recent XANES2D master HDF5 files in a directory, newest "
-            "first. Use this to find a recent scan to inspect, or to "
-            "confirm a scan was actually saved."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "save_dir": {"type": "string",
-                             "description": "Directory to search. Defaults "
-                                            "to '~/scans'."},
-                "pattern": {"type": "string",
-                            "description": "Glob pattern. Defaults to '*.h5'."},
-                "limit": {"type": "integer",
-                          "description": "Max number of files to return. "
-                                         "Defaults to 10."},
-            },
-            "required": [],
-        },
-        "func": tool_list_recent_scans,
-    },
-    {
-        "name": "read_scan_metadata",
-        "description": (
-            "Read the scan_config metadata + dataset shapes from an XANES2D "
-            "master HDF5 file. Use this after list_recent_scans to inspect "
-            "what was actually scanned (energies, sample positions, ZP cal)."
+            "Read a text file from disk (any path you have access to). "
+            "Truncated at 50K characters. Use for config files, log files, "
+            "local docs, scan parameter files, etc."
         ),
         "schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string",
-                         "description": "Absolute path to the .h5 file."},
+                         "description": "Absolute or ~/-relative path."},
             },
             "required": ["path"],
         },
-        "func": tool_read_scan_metadata,
-    },
-    {
-        "name": "list_docs",
-        "description": (
-            "List user-maintained reference documents (markdown files in "
-            "~/.pystream_docs/). Use this when the user asks about beamline "
-            "procedures, troubleshooting, or anything that might be in the "
-            "local documentation. ALWAYS check here before saying you don't "
-            "know something domain-specific."
-        ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_docs,
-    },
-    {
-        "name": "read_doc",
-        "description": (
-            "Read one reference document by filename (from list_docs). "
-            "Returns the markdown text. Truncates after 20K characters; if "
-            "you need more, ask the user where to look or grep with "
-            "search_docs."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string",
-                         "description": "Doc filename, e.g. 'xanes2d.md'."},
-            },
-            "required": ["name"],
-        },
-        "func": tool_read_doc,
-    },
-    {
-        "name": "search_docs",
-        "description": (
-            "Case-insensitive substring search across all reference docs. "
-            "Returns matching lines with file + line number. Use this to "
-            "locate a topic before pulling the full doc with read_doc."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string",
-                          "description": "Substring to search for."},
-            },
-            "required": ["query"],
-        },
-        "func": tool_search_docs,
-    },
-    {
-        "name": "list_pv_aliases",
-        "description": (
-            "Read the user-maintained PV alias / macro-substitution file at "
-            "~/.pystream_pv_aliases.json. The 'aliases' dict maps friendly "
-            "names to full PV strings (e.g. 'zp_z' → '32id:m1'). The "
-            "'macros' dict maps EPICS-style macros (e.g. 'P' → '32id:'). "
-            "Call this before guessing a PV name — the user often has a "
-            "local convention."
-        ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_pv_aliases,
-    },
-    {
-        "name": "resolve_pv",
-        "description": (
-            "Expand EPICS-style $(MACRO) substitutions in a PV template. "
-            "By default uses the macros from ~/.pystream_pv_aliases.json. "
-            "Use this to convert a template like '$(P)$(M).RBV' into a "
-            "real PV before calling read_pv."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "template": {"type": "string",
-                             "description": "PV template, e.g. '$(P)$(M).RBV'."},
-                "macros": {"type": "object",
-                           "description": "Optional override macros dict."},
-            },
-            "required": ["template"],
-        },
-        "func": tool_resolve_pv,
-    },
-    {
-        "name": "list_plugins",
-        "description": (
-            "List the names of pystream plugins that have persisted settings. "
-            "Use this to discover which plugins the user has configured "
-            "before asking for their settings."
-        ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_plugins,
-    },
-    {
-        "name": "get_plugin_settings",
-        "description": (
-            "Return the persisted settings for one pystream plugin (e.g. "
-            "'QGMaxDialog', 'XANES2DGuiDialog'). Sensitive fields like "
-            "'api_key' are redacted. Use this to learn what the user has "
-            "configured (motor PVs, scan parameters, save directories, "
-            "etc.) before answering questions about that plugin."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {
-                    "type": "string",
-                    "description": "Plugin class name, e.g. 'QGMaxDialog'.",
-                },
-            },
-            "required": ["plugin_name"],
-        },
-        "func": tool_get_plugin_settings,
-    },
-    {
-        "name": "list_url_docs",
-        "description": (
-            "List documentation URLs the user has registered in "
-            "~/.pystream_doc_urls.json (beamline wiki, synApps modules, "
-            "areaDetector docs, etc.). Call this BEFORE fetching arbitrary "
-            "URLs — it tells you what references the user wants you to use."
-        ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_url_docs,
+        "func": tool_read_file,
     },
     {
         "name": "fetch_url",
         "description": (
-            "Fetch a documentation page over HTTPS and return its text "
-            "content (HTML auto-stripped). Use for reading manuals, wikis, "
-            "synApps / areaDetector docs that the user has registered via "
-            "list_url_docs. Truncates at 30K characters; if you need more, "
-            "fetch a specific subpage rather than the whole site."
+            "Fetch an HTTP/HTTPS URL and return its body (HTML auto-stripped "
+            "to plain text). Use for live status pages, vendor docs, wikis, "
+            "or anything web. Truncated at 30K characters."
         ),
         "schema": {
             "type": "object",
             "properties": {
                 "url": {"type": "string",
-                        "description": "Full URL, http:// or https://."},
+                        "description": "Full URL."},
             },
             "required": ["url"],
         },
         "func": tool_fetch_url,
     },
     {
-        "name": "check_pv_health",
+        "name": "read_pv",
         "description": (
-            "Diagnose a single PV: connected? alarm severity? how stale is "
-            "the last value? Use when the user suspects a device has "
-            "stopped communicating, or to verify any PV is healthy. The "
-            "'diagnosis' field summarizes the result in one sentence."
+            "Read the current value of an EPICS PV. Returns {value, ts} or "
+            "{error}. Faster and cleaner than calling caget via bash."
         ),
         "schema": {
             "type": "object",
@@ -1119,33 +1106,31 @@ TOOLS: list[dict[str, Any]] = [
             },
             "required": ["pv_name"],
         },
-        "func": tool_check_pv_health,
+        "func": tool_read_pv,
     },
     {
-        "name": "check_motor_health",
+        "name": "caput",
         "description": (
-            "Diagnose a motor: read RBV, DMOV, decode the .MSTA bits "
-            "(comm error, at limit, slip/stall, problem flag), and report "
-            "alarm severity. Use when a motor isn't moving, looks stuck, "
-            "or the user reports an error. Returns a 'diagnosis' string."
+            "Write a value to an EPICS PV. WRITE action — Yes/No dialog "
+            "before executing. Use for setpoints, mode changes, motor "
+            "moves (set the .VAL field). Always explain WHY before calling."
         ),
         "schema": {
             "type": "object",
             "properties": {
-                "motor_pv": {"type": "string",
-                             "description": "Motor PV without .RBV suffix."},
+                "pv_name": {"type": "string"},
+                "value":   {"description": "Number, string, or list."},
             },
-            "required": ["motor_pv"],
+            "required": ["pv_name", "value"],
         },
-        "func": tool_check_motor_health,
+        "func": tool_caput,
     },
     {
-        "name": "check_detector_stream",
+        "name": "get_detector_image_stats",
         "description": (
-            "Check whether the detector's PVA image stream is producing "
-            "new frames (uniqueId advancing). Use when the live image "
-            "looks frozen, the user reports no acquisition, or to confirm "
-            "the camera is actually sending data."
+            "Sample the current detector frame from PVA and return summary "
+            "stats: shape, dtype, min/max/mean/std, percentiles, saturation "
+            "fraction. Does NOT trigger a new acquisition."
         ),
         "schema": {
             "type": "object",
@@ -1158,111 +1143,7 @@ TOOLS: list[dict[str, Any]] = [
             },
             "required": [],
         },
-        "func": tool_check_detector_stream,
-    },
-    {
-        "name": "ping",
-        "description": (
-            "Ping a host (no sudo required). Use to verify whether an IOC "
-            "host, detector server, or other network device is reachable. "
-            "Returns reachability, packet loss, and average RTT."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "host": {"type": "string",
-                         "description": "Hostname or IP address."},
-                "count": {"type": "integer",
-                          "description": "Number of pings (1-20). Defaults 4."},
-            },
-            "required": ["host"],
-        },
-        "func": tool_ping,
-    },
-    {
-        "name": "tcp_check",
-        "description": (
-            "Try a TCP connection to host:port. Use to check whether a "
-            "specific service is listening — pvAccess server, procServ "
-            "telnet port, HTTP status page. The 'diagnosis' field "
-            "distinguishes 'host down' vs 'firewalled' vs 'port not "
-            "listening'."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "host": {"type": "string",
-                         "description": "Hostname or IP."},
-                "port": {"type": "integer",
-                         "description": "TCP port (1-65535)."},
-            },
-            "required": ["host", "port"],
-        },
-        "func": tool_tcp_check,
-    },
-    {
-        "name": "dns_lookup",
-        "description": (
-            "Resolve a hostname to its IP and (if possible) reverse-resolve. "
-            "Use to confirm DNS is working before blaming the network."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "host": {"type": "string",
-                         "description": "Hostname to resolve."},
-            },
-            "required": ["host"],
-        },
-        "func": tool_dns_lookup,
-    },
-    {
-        "name": "list_status_pages",
-        "description": (
-            "PRIMARY tool for 'are my IOCs running', 'list my IOCs', 'IOC "
-            "status', 'machine status', and similar live-status questions. "
-            "Lists user-registered web status pages (IOC monitor, "
-            "areaDetector status, machine status, etc.) from "
-            "~/.pystream/status_pages.json. After calling this, use "
-            "fetch_url(url) to read the picked page's current content. "
-            "Distinct from list_url_docs (static reference material) and "
-            "list_restartable_iocs (write allowlist)."
-        ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_status_pages,
-    },
-    {
-        "name": "list_restartable_iocs",
-        "description": (
-            "List IOCs you are PERMITTED to RESTART. This is the write "
-            "allowlist, NOT a list of running IOCs and NOT a status source. "
-            "Call this ONLY when about to call restart_ioc. For 'list my "
-            "IOCs' / 'are my IOCs running' / 'IOC status' questions, use "
-            "list_status_pages + fetch_url instead."
-        ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_restartable_iocs,
-    },
-    {
-        "name": "restart_ioc",
-        "description": (
-            "Restart an IOC by running its allowlisted script. THIS IS A "
-            "WRITE ACTION: the user gets a Yes/No confirmation dialog "
-            "before the script runs. Only IOCs returned by list_ioc_scripts "
-            "are permitted; any other name will be rejected. Returns "
-            "{returncode, stdout, stderr, success}."
-        ),
-        "schema": {
-            "type": "object",
-            "properties": {
-                "ioc_name": {
-                    "type": "string",
-                    "description": "Name as listed by list_ioc_scripts.",
-                },
-            },
-            "required": ["ioc_name"],
-        },
-        "func": tool_restart_ioc,
+        "func": tool_get_detector_image_stats,
     },
 ]
 

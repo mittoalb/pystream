@@ -29,6 +29,7 @@ from .agent_tools import (
     openai_tool_specs,
     get_tool,
     WRITE_TOOLS,
+    _bash_is_destructive,
 )
 
 
@@ -51,19 +52,36 @@ class _ConfirmHelper(QtCore.QObject):
 
 def _confirmation_message(name: str, args: dict) -> str:
     """Format a clear, scannable confirmation message per write tool."""
-    if name == "restart_ioc":
-        ioc = args.get("ioc_name", "?")
+    if name == "bash":
+        cmd = args.get("command", "?")
         return (
-            f"The agent wants to RESTART an IOC.\n\n"
-            f"  IOC: {ioc}\n\n"
-            f"This will run the script registered for '{ioc}' in "
-            f"~/.pystream_ioc_scripts.json. Continue?"
+            f"The agent wants to run a shell command:\n\n"
+            f"  {cmd}\n\n"
+            f"This was flagged as potentially destructive. Run it?"
+        )
+    if name == "caput":
+        pv = args.get("pv_name", "?")
+        val = args.get("value", "?")
+        return (
+            f"The agent wants to write to an EPICS PV:\n\n"
+            f"  {pv}  ←  {val!r}\n\n"
+            f"Allow?"
         )
     return (
         f"The agent wants to call:\n\n"
         f"  {name}({json.dumps(args, default=str)})\n\n"
         f"Allow this?"
     )
+
+
+def _needs_confirmation(name: str, arguments: dict) -> bool:
+    """True if this tool call should pop the Yes/No dialog. Static for
+    write tools; dynamic for bash (only destructive commands gate)."""
+    if name in WRITE_TOOLS:
+        return True
+    if name == "bash":
+        return _bash_is_destructive(arguments.get("command", ""))
+    return False
 
 
 PROTOCOL_ANTHROPIC = "anthropic"
@@ -75,81 +93,33 @@ MAX_AGENT_ITERATIONS = 10
 
 SYSTEM_PROMPT_DEFAULT = """You are an AI assistant embedded in pystream, the
 live-image GUI for APS beamline 32-ID (TXM, transmission X-ray microscopy).
-You help the on-shift scientist operate the beamline. Be concise — a couple
-of sentences unless asked for detail. Prefer concrete answers (PV names,
-file paths, motor positions) over generalities.
+You help the on-shift scientist operate the beamline. Be concise.
 
-You have a set of read-only tools. Use them rather than guessing:
+You run as the user. You have full shell access (`bash`), can read any
+file (`read_file`), fetch URLs (`fetch_url`), read EPICS PVs (`read_pv`),
+write EPICS PVs (`caput` — gated), and grab detector image stats
+(`get_detector_image_stats`). Compose these to answer anything.
 
-LIVE STATE
-- read_pv(pv_name) — current value of any EPICS PV
-- read_motor(motor_pv) — motor .RBV
-- get_detector_image_stats() — current detector frame stats (no new acquire)
+DESTRUCTIVE bash commands (rm, kill, chmod, sudo, *.sh, redirects to
+files, git push, etc.) trigger a Yes/No confirmation dialog before
+executing. Read-only commands run freely.
 
-DEVICE HEALTH (use when something seems stuck, frozen, or unresponsive)
-- check_pv_health(pv_name) — connected? alarm? how stale is the value?
-- check_motor_health(motor_pv) — decodes .MSTA: comm error, at limit,
-  slip/stall, fault. Returns a one-sentence diagnosis.
-- check_detector_stream(detector_pv) — checks if frames are still flowing
-  (uniqueId advancing). Use when the live image looks frozen.
+Concrete examples:
+- "list IOCs running"  -> fetch_url("http://164.54.102.6:5100/")
+  or bash("ls /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/")
+- "is the camera IOC running" -> bash("/path/to/32idbSP1.sh status")
+- "restart the camera IOC" -> bash("/path/to/32idbSP1.sh restart")
+- "what's the ZP motor at" -> read_pv("32id:m1.RBV")
+- "any traffic to the IOC host" -> bash("ping -c 4 gauss")
+- "what's in my condenser doc" -> read_file("~/.pystream/docs/condensers.md")
 
-NETWORK DIAGNOSTICS (no sudo)
-- ping(host) — is the host reachable? packet loss + RTT
-- tcp_check(host, port) — is a specific service listening?
-- dns_lookup(host) — resolve a hostname / verify DNS works
-- list_status_pages() / fetch_url(url) — registered live status URLs
-  (areaDetector status, IOC web view, etc.) — fetch the URL after looking
-  it up.
-
-IOC RECOVERY (write actions — user gets a Yes/No dialog before they run)
-- list_restartable_iocs() — RESTART AUTHORIZATION list, NOT a status
-  source. Only call this when about to call restart_ioc.
-- restart_ioc(ioc_name) — runs the user's local restart script for that
-  IOC. Only suggest this if a tool result clearly indicates the IOC is
-  down/wedged. Always call list_restartable_iocs FIRST and confirm the
-  IOC is on the allowlist; never guess names.
-
-IMPORTANT — DISAMBIGUATION:
-- "Are my IOCs running?" / "What IOCs are up?" / "list my IOCs" / "IOC
-  status" → list_status_pages then fetch_url for an ioc_monitor page if
-  registered, OR ping/tcp_check the IOC hosts. NEVER list_restartable_iocs.
-- "Restart this IOC" / "the IOC is wedged, fix it" →
-  list_restartable_iocs then restart_ioc.
-- list_restartable_iocs only tells you what you're permitted to RESTART;
-  it says nothing about which IOCs exist or whether they're up.
-
-LOCAL KNOWLEDGE BASE
-- list_docs() / read_doc(name) / search_docs(query) — markdown reference
-  docs the user maintains in ~/.pystream_docs/ (procedures, troubleshooting,
-  IOC notes, etc.). ALWAYS check here before saying you don't know
-  something beamline-specific.
-- list_pv_aliases() — user-maintained PV alias / macro file at
-  ~/.pystream_pv_aliases.json. Call this BEFORE guessing PV names — the
-  user has a local naming convention.
-- resolve_pv(template) — expand $(MACRO) substitutions using the alias file.
-
-WEB DOCS
-- list_url_docs() — registered documentation URLs (beamline wiki, synApps,
-  areaDetector). Check here before fetching arbitrary URLs.
-- fetch_url(url) — read a specific page. Prefer pages from list_url_docs.
-
-GUI / PLUGIN STATE
-- list_plugins() — pystream plugins the user has configured
-- get_plugin_settings(plugin_name) — what's configured in that plugin
-  (motor PVs, scan parameters, save dirs). Sensitive fields (api_key,
-  password) are redacted.
-
-DATA
-- list_recent_scans() / read_scan_metadata(path) — recent XANES2D HDF5
-  master files and their scan_config
-
-WORKFLOW
-- For "what's happening right now" → live-state tools.
-- For "how do I do X" → search_docs / read_doc first.
-- For "what PV is …" → list_pv_aliases first.
-- For "what's plugin X set to" → get_plugin_settings.
-- Don't invent PV names, file paths, or settings. If a tool returns
-  {"error": ...}, say so plainly and suggest the fix the error hints at.
+Guidelines:
+- Don't invent PV names, file paths, or settings. If unsure, run bash
+  to discover. find/ls/grep/cat are your friends.
+- Always explain what you're about to do before destructive actions —
+  the user reads your message, then sees the confirmation dialog.
+- If a tool returns {"error": ...}, say so plainly and suggest the fix
+  the error hints at.
 """
 
 
@@ -169,10 +139,10 @@ def _execute_tool(name: str, arguments: dict, confirm=None) -> dict:
     if not isinstance(arguments, dict):
         return {"error": f"arguments must be an object, got {type(arguments).__name__}"}
 
-    if name in WRITE_TOOLS:
+    if _needs_confirmation(name, arguments):
         if confirm is None:
-            return {"error": f"{name} is a write tool but no confirmation "
-                             f"channel is available — refusing."}
+            return {"error": f"{name} requires user confirmation but no "
+                             f"confirmation channel is available — refusing."}
         approved = False
         try:
             approved = bool(confirm("Confirm action", _confirmation_message(name, arguments)))
@@ -704,6 +674,31 @@ class AgentDialog(QtWidgets.QDialog):
         })
 
     # ── knowledge-base bootstrap ────────────────────────────────────────
+    def _discover_ioc_scripts(self) -> dict:
+        """Look for an iocs_monitor scripts directory under common APS
+        conventions. Returns a populated `scripts` dict ready to drop into
+        ioc_scripts.json, or {} if nothing is found."""
+        import glob
+        candidates = [
+            os.path.expanduser("~/Software/iocs_monitor/iocs_monitor/scripts"),
+            os.path.expanduser("~/iocs_monitor/scripts"),
+        ]
+        for d in candidates:
+            if not os.path.isdir(d):
+                continue
+            shs = sorted(glob.glob(os.path.join(d, "*.sh")))
+            if not shs:
+                continue
+            return {
+                os.path.splitext(os.path.basename(p))[0]: {
+                    "path": p,
+                    "description": f"Restart {os.path.basename(p)} "
+                                   f"(auto-discovered in {d})",
+                }
+                for p in shs
+            }
+        return {}
+
     def _bootstrap_knowledge_base(self):
         """Create empty starter files for the user-editable knowledge base
         the first time the dialog opens. Never overwrites existing files."""
@@ -743,14 +738,16 @@ class AgentDialog(QtWidgets.QDialog):
                         f, indent=2,
                     )
             if not os.path.isfile(ioc_file):
+                # Try to auto-discover an iocs_monitor scripts directory
+                # before falling back to an empty allowlist. Common APS
+                # convention: ~/Software/iocs_monitor/iocs_monitor/scripts/
+                discovered = self._discover_ioc_scripts()
                 with open(ioc_file, "w") as f:
                     json.dump(
                         {"_comment": "Allowlist of IOCs the agent may "
-                                     "restart. Each entry: ioc_name → "
-                                     "{path: <script>, description: <why>}. "
-                                     "Empty by default — add entries to "
-                                     "authorize.",
-                         "scripts": {}},
+                                     "act on (start/stop/restart). Each "
+                                     "entry: ioc_name → {path, description}.",
+                         "scripts": discovered},
                         f, indent=2,
                     )
             if not os.path.isfile(status_file):
