@@ -891,33 +891,41 @@ class AgentDialog(QtWidgets.QDialog):
         return {}
 
     def _link_known_reference_docs(self, docs_dir: str):
-        """Symlink known per-project reference docs (AGENTS.md, README.md
-        for projects under ~/Software/...) into the agent's docs directory
-        so list_docs / search_docs can find them. Idempotent — re-run safely."""
-        candidates = [
-            ("~/Software/bl_gui/AGENTS.md",  "bl_gui_AGENTS.md"),
-            ("~/Software/bl_gui/README.md",  "bl_gui_README.md"),
-            ("~/Software/pystream/README.md", "pystream_README.md"),
-            ("~/Software/iocs_monitor/README.md", "iocs_monitor_README.md"),
-            ("~/Software/xanes_gui/README.md", "xanes_gui_README.md"),
-        ]
+        """Auto-discover reference docs under ~/Software/<project>/ and
+        symlink them into the agent's docs directory so list_docs /
+        search_docs can find them. Looks for AGENTS.md (preferred) or
+        README.md in each project root. Idempotent — never clobbers a
+        real file or an existing correct symlink."""
+        import glob
         try:
             os.makedirs(docs_dir, exist_ok=True)
         except Exception:
             return
-        for src, dst_name in candidates:
-            src_abs = os.path.expanduser(src)
-            if not os.path.isfile(src_abs):
+        software_root = os.path.expanduser("~/Software")
+        if not os.path.isdir(software_root):
+            return
+        # AGENTS.md first (richer); fall back to README.md if no AGENTS.md.
+        for project_dir in sorted(glob.glob(os.path.join(software_root, "*"))):
+            if not os.path.isdir(project_dir):
                 continue
-            dst = os.path.join(docs_dir, dst_name)
-            try:
-                if os.path.islink(dst) and os.readlink(dst) == src_abs:
+            project_name = os.path.basename(project_dir)
+            for filename in ("AGENTS.md", "README.md"):
+                src_abs = os.path.join(project_dir, filename)
+                if not os.path.isfile(src_abs):
                     continue
-                if os.path.lexists(dst):
-                    continue  # don't clobber a real file the user wrote
-                os.symlink(src_abs, dst)
-            except Exception:
-                pass
+                # Strip .md, suffix the filename to disambiguate same-name files.
+                tag = filename.rsplit(".", 1)[0]
+                dst_name = f"{project_name}_{tag}.md"
+                dst = os.path.join(docs_dir, dst_name)
+                try:
+                    if os.path.islink(dst) and os.readlink(dst) == src_abs:
+                        break  # already linked, move to next project
+                    if os.path.lexists(dst):
+                        break  # don't clobber a user-written file
+                    os.symlink(src_abs, dst)
+                except Exception:
+                    pass
+                break  # one doc per project — prefer AGENTS over README
 
     def _bootstrap_knowledge_base(self):
         """Create empty starter files for the user-editable knowledge base
