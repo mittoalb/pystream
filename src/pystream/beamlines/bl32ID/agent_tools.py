@@ -571,15 +571,17 @@ def _load_ioc_scripts() -> dict:
         return {}
 
 
-def tool_list_ioc_scripts() -> dict:
+def tool_list_restartable_iocs() -> dict:
     """List the IOC restart scripts the user has registered in
-    ~/.pystream_ioc_scripts.json. This is the WRITE allowlist — only IOCs
+    ~/.pystream/ioc_scripts.json. This is the WRITE allowlist — only IOCs
     that appear here can be RESTARTED. It is NOT a status source and
     says nothing about which IOCs exist or whether they're up."""
-    note = ("This is the IOC RESTART ALLOWLIST, not a status source. To "
-            "answer 'what IOCs are running / are my IOCs up', call "
-            "list_status_pages then fetch_url on the ioc_monitor page, "
-            "or ping/tcp_check the IOC hosts.")
+    note = ("This is the IOC RESTART ALLOWLIST (a write-action permission "
+            "list), NOT a status source. For 'what IOCs are running' / "
+            "'are my IOCs up' / 'list my IOCs', call list_status_pages "
+            "then fetch_url on the ioc_monitor page, or ping/tcp_check "
+            "the IOC hosts. Only call this tool when about to call "
+            "restart_ioc.")
     try:
         if not os.path.isfile(IOC_SCRIPTS_FILE):
             return {
@@ -1217,25 +1219,29 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_status_pages",
         "description": (
-            "List user-registered web status pages (areaDetector status, "
-            "IOC procServ web view, motor controller status, etc.) from "
-            "~/.pystream_status_pages.json. These are LIVE endpoints — use "
-            "fetch_url(url) to read the current content. Distinct from "
-            "list_url_docs which is reference material."
+            "PRIMARY tool for 'are my IOCs running', 'list my IOCs', 'IOC "
+            "status', 'machine status', and similar live-status questions. "
+            "Lists user-registered web status pages (IOC monitor, "
+            "areaDetector status, machine status, etc.) from "
+            "~/.pystream/status_pages.json. After calling this, use "
+            "fetch_url(url) to read the picked page's current content. "
+            "Distinct from list_url_docs (static reference material) and "
+            "list_restartable_iocs (write allowlist)."
         ),
         "schema": {"type": "object", "properties": {}, "required": []},
         "func": tool_list_status_pages,
     },
     {
-        "name": "list_ioc_scripts",
+        "name": "list_restartable_iocs",
         "description": (
-            "List IOCs you are allowed to restart. The user maintains this "
-            "allowlist in ~/.pystream_ioc_scripts.json — anything NOT on it "
-            "cannot be restarted. Call this BEFORE calling restart_ioc so "
-            "you know what you're allowed to do."
+            "List IOCs you are PERMITTED to RESTART. This is the write "
+            "allowlist, NOT a list of running IOCs and NOT a status source. "
+            "Call this ONLY when about to call restart_ioc. For 'list my "
+            "IOCs' / 'are my IOCs running' / 'IOC status' questions, use "
+            "list_status_pages + fetch_url instead."
         ),
         "schema": {"type": "object", "properties": {}, "required": []},
-        "func": tool_list_ioc_scripts,
+        "func": tool_list_restartable_iocs,
     },
     {
         "name": "restart_ioc",

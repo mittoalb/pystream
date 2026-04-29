@@ -102,21 +102,21 @@ NETWORK DIAGNOSTICS (no sudo)
   it up.
 
 IOC RECOVERY (write actions — user gets a Yes/No dialog before they run)
-- list_ioc_scripts() — RESTART AUTHORIZATION list, NOT a status source.
-  Only call this when about to call restart_ioc.
+- list_restartable_iocs() — RESTART AUTHORIZATION list, NOT a status
+  source. Only call this when about to call restart_ioc.
 - restart_ioc(ioc_name) — runs the user's local restart script for that
   IOC. Only suggest this if a tool result clearly indicates the IOC is
-  down/wedged. Always call list_ioc_scripts FIRST and confirm the IOC is
-  on the allowlist; never guess names.
+  down/wedged. Always call list_restartable_iocs FIRST and confirm the
+  IOC is on the allowlist; never guess names.
 
 IMPORTANT — DISAMBIGUATION:
-- "Are my IOCs running?" / "What IOCs are up?" / "IOC status" →
-  list_status_pages then fetch_url for an ioc_monitor page if registered,
-  OR ping/tcp_check the IOC hosts. NOT list_ioc_scripts.
-- "Restart this IOC" / "the IOC is wedged, fix it" → list_ioc_scripts
-  then restart_ioc.
-- list_ioc_scripts only tells you what you're permitted to RESTART; it
-  says nothing about which IOCs exist or whether they're up.
+- "Are my IOCs running?" / "What IOCs are up?" / "list my IOCs" / "IOC
+  status" → list_status_pages then fetch_url for an ioc_monitor page if
+  registered, OR ping/tcp_check the IOC hosts. NEVER list_restartable_iocs.
+- "Restart this IOC" / "the IOC is wedged, fix it" →
+  list_restartable_iocs then restart_ioc.
+- list_restartable_iocs only tells you what you're permitted to RESTART;
+  it says nothing about which IOCs exist or whether they're up.
 
 LOCAL KNOWLEDGE BASE
 - list_docs() / read_doc(name) / search_docs(query) — markdown reference
