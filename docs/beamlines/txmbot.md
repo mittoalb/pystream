@@ -44,7 +44,7 @@ The plugin appears in the bl32ID toolbar as **AI**.
    from the Gateway.
 4. Pick a model. Type a question, press Enter, or click **Send**.
 
-Settings persist across sessions in `~/.pystream_bl32ID_settings.json` under
+Settings persist across sessions in `~/.pystream/bl32ID_settings.json` under
 the `AgentDialog` key.
 
 ## Architecture
@@ -99,23 +99,32 @@ on.
 | `check_motor_health(motor_pv)` | Decodes `.MSTA` bits — comm error, at limit, slip/stall, fault |
 | `check_detector_stream(detector_pv)` | Verifies PVA `uniqueId` is advancing — distinguishes idle vs wedged |
 
+### Network diagnostics (read-only, no sudo)
+
+| Tool | Purpose |
+|---|---|
+| `ping(host, count)` | Reachability + packet loss + RTT |
+| `tcp_check(host, port)` | TCP connect — distinguishes 'host down' / 'firewalled' / 'port not listening' |
+| `dns_lookup(host)` | Resolve hostname, plus reverse DNS |
+| `list_status_pages()` | Registered live web status URLs (then `fetch_url` to read) |
+
 ### Local knowledge base (read-only)
 
 | Tool | Purpose | Source file |
 |---|---|---|
-| `list_docs()` | List markdown docs the user maintains | `~/.pystream_docs/*.md` |
+| `list_docs()` | List markdown docs the user maintains | `~/.pystream/docs/*.md` |
 | `read_doc(name)` | Read one doc (truncated at 20K chars) | same |
 | `search_docs(query)` | Substring search across all docs | same |
-| `list_pv_aliases()` | Friendly PV names + EPICS macros | `~/.pystream_pv_aliases.json` |
+| `list_pv_aliases()` | Friendly PV names + EPICS macros | `~/.pystream/pv_aliases.json` |
 | `resolve_pv(template)` | Expand `$(P)$(M).RBV`-style macros | uses macros from above |
-| `list_plugins()` | Pystream plugins with persisted settings | `~/.pystream_bl32ID_settings.json` |
+| `list_plugins()` | Pystream plugins with persisted settings | `~/.pystream/bl32ID_settings.json` |
 | `get_plugin_settings(name)` | Read one plugin's settings (sensitive fields redacted) | same |
 
 ### Web docs (read-only)
 
 | Tool | Purpose | Source file |
 |---|---|---|
-| `list_url_docs()` | Registered documentation URLs | `~/.pystream_doc_urls.json` |
+| `list_url_docs()` | Registered documentation URLs | `~/.pystream/doc_urls.json` |
 | `fetch_url(url)` | HTTP GET, HTML auto-stripped to plain text (truncated at 30K chars) | — |
 
 ### Data (read-only)
@@ -138,15 +147,25 @@ When TXMBot opens for the first time, four user-editable files are
 auto-created in `$HOME` if they don't already exist. The bootstrap **never
 overwrites** existing content.
 
+All user-config lives under a single `~/.pystream/` directory:
+
 ```
-~/.pystream_docs/                    ← markdown reference notes
-    README.md                          (created on bootstrap)
-~/.pystream_pv_aliases.json          ← friendly names + EPICS macros
-~/.pystream_doc_urls.json            ← URL list for web docs
-~/.pystream_ioc_scripts.json         ← IOC restart allowlist
+~/.pystream/
+    docs/                            ← markdown reference notes
+        README.md                      (created on bootstrap)
+    pv_aliases.json                  ← friendly names + EPICS macros
+    doc_urls.json                    ← URL list for static reference docs
+    status_pages.json                ← URL list for LIVE status pages
+    ioc_scripts.json                 ← IOC restart allowlist
+    bl32ID_settings.json             ← persisted plugin settings
+    qgmax_request.json               ← QGMax handshake (XANES2D ↔ QGMax)
+    qgmax_response.json              ← QGMax handshake (XANES2D ↔ QGMax)
 ```
 
-### `~/.pystream_docs/`
+Legacy files at `~/.pystream_*` and `~/.pystream_docs/` (the old layout)
+are migrated automatically on first launch — no manual move required.
+
+### `~/.pystream/docs/`
 
 Drop any number of markdown files here. The agent reads them via
 `list_docs` / `search_docs` / `read_doc`. One topic per file works best.
@@ -160,7 +179,7 @@ Three condensers are configured in optics_config.json: Sigray (focal
 ...
 ```
 
-### `~/.pystream_pv_aliases.json`
+### `~/.pystream/pv_aliases.json`
 
 Maps friendly names and EPICS-style `$(P)$(M)` macros to real PV strings.
 
@@ -180,7 +199,7 @@ Maps friendly names and EPICS-style `$(P)$(M)` macros to real PV strings.
 The agent calls `list_pv_aliases` before guessing PV names, and
 `resolve_pv("$(P)$(M).RBV")` to expand macros.
 
-### `~/.pystream_doc_urls.json`
+### `~/.pystream/doc_urls.json`
 
 Maps friendly names to documentation URLs the agent may fetch on demand.
 
@@ -198,7 +217,27 @@ The agent calls `list_url_docs` first to see what's available, then
 `fetch_url(url)` to pull a specific page. Pages are HTML-stripped to
 plain text and truncated at 30K characters.
 
-### `~/.pystream_ioc_scripts.json`
+### `~/.pystream/status_pages.json`
+
+Maps friendly names to **live** status pages — areaDetector status pages,
+IOC procServ web view, motor controller status, vendor health endpoints.
+Distinct from `~/.pystream/doc_urls.json` (reference material).
+
+```json
+{
+  "pages": {
+    "ad_camera_status":  "http://camserver.aps.anl.gov:8080/status",
+    "mcs_procserv_web":  "http://iocserver:30001",
+    "motor_controller":  "http://newport:8080/status.json"
+  }
+}
+```
+
+The agent calls `list_status_pages()` to discover what's available, then
+`fetch_url(<url>)` to read the current content. HTML is auto-stripped to
+plain text.
+
+### `~/.pystream/ioc_scripts.json`
 
 **This is the security boundary for write actions.** Only IOCs listed
 here can be restarted. Empty by default.
@@ -260,7 +299,7 @@ condensers are configured"*.
 ## Privacy & Storage
 
 - The Gateway URL, API key, last-used model, and system prompt are
-  persisted to `~/.pystream_bl32ID_settings.json` under the `AgentDialog`
+  persisted to `~/.pystream/bl32ID_settings.json` under the `AgentDialog`
   key. That file lives in your home directory — **not** inside any git
   repo, so it cannot be accidentally committed.
 - The plugin makes HTTP calls only to the Gateway URL you entered, and
@@ -293,15 +332,16 @@ is picked up.
 
 | Setting | Where stored | How to change |
 |---|---|---|
-| Gateway base URL | `~/.pystream_bl32ID_settings.json` | Dialog field |
+| Gateway base URL | `~/.pystream/bl32ID_settings.json` | Dialog field |
 | Gateway protocol | same | Dropdown |
 | API key | same (plain text, user-only file) | Dialog field |
 | Selected model | same | Dropdown after Connect |
 | System prompt | same | Collapsible field in dialog |
-| Reference docs | `~/.pystream_docs/*.md` | Edit files directly |
-| PV aliases / macros | `~/.pystream_pv_aliases.json` | Edit JSON |
-| Doc URLs | `~/.pystream_doc_urls.json` | Edit JSON |
-| IOC restart allowlist | `~/.pystream_ioc_scripts.json` | Edit JSON |
+| Reference docs | `~/.pystream/docs/*.md` | Edit files directly |
+| PV aliases / macros | `~/.pystream/pv_aliases.json` | Edit JSON |
+| Doc URLs (static reference) | `~/.pystream/doc_urls.json` | Edit JSON |
+| Status pages (live) | `~/.pystream/status_pages.json` | Edit JSON |
+| IOC restart allowlist | `~/.pystream/ioc_scripts.json` | Edit JSON |
 
 ## Adding a New Tool
 
@@ -372,7 +412,7 @@ tools — the answer came from training data or the system prompt. Either:
 
 ### `restart_ioc` says "not in the allowlist"
 
-The allowlist file is `~/.pystream_ioc_scripts.json`. Either:
+The allowlist file is `~/.pystream/ioc_scripts.json`. Either:
 - The IOC name doesn't match an entry in `scripts:`, or
 - The file doesn't exist yet — it's auto-created empty on first AI
   dialog open; you must add entries manually.

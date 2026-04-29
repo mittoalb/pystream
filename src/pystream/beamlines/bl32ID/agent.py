@@ -23,7 +23,7 @@ from typing import Optional
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import pyqtSignal
 
-from .plugin_settings import load_settings, save_settings
+from .plugin_settings import PYSTREAM_HOME, load_settings, save_settings
 from .agent_tools import (
     anthropic_tool_specs,
     openai_tool_specs,
@@ -93,13 +93,30 @@ DEVICE HEALTH (use when something seems stuck, frozen, or unresponsive)
 - check_detector_stream(detector_pv) — checks if frames are still flowing
   (uniqueId advancing). Use when the live image looks frozen.
 
+NETWORK DIAGNOSTICS (no sudo)
+- ping(host) — is the host reachable? packet loss + RTT
+- tcp_check(host, port) — is a specific service listening?
+- dns_lookup(host) — resolve a hostname / verify DNS works
+- list_status_pages() / fetch_url(url) — registered live status URLs
+  (areaDetector status, IOC web view, etc.) — fetch the URL after looking
+  it up.
+
 IOC RECOVERY (write actions — user gets a Yes/No dialog before they run)
-- list_ioc_scripts() — see which IOCs you're allowed to restart
+- list_ioc_scripts() — RESTART AUTHORIZATION list, NOT a status source.
+  Only call this when about to call restart_ioc.
 - restart_ioc(ioc_name) — runs the user's local restart script for that
   IOC. Only suggest this if a tool result clearly indicates the IOC is
-  down/wedged (e.g. PVs disconnected, no PVA frames). Always call
-  list_ioc_scripts FIRST and confirm the IOC is on the allowlist; never
-  guess names.
+  down/wedged. Always call list_ioc_scripts FIRST and confirm the IOC is
+  on the allowlist; never guess names.
+
+IMPORTANT — DISAMBIGUATION:
+- "Are my IOCs running?" / "What IOCs are up?" / "IOC status" →
+  list_status_pages then fetch_url for an ioc_monitor page if registered,
+  OR ping/tcp_check the IOC hosts. NOT list_ioc_scripts.
+- "Restart this IOC" / "the IOC is wedged, fix it" → list_ioc_scripts
+  then restart_ioc.
+- list_ioc_scripts only tells you what you're permitted to RESTART; it
+  says nothing about which IOCs exist or whether they're up.
 
 LOCAL KNOWLEDGE BASE
 - list_docs() / read_doc(name) / search_docs(query) — markdown reference
@@ -448,9 +465,22 @@ class AgentDialog(QtWidgets.QDialog):
         self.system_edit.setPlainText(SYSTEM_PROMPT_DEFAULT)
         self.system_edit.setMaximumHeight(160)
         svl.addWidget(self.system_edit)
+        reset_row = QtWidgets.QHBoxLayout()
+        reset_row.addStretch()
+        self.reset_prompt_btn = QtWidgets.QPushButton("Reset to default")
+        self.reset_prompt_btn.setToolTip(
+            "Replace the saved system prompt with the current built-in "
+            "default. Use this after a code update changes the default "
+            "guidance.")
+        self.reset_prompt_btn.clicked.connect(
+            lambda: self.system_edit.setPlainText(SYSTEM_PROMPT_DEFAULT))
+        reset_row.addWidget(self.reset_prompt_btn)
+        svl.addLayout(reset_row)
         sys_box.setLayout(svl)
         self.system_edit.setVisible(False)
+        self.reset_prompt_btn.setVisible(False)
         sys_box.toggled.connect(self.system_edit.setVisible)
+        sys_box.toggled.connect(self.reset_prompt_btn.setVisible)
         lay.addWidget(sys_box)
 
         # Chat transcript
@@ -677,10 +707,11 @@ class AgentDialog(QtWidgets.QDialog):
     def _bootstrap_knowledge_base(self):
         """Create empty starter files for the user-editable knowledge base
         the first time the dialog opens. Never overwrites existing files."""
-        docs_dir = os.path.expanduser("~/.pystream_docs")
-        aliases_file = os.path.expanduser("~/.pystream_pv_aliases.json")
-        urls_file = os.path.expanduser("~/.pystream_doc_urls.json")
-        ioc_file = os.path.expanduser("~/.pystream_ioc_scripts.json")
+        docs_dir     = os.path.join(PYSTREAM_HOME, "docs")
+        aliases_file = os.path.join(PYSTREAM_HOME, "pv_aliases.json")
+        urls_file    = os.path.join(PYSTREAM_HOME, "doc_urls.json")
+        ioc_file     = os.path.join(PYSTREAM_HOME, "ioc_scripts.json")
+        status_file  = os.path.join(PYSTREAM_HOME, "status_pages.json")
         try:
             if not os.path.isdir(docs_dir):
                 os.makedirs(docs_dir, exist_ok=True)
@@ -720,6 +751,17 @@ class AgentDialog(QtWidgets.QDialog):
                                      "Empty by default — add entries to "
                                      "authorize.",
                          "scripts": {}},
+                        f, indent=2,
+                    )
+            if not os.path.isfile(status_file):
+                with open(status_file, "w") as f:
+                    json.dump(
+                        {"_comment": "Friendly_name → web status page "
+                                     "(areaDetector status, IOC procServ "
+                                     "web view, vendor status URLs). Agent "
+                                     "fetches with fetch_url after looking "
+                                     "the URL up via list_status_pages.",
+                         "pages": {}},
                         f, indent=2,
                     )
         except Exception:

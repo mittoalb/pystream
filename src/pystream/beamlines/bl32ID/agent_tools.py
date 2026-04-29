@@ -23,6 +23,10 @@ from typing import Any, Callable
 
 import numpy as np
 
+# Importing plugin_settings runs the one-time legacy-paths migration before
+# any of the path constants below are referenced.
+from .plugin_settings import PYSTREAM_HOME, SETTINGS_FILE as PYSTREAM_SETTINGS_FILE
+
 
 # ── PVA channel cache (shared between tools that grab detector frames) ──
 
@@ -151,11 +155,11 @@ def tool_list_recent_scans(save_dir: str = "~/scans",
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
-DOCS_DIR_DEFAULT = os.path.expanduser("~/.pystream_docs")
-PV_ALIASES_FILE = os.path.expanduser("~/.pystream_pv_aliases.json")
-PYSTREAM_SETTINGS_FILE = os.path.expanduser("~/.pystream_bl32ID_settings.json")
-DOC_URLS_FILE = os.path.expanduser("~/.pystream_doc_urls.json")
-IOC_SCRIPTS_FILE = os.path.expanduser("~/.pystream_ioc_scripts.json")
+DOCS_DIR_DEFAULT  = os.path.join(PYSTREAM_HOME, "docs")
+PV_ALIASES_FILE   = os.path.join(PYSTREAM_HOME, "pv_aliases.json")
+DOC_URLS_FILE     = os.path.join(PYSTREAM_HOME, "doc_urls.json")
+IOC_SCRIPTS_FILE  = os.path.join(PYSTREAM_HOME, "ioc_scripts.json")
+STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 
 
 # Tools that mutate state — the dispatcher in agent.py wraps these in a
@@ -403,6 +407,155 @@ def tool_get_plugin_settings(plugin_name: str,
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
+# ── network diagnostics (no sudo, read-only) ───────────────────────────
+
+def _validate_host(host: str) -> str | None:
+    """Reject hostnames with shell metacharacters. Returns error message or None."""
+    if not host:
+        return "host is required"
+    if any(c in host for c in " \t\n;|&`$<>(){}\\\"'"):
+        return f"host contains invalid characters: {host!r}"
+    if len(host) > 255:
+        return "host name too long"
+    return None
+
+
+def tool_ping(host: str, count: int = 4, timeout: float = 5.0) -> dict:
+    """Send ICMP echo requests via the system `ping` (no sudo needed —
+    standard ping is setuid on most Linux distros). Returns reachability,
+    packet loss percentage, and RTT averages. Use to diagnose whether an
+    IOC host or detector server is reachable on the network."""
+    err = _validate_host(host)
+    if err:
+        return {"error": err}
+    try:
+        count = max(1, min(int(count), 20))
+    except (TypeError, ValueError):
+        count = 4
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ping", "-c", str(count), "-w", str(int(timeout) + 5), host],
+            capture_output=True, text=True,
+            timeout=float(timeout) + 10.0, shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"host": host, "reachable": False,
+                "diagnosis": f"ping timed out after {timeout}s — host is "
+                             f"down, blocking ICMP, or DNS-failing."}
+    except FileNotFoundError:
+        return {"error": "`ping` not found on this system"}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+    out = result.stdout or ""
+    # Parse "X packets transmitted, Y received, Z% packet loss" line + rtt summary.
+    import re
+    loss_pct = None
+    m = re.search(r"(\d+(?:\.\d+)?)% packet loss", out)
+    if m:
+        loss_pct = float(m.group(1))
+    rtt_avg_ms = None
+    m = re.search(r"rtt min/avg/max/mdev = [\d.]+/([\d.]+)/", out)
+    if m:
+        rtt_avg_ms = float(m.group(1))
+    reachable = (loss_pct is not None and loss_pct < 100.0)
+    return {
+        "host": host,
+        "reachable": reachable,
+        "packet_loss_pct": loss_pct,
+        "rtt_avg_ms": rtt_avg_ms,
+        "returncode": result.returncode,
+        "raw_output": out[-1000:],
+        "diagnosis": (
+            f"reachable, avg RTT {rtt_avg_ms:.2f} ms" if reachable and rtt_avg_ms
+            else "reachable" if reachable
+            else "unreachable (100% packet loss)" if loss_pct == 100.0
+            else "ping failed — check host/DNS"
+        ),
+    }
+
+
+def tool_tcp_check(host: str, port: int, timeout: float = 3.0) -> dict:
+    """Try a TCP connect to host:port. Use to verify whether a service is
+    accepting connections — areaDetector pvAccess server, procServ telnet
+    port, web status page, etc. Distinguishes 'host down', 'firewall blocked',
+    and 'port not listening' through the connection error type."""
+    err = _validate_host(host)
+    if err:
+        return {"error": err}
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return {"error": "port must be an integer"}
+    if not (0 < port < 65536):
+        return {"error": "port out of range (1–65535)"}
+    import socket
+    t0 = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=float(timeout)):
+            pass
+        elapsed_ms = (time.time() - t0) * 1000.0
+        return {"host": host, "port": port, "open": True,
+                "elapsed_ms": round(elapsed_ms, 2),
+                "diagnosis": f"port {port} open on {host}"}
+    except socket.timeout:
+        return {"host": host, "port": port, "open": False,
+                "diagnosis": "timed out — likely firewalled or host down"}
+    except ConnectionRefusedError:
+        return {"host": host, "port": port, "open": False,
+                "diagnosis": "connection refused — host is up but nothing "
+                             "listening on this port"}
+    except socket.gaierror as ex:
+        return {"host": host, "port": port, "open": False,
+                "diagnosis": f"DNS lookup failed: {ex}"}
+    except Exception as ex:
+        return {"host": host, "port": port, "open": False,
+                "diagnosis": f"{type(ex).__name__}: {ex}"}
+
+
+def tool_dns_lookup(host: str) -> dict:
+    """Resolve a hostname to its IP, and (if possible) reverse-resolve.
+    Use to verify DNS is working before blaming the network."""
+    err = _validate_host(host)
+    if err:
+        return {"error": err}
+    import socket
+    try:
+        ip = socket.gethostbyname(host)
+    except socket.gaierror as ex:
+        return {"host": host, "resolved": False,
+                "diagnosis": f"DNS lookup failed: {ex}"}
+    try:
+        rdns = socket.gethostbyaddr(ip)[0]
+    except Exception:
+        rdns = None
+    return {"host": host, "resolved": True, "ip": ip, "reverse_dns": rdns,
+            "diagnosis": f"{host} → {ip}" + (f" ({rdns})" if rdns else "")}
+
+
+# ── status-page registry ────────────────────────────────────────────────
+
+def tool_list_status_pages() -> dict:
+    """List user-registered web status pages (areaDetector status, IOC
+    procServ web view, motor controller status, etc.) from
+    ~/.pystream_status_pages.json. These are LIVE pages — fetch with
+    fetch_url(url) to read their current content. Distinct from
+    list_url_docs which is for static reference material."""
+    try:
+        if not os.path.isfile(STATUS_PAGES_FILE):
+            return {"error": f"status page list not found: {STATUS_PAGES_FILE}",
+                    "hint": "create the file with a 'pages' dict mapping "
+                            "name → {url, description} to expose live status "
+                            "endpoints to the agent."}
+        import json as _json
+        with open(STATUS_PAGES_FILE) as f:
+            data = _json.load(f)
+        return {"path": STATUS_PAGES_FILE, **data}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
 # ── IOC restart (write tool, gated by user confirmation) ───────────────
 
 def _load_ioc_scripts() -> dict:
@@ -420,15 +573,22 @@ def _load_ioc_scripts() -> dict:
 
 def tool_list_ioc_scripts() -> dict:
     """List the IOC restart scripts the user has registered in
-    ~/.pystream_ioc_scripts.json. This is the allowlist — only IOCs that
-    appear here can be restarted. Use this to discover what the agent is
-    permitted to do."""
+    ~/.pystream_ioc_scripts.json. This is the WRITE allowlist — only IOCs
+    that appear here can be RESTARTED. It is NOT a status source and
+    says nothing about which IOCs exist or whether they're up."""
+    note = ("This is the IOC RESTART ALLOWLIST, not a status source. To "
+            "answer 'what IOCs are running / are my IOCs up', call "
+            "list_status_pages then fetch_url on the ioc_monitor page, "
+            "or ping/tcp_check the IOC hosts.")
     try:
         if not os.path.isfile(IOC_SCRIPTS_FILE):
-            return {"error": f"allowlist not found: {IOC_SCRIPTS_FILE}",
-                    "hint": "create the file with a 'scripts' dict mapping "
-                            "ioc_name → {path, description} to authorize "
-                            "restart actions."}
+            return {
+                "error": f"allowlist not found: {IOC_SCRIPTS_FILE}",
+                "hint": "create the file with a 'scripts' dict mapping "
+                        "ioc_name → {path, description} to authorize "
+                        "restart actions.",
+                "note": note,
+            }
         scripts = _load_ioc_scripts()
         out = []
         for name, entry in scripts.items():
@@ -441,7 +601,8 @@ def tool_list_ioc_scripts() -> dict:
                 "exists": bool(entry.get("path")
                                and os.path.isfile(os.path.expanduser(entry["path"]))),
             })
-        return {"file": IOC_SCRIPTS_FILE, "scripts": out, "count": len(out)}
+        return {"file": IOC_SCRIPTS_FILE, "scripts": out, "count": len(out),
+                "note": note}
     except Exception as ex:
         return {"error": f"{type(ex).__name__}: {ex}"}
 
@@ -996,6 +1157,74 @@ TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
         "func": tool_check_detector_stream,
+    },
+    {
+        "name": "ping",
+        "description": (
+            "Ping a host (no sudo required). Use to verify whether an IOC "
+            "host, detector server, or other network device is reachable. "
+            "Returns reachability, packet loss, and average RTT."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string",
+                         "description": "Hostname or IP address."},
+                "count": {"type": "integer",
+                          "description": "Number of pings (1-20). Defaults 4."},
+            },
+            "required": ["host"],
+        },
+        "func": tool_ping,
+    },
+    {
+        "name": "tcp_check",
+        "description": (
+            "Try a TCP connection to host:port. Use to check whether a "
+            "specific service is listening — pvAccess server, procServ "
+            "telnet port, HTTP status page. The 'diagnosis' field "
+            "distinguishes 'host down' vs 'firewalled' vs 'port not "
+            "listening'."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string",
+                         "description": "Hostname or IP."},
+                "port": {"type": "integer",
+                         "description": "TCP port (1-65535)."},
+            },
+            "required": ["host", "port"],
+        },
+        "func": tool_tcp_check,
+    },
+    {
+        "name": "dns_lookup",
+        "description": (
+            "Resolve a hostname to its IP and (if possible) reverse-resolve. "
+            "Use to confirm DNS is working before blaming the network."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string",
+                         "description": "Hostname to resolve."},
+            },
+            "required": ["host"],
+        },
+        "func": tool_dns_lookup,
+    },
+    {
+        "name": "list_status_pages",
+        "description": (
+            "List user-registered web status pages (areaDetector status, "
+            "IOC procServ web view, motor controller status, etc.) from "
+            "~/.pystream_status_pages.json. These are LIVE endpoints — use "
+            "fetch_url(url) to read the current content. Distinct from "
+            "list_url_docs which is reference material."
+        ),
+        "schema": {"type": "object", "properties": {}, "required": []},
+        "func": tool_list_status_pages,
     },
     {
         "name": "list_ioc_scripts",

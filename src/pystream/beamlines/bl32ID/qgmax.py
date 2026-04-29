@@ -15,11 +15,11 @@ import time
 from typing import Optional, Tuple
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
-from .plugin_settings import load_settings, save_settings
+from .plugin_settings import PYSTREAM_HOME, load_settings, save_settings
 
 
-QGMAX_REQUEST_FILE = os.path.expanduser("~/.pystream_qgmax_request.json")
-QGMAX_RESPONSE_FILE = os.path.expanduser("~/.pystream_qgmax_response.json")
+QGMAX_REQUEST_FILE = os.path.join(PYSTREAM_HOME, "qgmax_request.json")
+QGMAX_RESPONSE_FILE = os.path.join(PYSTREAM_HOME, "qgmax_response.json")
 
 
 class QGMaxBackgroundWatcher(QtCore.QObject):
