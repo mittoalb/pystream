@@ -206,12 +206,21 @@ E. Detector image checks — two complementary tools:
    question demands — for an alignment diagnosis, both is right (stats
    tell you the numbers, image tells you the spatial pattern).
 
-F. Local docs / config — read_file with explicit paths:
-       ~/.pystream/docs/<topic>.md       — user notes (condensers etc.)
-       ~/.pystream/status_pages.json     — registered status URLs
-       ~/.pystream/ioc_scripts.json      — IOC restart allowlist
+F. Local docs / config — read_file or list_docs/read_doc with explicit
+   paths:
+       ~/.pystream/docs/bl_gui_AGENTS.md  — CANONICAL bl_gui project guide
+                                            (AGENTS.md from the bl_gui
+                                            repo; symlinked at startup).
+                                            For ANY question about bl_gui
+                                            internals, layouts, calib,
+                                            xanes_calib, autofocus, the
+                                            answer is here. read_doc this
+                                            FIRST before guessing.
+       ~/.pystream/docs/<topic>.md        — user notes (condensers etc.)
+       ~/.pystream/status_pages.json      — registered status URLs
+       ~/.pystream/ioc_scripts.json       — IOC restart allowlist
        ~/.bl_gui/bl32id_zp_calibration.json  — ZP energy/X/Y/Z table
-       ~/.pystream/bl32ID_settings.json  — pystream plugin settings
+       ~/.pystream/bl32ID_settings.json   — pystream plugin settings
                                             (api_key fields are sensitive,
                                             do not echo them)
 
@@ -881,6 +890,35 @@ class AgentDialog(QtWidgets.QDialog):
             }
         return {}
 
+    def _link_known_reference_docs(self, docs_dir: str):
+        """Symlink known per-project reference docs (AGENTS.md, README.md
+        for projects under ~/Software/...) into the agent's docs directory
+        so list_docs / search_docs can find them. Idempotent — re-run safely."""
+        candidates = [
+            ("~/Software/bl_gui/AGENTS.md",  "bl_gui_AGENTS.md"),
+            ("~/Software/bl_gui/README.md",  "bl_gui_README.md"),
+            ("~/Software/pystream/README.md", "pystream_README.md"),
+            ("~/Software/iocs_monitor/README.md", "iocs_monitor_README.md"),
+            ("~/Software/xanes_gui/README.md", "xanes_gui_README.md"),
+        ]
+        try:
+            os.makedirs(docs_dir, exist_ok=True)
+        except Exception:
+            return
+        for src, dst_name in candidates:
+            src_abs = os.path.expanduser(src)
+            if not os.path.isfile(src_abs):
+                continue
+            dst = os.path.join(docs_dir, dst_name)
+            try:
+                if os.path.islink(dst) and os.readlink(dst) == src_abs:
+                    continue
+                if os.path.lexists(dst):
+                    continue  # don't clobber a real file the user wrote
+                os.symlink(src_abs, dst)
+            except Exception:
+                pass
+
     def _bootstrap_knowledge_base(self):
         """Create empty starter files for the user-editable knowledge base
         the first time the dialog opens. Never overwrites existing files."""
@@ -902,6 +940,8 @@ class AgentDialog(QtWidgets.QDialog):
                             "list_docs / search_docs / read_doc. One topic per "
                             "file works best — short titles, concrete facts.\n"
                         )
+            # Always re-evaluate the known-project symlinks (cheap, idempotent).
+            self._link_known_reference_docs(docs_dir)
             if not os.path.isfile(aliases_file):
                 with open(aliases_file, "w") as f:
                     json.dump(
