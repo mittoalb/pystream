@@ -100,6 +100,58 @@ def tool_read_motor(motor_pv: str, timeout: float = 2.0) -> dict:
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
+def tool_view_detector_image(detector_pv: str = "32idbSP1:Pva1:Image",
+                              max_dim: int = 1024) -> dict:
+    """Grab the current detector frame and return it as a *viewable* image
+    (downsampled to max_dim on the long edge, percentile-stretched to 8-bit
+    PNG) so the model can SEE the image. Use this for visual analysis:
+    'is the beam centered', 'is there a shadow', 'how's the alignment',
+    'are there hot pixels', 'do you see the sample'. The image is
+    contrast-normalized so even raw 16-bit detector frames are visible."""
+    try:
+        ch = _pva_channel(detector_pv)
+        st = ch.get()
+        img = np.asarray(_ndarray_from_pva(st))
+        h, w = img.shape[-2:]
+        # Block-mean downsample to keep token cost bounded.
+        scale = max(h, w) / float(max_dim)
+        if scale > 1:
+            new_h = max(1, int(h / scale))
+            new_w = max(1, int(w / scale))
+            sh = max(1, h // new_h)
+            sw = max(1, w // new_w)
+            img_ds = (img[:sh * new_h, :sw * new_w]
+                      .reshape(new_h, sh, new_w, sw)
+                      .mean(axis=(1, 3)))
+        else:
+            img_ds = img
+        # Percentile stretch to 8-bit (handles 16-bit detector frames).
+        f = img_ds.astype(np.float32)
+        lo, hi = np.percentile(f, [1, 99])
+        if hi <= lo:
+            hi = lo + 1.0
+        u8 = np.clip((f - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
+        # Encode PNG.
+        from PIL import Image
+        import base64
+        import io
+        buf = io.BytesIO()
+        Image.fromarray(u8, mode="L").save(buf, format="PNG", optimize=True)
+        b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
+        return {
+            "image_base64": b64,                  # consumed by chat loop
+            "media_type": "image/png",
+            "original_shape": list(img.shape),
+            "displayed_shape": list(u8.shape),
+            "dtype": str(img.dtype),
+            "stretch_low_percentile1": float(lo),
+            "stretch_high_percentile99": float(hi),
+            "png_kb": round(len(buf.getvalue()) / 1024, 1),
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
 def tool_get_detector_image_stats(detector_pv: str = "32idbSP1:Pva1:Image") -> dict:
     """Grab the current detector frame via PVA and return summary statistics.
     Does NOT trigger an acquisition — returns whatever the detector is
@@ -1144,6 +1196,38 @@ TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
         "func": tool_get_detector_image_stats,
+    },
+    {
+        "name": "view_detector_image",
+        "description": (
+            "Capture the current detector frame and return it as a viewable "
+            "image (downsampled to ≤1024 px on the long edge, contrast "
+            "stretched to 8-bit PNG). USE THIS — not get_detector_image_stats — "
+            "when the user asks anything that requires SEEING the image: "
+            "'is the beam centered', 'is the sample in view', 'do you see "
+            "a shadow', 'how does the alignment look', 'are there hot "
+            "pixels', 'what does the detector see right now'. The image is "
+            "embedded in the tool result so you can analyse the pixels "
+            "directly. For pure numeric stats (mean, std, saturation %), "
+            "use get_detector_image_stats — cheaper, no image."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "detector_pv": {
+                    "type": "string",
+                    "description": "PVA NTNDArray PV. Defaults to "
+                                   "'32idbSP1:Pva1:Image'.",
+                },
+                "max_dim": {
+                    "type": "integer",
+                    "description": "Max long-edge size in pixels. "
+                                   "Defaults to 1024.",
+                },
+            },
+            "required": [],
+        },
+        "func": tool_view_detector_image,
     },
     {
         "name": "list_status_pages",

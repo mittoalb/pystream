@@ -99,15 +99,16 @@ PV names, file paths, and numbers verbatim — never invent them.
 
 # YOUR TOOLS
 
-| Tool                          | When to use                                   |
+| Tool                          | When to use                                    |
 |-------------------------------|------------------------------------------------|
-| list_status_pages()           | First step for any "running / status / up?"   |
-| fetch_url(url)                | Read a registered status page (HTML→text)     |
+| list_status_pages()           | First step for any "running / status / up?"    |
+| fetch_url(url)                | Read a registered status page (HTML→text)      |
 | read_pv(pv_name)              | Get one EPICS PV value                         |
-| caput(pv_name, value)         | Write to EPICS — Yes/No dialog before run     |
-| get_detector_image_stats(pv)  | Live detector frame stats (no new acquire)     |
+| caput(pv_name, value)         | Write to EPICS — Yes/No dialog before run      |
+| get_detector_image_stats(pv)  | Numeric detector stats (mean / sat / etc.)     |
+| view_detector_image(pv)       | SEE the live frame as a downsampled PNG        |
 | read_file(path)               | Read a config / doc / log on disk              |
-| bash(cmd)                     | Anything else: ls, ping, .sh scripts, etc.     |
+| bash(cmd)                     | Anything else: ls, ping, curl, .sh, etc.       |
 
 bash auto-gates destructive commands (rm, kill, chmod, sudo, ANY *.sh,
 redirects, git push). The user clicks Yes/No before they run. Read-only
@@ -177,11 +178,17 @@ D. PV writes — use caput() for ANY write. Always preview the action in
    chat first, then call caput. The dialog will pop. Never use
    bash("caput …") — it bypasses the structured confirmation message.
 
-E. Detector image checks — "is the image saturated", "is acquisition
-   working", "what does the frame look like":
-       get_detector_image_stats("32idbSP1:Pva1:Image")
-   Returns shape, dtype, min/max/mean/std, percentiles, saturation
-   fraction. Don't try to "view" the image — interpret the stats.
+E. Detector image checks — two complementary tools:
+   * `get_detector_image_stats(pv)` for NUMERIC questions: saturation
+     fraction, mean intensity, dynamic range, "is acquisition working".
+     Cheap, no image data crosses the wire.
+   * `view_detector_image(pv)` for VISUAL questions: "is the beam
+     centered", "do you see the sample", "is there a shadow", "how does
+     the alignment look", "are there hot pixels". The image is embedded
+     in the tool result; you can inspect the pixels directly.
+   Default detector PV: `32idbSP1:Pva1:Image`. Use one or both as the
+   question demands — for an alignment diagnosis, both is right (stats
+   tell you the numbers, image tells you the spatial pattern).
 
 F. Local docs / config — read_file with explicit paths:
        ~/.pystream/docs/<topic>.md       — user notes (condensers etc.)
@@ -274,6 +281,43 @@ def _execute_tool(name: str, arguments: dict, confirm=None) -> dict:
     return result if isinstance(result, dict) else {"value": result}
 
 
+def _anthropic_tool_result_content(result):
+    """If a tool result carries an embedded image (`image_base64` +
+    `media_type`), package it as a real Anthropic content list with an
+    image block + text block of the remaining metadata. Otherwise return
+    plain JSON text. Anthropic's vision-capable models will SEE the image."""
+    if isinstance(result, dict) and result.get("image_base64"):
+        img_b64 = result["image_base64"]
+        media_type = result.get("media_type", "image/png")
+        text_payload = {k: v for k, v in result.items()
+                        if k not in ("image_base64", "media_type")}
+        return [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": img_b64,
+                },
+            },
+            {"type": "text",
+             "text": json.dumps(text_payload, default=str)},
+        ]
+    return json.dumps(result, default=str)
+
+
+def _openai_tool_result_text(result):
+    """OpenAI's tool-role messages are text-only — strip any embedded
+    base64 image (the model can't decode it as text), keep the metadata."""
+    if isinstance(result, dict) and result.get("image_base64"):
+        clone = {k: v for k, v in result.items() if k != "image_base64"}
+        clone["_note"] = ("image data omitted — OpenAI tool-result channel "
+                          "is text-only. Switch to an Anthropic Gateway "
+                          "model to see the actual image.")
+        return json.dumps(clone, default=str)
+    return json.dumps(result, default=str)
+
+
 # ── chat: Anthropic protocol ────────────────────────────────────────────
 
 def _chat_anthropic(base_url, api_key, model, system_prompt,
@@ -326,7 +370,7 @@ def _chat_anthropic(base_url, api_key, model, system_prompt,
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": b.id,
-                    "content": json.dumps(result, default=str),
+                    "content": _anthropic_tool_result_content(result),
                 })
         messages.append({"role": "user", "content": tool_results})
 
@@ -388,7 +432,7 @@ def _chat_openai(base_url, api_key, model, system_prompt,
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": json.dumps(result, default=str),
+                "content": _openai_tool_result_text(result),
             })
 
     return "(stopped: hit MAX_AGENT_ITERATIONS — too many tool calls)", totals
@@ -739,10 +783,19 @@ class AgentDialog(QtWidgets.QDialog):
         )
 
     def _append_tool_result(self, name, result):
+        # Don't blast a 200 KB base64 PNG into the transcript — replace it
+        # with a marker so the user sees "image returned" instead.
+        display = result
+        if isinstance(result, dict) and result.get("image_base64"):
+            display = {k: v for k, v in result.items() if k != "image_base64"}
+            display["_image"] = (
+                f"<{display.get('media_type', 'image')}, "
+                f"{display.get('png_kb', '?')} KB, embedded for vision>"
+            )
         try:
-            res_str = json.dumps(result, default=str)
+            res_str = json.dumps(display, default=str)
         except Exception:
-            res_str = repr(result)
+            res_str = repr(display)
         if len(res_str) > 600:
             res_str = res_str[:600] + " …"
         is_error = isinstance(result, dict) and "error" in result
