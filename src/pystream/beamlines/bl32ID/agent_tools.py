@@ -244,9 +244,13 @@ def _bash_is_destructive(command: str) -> bool:
             r"git\s+(?:push|reset\s+--hard|clean\s+-)",
         )
         anywhere = (
-            r"\.sh\b",         # any shell-script invocation, path or bare
-            r">{1,2}\s*\S",    # > / >> redirect to a file
-            r"\|\s*tee\b",     # tee
+            r"\.sh\b",                                   # any *.sh invocation
+            # > / >> redirect to a real file. EXCLUDES:
+            #  - stderr fd-redirects (2>, 2>&1, 2>&2, &>) — leading char is
+            #    a digit or & so the `\s>` lookahead fails them naturally
+            #  - redirects whose target is /dev/null|zero (purely informational)
+            r"\s>{1,2}\s*(?!/dev/(?:null|zero)\b)\S",
+            r"\|\s*tee\b",                               # tee
         )
         pattern = (
             r"(?:^|[\s;&|`(])(?:" + "|".join(cmd_pos) + ")"

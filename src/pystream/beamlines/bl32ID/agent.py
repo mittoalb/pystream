@@ -206,23 +206,27 @@ E. Detector image checks — two complementary tools:
    question demands — for an alignment diagnosis, both is right (stats
    tell you the numbers, image tells you the spatial pattern).
 
-F. Local docs / config — read_file or list_docs/read_doc with explicit
-   paths:
-       ~/.pystream/docs/bl_gui_AGENTS.md  — CANONICAL bl_gui project guide
-                                            (AGENTS.md from the bl_gui
-                                            repo; symlinked at startup).
-                                            For ANY question about bl_gui
-                                            internals, layouts, calib,
-                                            xanes_calib, autofocus, the
-                                            answer is here. read_doc this
-                                            FIRST before guessing.
+F. PROJECT QUESTIONS — when the user mentions a project name (bl_gui,
+   pystream, iocs_monitor, txm_calc, xanes_gui, mosalign, holotomo,
+   tomocupy, tomopyui, lamn, …), the FIRST step is ALWAYS:
+
+       list_docs()                        — see what's auto-linked
+       read_doc("<project>_AGENTS.md")    — preferred
+       read_doc("<project>_README.md")    — fallback if no AGENTS
+
+   The ~/.pystream/docs/ directory contains symlinks to AGENTS.md /
+   README.md from EVERY project under ~/Software/. Don't bash-explore the
+   project tree before reading its docs. Don't guess at functionality —
+   the doc tells you.
+
+   Other on-disk references:
        ~/.pystream/docs/<topic>.md        — user notes (condensers etc.)
        ~/.pystream/status_pages.json      — registered status URLs
        ~/.pystream/ioc_scripts.json       — IOC restart allowlist
        ~/.bl_gui/bl32id_zp_calibration.json  — ZP energy/X/Y/Z table
        ~/.pystream/bl32ID_settings.json   — pystream plugin settings
                                             (api_key fields are sensitive,
-                                            do not echo them)
+                                            DO NOT echo them)
 
 G. Network diagnostics — when ping/connection problems are suspected:
        bash("ping -c 4 <host>")
