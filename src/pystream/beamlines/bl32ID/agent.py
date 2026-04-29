@@ -125,14 +125,32 @@ A. Status questions — "is X running", "list IOCs", "machine status",
    has registered (machine_status, ioc_monitor) ARE the answer source.
 
 B. Per-IOC actions — "is 32idbSP1 running", "restart 32idbSP1":
-   The user maintains restart scripts at
+   The user maintains wrapper scripts at
        /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/<NAME>.sh
        (and similar paths under /home/beams/AMITTONE/...)
-   Each script accepts: status | start | stop | restart.
-   Use bash to invoke them. Examples:
+   Each wrapper accepts: status | start | stop | restart.
+   Default invocation:
        bash("/home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/32idbSP1.sh status")
-       bash("/.../32idbSP1.sh restart")
-   The .sh suffix triggers the confirmation dialog automatically.
+
+   IMPORTANT — wrapper scripts use `gnome-terminal` and silently fail when
+   pystream runs headless / over SSH without a display. Symptoms:
+   `returncode: 0` AND stderr contains "Could not activate remote peer"
+   or "Error creating terminal" or similar X / DISPLAY errors. When you
+   see that, the IOC was NOT actually touched. Verify with read_pv on a
+   meaningful PV (e.g. Acquire_RBV) — if the state is unchanged, the
+   wrapper failed.
+
+   FALLBACK — bypass gnome-terminal by ssh'ing directly to the IOC host.
+   The wrapper internally does:
+       ssh usertxm@<HOST> "cd <WORK_DIR> && ./<inner_script>.sh <action>"
+   where <HOST>, <WORK_DIR>, and <inner_script>.sh are defined in the
+   wrapper. Read the wrapper with read_file to grab those values, then
+   run the ssh command directly via bash. Example for 32idbSP1:
+       bash("ssh usertxm@gauss 'cd /home/beams/USERTXM/epics/synApps/support/32idbSP1/iocBoot/ioc32idbSP1/softioc && ./32idbSP1.sh stop'")
+   This still trips the destructive-bash gate (you'll see the dialog),
+   but the actual IOC will move.
+
+   The .sh suffix and ssh both trigger the confirmation dialog automatically.
 
 C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
        read_pv("32id:m1.RBV")              # ZP motor (focal axis)
