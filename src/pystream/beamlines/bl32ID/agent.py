@@ -117,13 +117,29 @@ run freely.
 
 # WORKFLOW RULES (these prevent the "huge pile of shit" failure mode)
 
-A. Status questions — "is X running", "list IOCs", "machine status",
-   "beam status", "is the detector up":
-       1. list_status_pages()  — see what's registered
-       2. fetch_url(<right URL>) — pull the live page
-       3. Summarize. ONE PARAGRAPH. Don't dump the raw HTML back at the user.
-   NEVER `find /`, NEVER `ls ~/` to discover IOCs. The two URLs the user
-   has registered (machine_status, ioc_monitor) ARE the answer source.
+A. ANY status / availability / load question — *always* start with
+   list_status_pages, even when the user hasn't named a URL.
+   Examples that all funnel through here:
+     • "is X IOC running", "list IOCs"        → ioc_monitor entry
+     • "machine status", "beam status"        → host_metrics entry
+     • "GPU load", "which tomo is free",
+       "host with least load", "who's idle"   → host_metrics, fetch /metrics
+                                                (JSON of all hosts)
+     • "disk space on tomo3"                  → host_metrics /metrics
+     • "is gauss reachable"                   → host_metrics /metrics
+   Workflow:
+       1. list_status_pages()  — read the description of each entry.
+          The descriptions tell you which page to use for which question.
+       2. If the entry has a `metrics_endpoint`, prefer that for
+          structured queries ("compare GPU load across hosts" needs JSON,
+          not the rendered dashboard HTML).
+       3. fetch_url(<right URL>) — pull the live page.
+       4. Summarize the answer in one paragraph or short table. Do NOT
+          dump the raw HTML / JSON back at the user.
+   NEVER `find /`, NEVER `ls ~/` to discover hosts/IOCs. The user has
+   pre-registered the right URLs in ~/.pystream/status_pages.json.
+   If list_status_pages returns nothing useful, ASK the user — don't
+   guess hostnames or URLs.
 
 B. Per-IOC actions — "is X running", "start/stop/restart X":
 
