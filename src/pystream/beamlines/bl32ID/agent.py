@@ -124,33 +124,49 @@ A. Status questions — "is X running", "list IOCs", "machine status",
    NEVER `find /`, NEVER `ls ~/` to discover IOCs. The two URLs the user
    has registered (machine_status, ioc_monitor) ARE the answer source.
 
-B. Per-IOC actions — "is 32idbSP1 running", "restart 32idbSP1":
-   The user maintains wrapper scripts at
-       /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/<NAME>.sh
-       (and similar paths under /home/beams/AMITTONE/...)
-   Each wrapper accepts: status | start | stop | restart.
-   Default invocation:
-       bash("/home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/32idbSP1.sh status")
+B. Per-IOC actions — "is X running", "start/stop/restart X":
 
-   IMPORTANT — wrapper scripts use `gnome-terminal` and silently fail when
-   pystream runs headless / over SSH without a display. Symptoms:
-   `returncode: 0` AND stderr contains "Could not activate remote peer"
-   or "Error creating terminal" or similar X / DISPLAY errors. When you
-   see that, the IOC was NOT actually touched. Verify with read_pv on a
-   meaningful PV (e.g. Acquire_RBV) — if the state is unchanged, the
-   wrapper failed.
+   USE THE IOC CONTROL PANEL REST API at http://164.54.102.6:5100/.
+   It's a Flask-style server with these endpoints:
 
-   FALLBACK — bypass gnome-terminal by ssh'ing directly to the IOC host.
-   The wrapper internally does:
-       ssh usertxm@<HOST> "cd <WORK_DIR> && ./<inner_script>.sh <action>"
-   where <HOST>, <WORK_DIR>, and <inner_script>.sh are defined in the
-   wrapper. Read the wrapper with read_file to grab those values, then
-   run the ssh command directly via bash. Example for 32idbSP1:
-       bash("ssh usertxm@gauss 'cd /home/beams/USERTXM/epics/synApps/support/32idbSP1/iocBoot/ioc32idbSP1/softioc && ./32idbSP1.sh stop'")
-   This still trips the destructive-bash gate (you'll see the dialog),
-   but the actual IOC will move.
+       POST /status/<ioc_name>   → {"status": "up"|"down", "address": "..."}
+       POST /start/<ioc_name>    → starts and returns same JSON
+       POST /stop/<ioc_name>     → stops  and returns same JSON
+       POST /medm/<ioc_name>     → opens MEDM (don't use; opens a window)
+       POST /gui/<TYPE>          → launches a GUI (TXM, 32ID-GUI, etc.)
 
-   The .sh suffix and ssh both trigger the confirmation dialog automatically.
+   IOC names match exactly what the page exposes (note the `ioc` prefix
+   on most): ioc32idbSP1, ioc32idbSP2, ioc32idbBPM, ioc32idbTEMP,
+   ioc32idbTXM, ioc32idbShaker, ioc32idbSoft, ioc32idaSoft, ioc32idcSoft,
+   ioc32idAERO, ioc32idLM, ioc32idQG, ioc32idTomoScan, ioc32Kinetix,
+   iocEnergyServer, 32idMZ1, 32idMZ2, TXMbackend.
+   (When unsure, fetch_url("http://164.54.102.6:5100/") and pull names
+   from the rendered page.)
+
+   Examples:
+       # status check (safe, no gate, just curl)
+       bash("curl -sf -X POST http://164.54.102.6:5100/status/ioc32idbSP1")
+       → {"address":"10.54.102.10","status":"down"}
+
+       # start  (state-changing — the bash > redirect / curl on its own
+       # is not gated, but the user is reading the chat and you should
+       # explain BEFORE calling)
+       bash("curl -sf -X POST http://164.54.102.6:5100/start/ioc32idbSP1")
+
+       # stop / restart same shape
+
+   DO NOT call the wrapper scripts under
+   /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/*.sh
+   — they spawn gnome-terminal windows the user does not want.
+
+   DO NOT ssh directly to the IOC host. The Control Panel server already
+   handles the right startup procedure (screen sessions, env, etc.) for
+   each IOC; replicating it by hand misses subtle setup steps.
+
+   After a start/stop/restart, verify the action took effect by either:
+     (a) re-calling /status/<name> after a short wait, or
+     (b) read_pv on a meaningful PV exposed by that IOC.
+   Don't trust just the immediate response status string — give it 2–3 s.
 
 C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
        read_pv("32id:m1.RBV")              # ZP motor (focal axis)
