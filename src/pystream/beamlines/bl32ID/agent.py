@@ -663,6 +663,16 @@ class AgentDialog(QtWidgets.QDialog):
         irow.addWidget(self.clear_btn)
         lay.addLayout(irow)
 
+        # Verbosity toggle — when off, tool calls don't render in the
+        # transcript (cleaner UI). When on, every ⏵ tool() / ↳ result line
+        # appears so you can audit what the agent is doing.
+        self.show_tools_chk = QtWidgets.QCheckBox("Show tool calls")
+        self.show_tools_chk.setChecked(False)
+        self.show_tools_chk.setToolTip(
+            "Toggle whether each tool the agent calls is shown in the "
+            "transcript. Off = clean conversation. On = full audit trail.")
+        lay.addWidget(self.show_tools_chk)
+
         # Status bar
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setStyleSheet("color: #888; font-size: 9pt;")
@@ -757,6 +767,8 @@ class AgentDialog(QtWidgets.QDialog):
         self._worker.start()
 
     def _on_tool_event(self, name, args, result):
+        if not self.show_tools_chk.isChecked():
+            return  # quiet mode — don't render tool calls in the transcript
         if result is None:
             self._append_tool_call(name, args)
         else:
@@ -858,6 +870,7 @@ class AgentDialog(QtWidgets.QDialog):
         if last_model:
             self.model_combo.addItem(last_model)
             self.model_combo.setCurrentText(last_model)
+        self.show_tools_chk.setChecked(bool(s.get("show_tool_calls", False)))
 
     def _persist_settings(self):
         save_settings("AgentDialog", {
@@ -866,6 +879,7 @@ class AgentDialog(QtWidgets.QDialog):
             "api_key": self.key_edit.text(),
             "system_prompt": self.system_edit.toPlainText(),
             "model": self.model_combo.currentText(),
+            "show_tool_calls": self.show_tools_chk.isChecked(),
         })
 
     # ── knowledge-base bootstrap ────────────────────────────────────────
