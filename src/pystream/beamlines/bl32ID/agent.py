@@ -143,7 +143,20 @@ A. ANY status / availability / load question — *always* start with
 
 B. Per-IOC actions — "is X running", "start/stop/restart X":
 
-   USE THE IOC CONTROL PANEL REST API at http://164.54.102.6:5100/.
+   FIRST: when you need IOC-specific facts (host, work_dir, inner script,
+   verify PVs, exact REST endpoint), read_file ~/.pystream/ioc_scripts.json
+   — every registered IOC has an entry with:
+       wrapper        — the user-facing wrapper script (DO NOT EXECUTE IT)
+       host           — remote host where the IOC actually runs
+       remote_user    — ssh user
+       work_dir       — directory containing the inner script
+       inner_script   — the actual IOC script to run on the remote
+       rest_endpoint  — REST URL for /status/<name>
+       verify_pvs     — PVs to read_pv after a state change to confirm
+                        the action took effect (optional, empty by default)
+       description    — human description
+
+   THEN use the IOC CONTROL PANEL REST API at http://164.54.102.6:5100/.
    It's a Flask-style server with these endpoints:
 
        POST /status/<ioc_name>   → {"status": "up"|"down", "address": "..."}
