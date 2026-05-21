@@ -14,6 +14,8 @@ The bl32ID beamline package provides built-in tools and launchers for optional e
 - **AutoCenter**: Automatic centering of optical elements (pinhole, condenser, zone plate)
 - **AutoROT**: Rotation axis detection for tomography alignment
 - **Mosalign**: 2D motor scanning with image stitching
+- **DataMap**: N-motor positions table; each point runs either a 2D
+  projection (sample + flat) or a Tomoscan
 - **TXMBot (AI)**: LLM chat assistant with read-only beamline introspection
   tools (PV reads, device health, image stats, scan inspection, local docs,
   web docs) and gated IOC-recovery actions. See [TXMBot](txmbot.md).
@@ -306,6 +308,80 @@ The **Set Pixel Size PV** button is next to Calculate/Reset/Export in the calcul
 ## Mosalign
 
 2D motor scanning with image stitching and tomoscan integration. See [Mosalign Documentation](../plugins/mosalign.md) for complete details.
+
+---
+
+## DataMap
+
+Run a 2D projection or a Tomoscan at each row of a user-defined
+positions table.
+
+### Tabs
+
+- **Acquisition & Positions**
+  - **Acquisition** — detector PVA channel, camera prefix, exposure,
+    motor settle, output directory.
+  - **Mode** — radio choice between **2D Projection** and **Tomoscan**.
+    The selected mode is applied to every row.
+  - **2D Projection settings** (collapsible) — Ref X / Z / Rotation PVs
+    and target values used to move the sample out of the beam for the
+    flat. Leave a PV blank to skip that axis.
+  - **Tomoscan settings** (collapsible) — StartScan PV (default
+    `32id:TomoScan:StartScan`), wait-for-finish flag, and timeout.
+  - **Positions table** — columns are motors, rows are points. Buttons:
+    *Add Motor Column*, *Remove Selected Column*, *Add Row*,
+    *Remove Selected Row*, *Capture Live Values → New Row* (caget the
+    current motor RBVs into a fresh row).
+- **Motor PVs**
+  - One row per motor column with `Name` and `PV`. Renaming the motor
+    here updates the column header on the Positions tab. Adding or
+    removing a row here also adds/removes the corresponding column on
+    the other tab — the two views stay in sync.
+
+### Run controls
+
+- **Run Selected Row** — runs only the currently selected row using the
+  active mode.
+- **Run All** — runs every row in table order using the active mode.
+- **Stop** — requests the worker to stop after the current step.
+
+### 2D Projection per-row sequence
+
+1. Move every configured motor to the row's target values.
+2. Snap one sample frame from the PVA detector channel.
+3. Move Ref X / Z / Rotation to their configured flat positions.
+4. Snap one flat frame.
+5. Restore X / Z / Rotation to their pre-flat values.
+6. Save both frames to `<output_dir>/datamap_rowN_<ts>.h5`:
+   - `/exchange/data` — sample frame (shape `(1, H, W)`)
+   - `/exchange/data_flat` — flat frame (shape `(1, H, W)`)
+   - `/measurement/instrument/datamap` — motor target + RBV attrs,
+     row index.
+
+### Tomoscan per-row sequence
+
+1. Move every configured motor to the row's target values.
+2. `caput 32id:TomoScan:StartScan 1` (waits on the busy record when
+   *Wait for scan to finish* is checked, up to the configured timeout).
+
+Scan parameters themselves (number of projections, rotation range,
+flat/dark logic, etc.) remain owned by the TomoScan IOC and its own
+GUI — DataMap only triggers the start.
+
+### Default motors / PVs
+
+- Motors default to `TopX = 32idbTXM:mcs:c1:m2` and
+  `TopZ = 32idbTXM:mcs:c1:m1`. Add or remove columns to suit the scan.
+- Ref defaults: `Ref X = 32idbTXM:mcs:c1:m2`,
+  `Ref Z = 32idbTXM:mcs:c1:m1`,
+  `Ref Rotation = 32idbTXM:ens:c1:m1`.
+- TomoScan default: `32id:TomoScan:StartScan`.
+
+### Settings
+
+The whole table (motors, positions, acquisition params, selected mode)
+persists to `~/.pystream/bl32ID_settings.json` under the
+`DataMapDialog` key on dialog close.
 
 ## Settings File
 

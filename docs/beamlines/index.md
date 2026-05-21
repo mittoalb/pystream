@@ -105,6 +105,8 @@ Advanced Photon Source beamline 32-ID with specialized tools for TXM tomography 
 - **AutoROT**: Rotation axis detection for tomography alignment
 - **TXM Optics**: Optics calculator launcher with effective pixel size PV setter
 - **Mosalign**: 2D motor scanning with image stitching and tomoscan integration
+- **DataMap**: N-motor positions table; each row runs a 2D projection
+  (sample + flat) or a Tomoscan
 - **TXMBot (AI)**: LLM chat assistant with read-only beamline introspection
   tools and gated IOC-recovery actions
 
