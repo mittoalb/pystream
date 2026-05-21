@@ -1,67 +1,37 @@
 # Plugins
 
-PyStream includes several plugins for image analysis, visualization, and control.
+PyStream's core plugins for viewing, measuring, and processing image
+data.
 
-## Available Plugins
+- [HDF5 Viewer](viewer.md) — view HDF5 image stacks with flat-field
+  correction.
+- [Rectangle ROI](roi.md), [Ellipse ROI](ellipse.md),
+  [Line Profile](line.md) — region selection and intensity profiles.
+- [Scale Bar](scalebar.md) — calibrated scale-bar overlay.
+- [Python Console](console.md) — run Python on the live image.
+- [Image Metrics](metrics.md) — live image-quality metrics.
+- [Mosaic Alignment](mosalign.md) — 2D motor scan with stitched preview.
 
-### Core Viewers
+## Adding a plugin
+
+1. Add a Python module under `src/pystream/plugins/`.
+2. Define a `QDialog` or `QWidget` class with class attribute
+   `BUTTON_TEXT = "..."`. Most plugins also set
+   `HANDLER_TYPE = 'singleton'`.
+3. Wire the button into the main toolbar in
+   [src/pystream/pystream.py](../../src/pystream/pystream.py) — copy an
+   existing handler such as `_open_metrics()` and adapt.
 
 ```{toctree}
 :maxdepth: 1
+:hidden:
 
 viewer
-```
-
-**HDF5 Image Viewer** - Interactive viewer for HDF5 image data with flat-field correction and comprehensive metadata exploration.
-
-### ROI and Measurement Tools
-
-```{toctree}
-:maxdepth: 1
-
 roi
 ellipse
 line
 scalebar
-```
-
-- **Rectangle ROI** - ImageJ-style rectangular ROI tool for selecting and analyzing rectangular regions
-- **Ellipse ROI** - ImageJ-style ellipse/circle ROI tool with accurate ellipse masking
-- **Line Profile** - Interactive line tool with shift-key constraints and intensity profile extraction
-- **Scale Bar** - Dual scale bar system with automatic nice-number rounding and smart unit conversion
-
-### Analysis and Processing
-
-```{toctree}
-:maxdepth: 1
-
 console
 metrics
 mosalign
 ```
-
-- **Python Console** - Interactive Python console for real-time custom image processing with save/load capability
-- **Image Metrics** - Real-time monitoring of image information content metrics (entropy, focus, spectral stats)
-- **Mosaic Alignment** - Automated 2D motor scanning with live stitched preview and tomoscan integration
-
-## Plugin Categories
-
-### Image Viewers
-- [HDF5 Viewer](viewer.md) - View and normalize HDF5 image stacks with metadata exploration
-
-### ROI Tools
-- [Rectangle ROI](roi.md) - Rectangular region selection and statistics
-- [Ellipse ROI](ellipse.md) - Elliptical/circular region selection with accurate masking
-- [Line Profile](line.md) - Line drawing and intensity profile extraction
-
-### Visualization
-- [Scale Bar](scalebar.md) - Dual scale bar overlay with automatic scaling
-
-### Processing
-- [Python Console](console.md) - Real-time custom image processing with Python code and save/load functionality
-
-### Analysis
-- [Image Metrics](metrics.md) - Live image quality and information content metrics
-
-### Motor Control
-- [Mosaic Alignment](mosalign.md) - Automated motor scanning with stitched preview and tomoscan integration
