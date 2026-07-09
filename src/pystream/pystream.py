@@ -809,7 +809,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
                         btn_text = dialog_class_name.replace('Dialog', '').replace('_', ' ').title()
 
                     btn = QtWidgets.QPushButton(btn_text)
-                    btn.setMaximumWidth(120)
+                    # Size the max width to the label so long names
+                    # (e.g. "XANES 2D Viewer") aren't truncated. Keep a
+                    # floor of 120 so short-name buttons stay uniform.
+                    text_w = btn.fontMetrics().horizontalAdvance(btn_text)
+                    btn.setMaximumWidth(max(120, text_w + 24))
 
                     # Connect to appropriate handler based on class name
                     self._connect_beamline_button(btn, dialog_class_name, beamline_module)

@@ -23,6 +23,18 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 pg = None  # imported in main() after QApplication is created
 
 
+def _ensure_pyqtgraph():
+    """Import pyqtgraph lazily. QApplication is expected to already exist
+    (either created by pystream itself, or by this module's main() when run
+    standalone), so importing here is safe."""
+    global pg
+    if pg is None:
+        import pyqtgraph as _pg
+        pg = _pg
+        pg.setConfigOptions(imageAxisOrder='row-major')
+    return pg
+
+
 class Hdf5MetadataReader:
     """
     Metadata reader from meta-cli project
@@ -357,6 +369,7 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        _ensure_pyqtgraph()
         self.hdf5_file = None
         self.data_dataset = None
         self.data_white_dataset = None

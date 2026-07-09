@@ -5,6 +5,7 @@ from .softbpm import SoftBPMDialog
 from .detectorcontrol import DetectorControlDialog
 from .xanesgui import XANESGuiDialog
 from .xanes2dgui import XANES2DGuiDialog
+from .xanes2dviewer import XANES2DViewerDialog
 from .opticscalc import OpticsCalcDialog
 from .rotationaxis import RotationAxisDialog
 from .qgmax import QGMaxDialog, ensure_qgmax_background_watcher
@@ -13,7 +14,7 @@ from .blgui import BLGuiDialog
 from .agent import AgentDialog
 from .datamap import DataMapDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog']
+__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog']
 
 
 def start_background_services(parent_window):

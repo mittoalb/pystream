@@ -12,7 +12,14 @@
       "Bash(mosalign:*)",
       "Bash(tree:*)",
       "Bash(chmod:*)",
-      "Bash(python -m py_compile /home/beams0/AMITTONE/Software/txm_calc/optics_calc.py)"
+      "Bash(python -m py_compile /home/beams0/AMITTONE/Software/txm_calc/optics_calc.py)",
+      "Read(//home/beams0/AMITTONE/Software/tomogui/src/tomogui/**)",
+      "Bash(grep -n \"def \\\\|self\\\\.\" /home/beams0/AMITTONE/Software/tomogui/src/tomogui/hdf5_viewer.py | head -80)",
+      "Bash(grep -n \"def \\\\|self\\\\.\" /home/beams0/AMITTONE/Software/tomogui/src/tomogui/hdf5_viewer.py | sed -n '80,180p')",
+      "Bash(grep -n \"def \\\\|append_data\\\\|append_flat\\\\|append_meta\\\\|append_step\\\\|write_instrument_snapshot\\\\|_ensure\\\\|MasterH5\\\\b\" /home/beams0/AMITTONE/Software/xanes_gui/xanes_gui/gui_2d.py | head -30)",
+      "Read(//home/beams0/AMITTONE/Software/xanes_gui/xanes_gui/**)",
+      "Bash(pip show *)",
+      "Read(//home/beams0/AMITTONE/miniconda3/envs/pystream/lib/python3.10/site-packages/pystream/plugins/**)"
     ],
     "deny": [],
     "ask": []
