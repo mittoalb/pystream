@@ -142,6 +142,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.hdf5_location_trigger_count = 0
         self.hdf5_location_run_every = 1  # Run every N times HDF5Location = /exchange/data
         self.waiting_for_pause_location = False  # Flag to indicate we're waiting for /exchange/Pause
+        # Online bright-spot check state (runs without pausing tomoscan on
+        # every /exchange/data event that is not an N-th full-opt event).
+        self.online_spot_check_active = False
 
         # State for synchronized optimization
         self.optimization_active = False
@@ -672,21 +675,29 @@ class QGMaxDialog(QtWidgets.QDialog):
             if self.waiting_for_pause_location:
                 # We're waiting for TomoScan to reach /exchange/Pause after we paused it
                 if current_value == "/exchange/Pause":
-                    self._log_message("Detected /exchange/Pause - starting optimization")
+                    self._log_message("Detected /exchange/Pause - starting FULL optimization")
                     self.waiting_for_pause_location = False
                     self.status_label.setText("Status: Optimizing (Automated)")
                     self._run_optimization_cycle()
             else:
-                # Normal mode: count /exchange/data occurrences
+                # Every new /exchange/data is a new energy point.
+                # - Every N-th one: pause tomoscan and run the FULL
+                #   motor1+motor2 optimization (intrusive; needs pause).
+                # - All the others: run an ONLINE bright-spot check with no
+                #   pause — grab the first beam-on frame, check, nudge
+                #   motor1 by one fine step if needed.
                 if current_value == "/exchange/data" and self.last_hdf5_location != "/exchange/data":
                     self.hdf5_location_trigger_count += 1
                     self._log_message(f"Detected /exchange/data ({self.hdf5_location_trigger_count}/{self.hdf5_location_run_every})")
-
-                    # Check if we should trigger pause
                     if self.hdf5_location_trigger_count >= self.hdf5_location_run_every:
-                        self._log_message("Threshold reached - pausing TomoScan")
+                        self._log_message("Threshold reached - pausing for FULL optimization")
                         self.hdf5_location_trigger_count = 0  # Reset counter
                         self._pause_tomoscan()
+                    else:
+                        # Give the shutter + energy a moment to settle before
+                        # sampling a frame. Runs entirely in this Qt thread —
+                        # no tomoscan pause, no motor sweep, single-shot nudge.
+                        QtCore.QTimer.singleShot(1500, self._online_bright_spot_check)
 
             self.last_hdf5_location = current_value
 
@@ -982,6 +993,62 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.bright_spot_correction_count = 0
         # Direction is recomputed per check from the spot's position.
         QtCore.QTimer.singleShot(1000, self._check_central_bright_spot)
+
+    def _online_bright_spot_check(self):
+        """Single-shot bright-spot check that runs WITHOUT pausing tomoscan.
+        Called on every /exchange/data event that isn't an N-th full-opt
+        event. Grabs one frame (assumed beam-on shortly after the shutter
+        opens at the new energy), checks for a bright spot, and if found
+        moves motor1 by one fine step in the direction picked from the
+        spot's Y position. No retry loop — motor1 keeps moving while
+        tomoscan acquires the next frames.
+
+        No-ops if a full optimization or another online check is already
+        in progress, or if the post-optimization spot-check checkbox is
+        turned off."""
+        if self.optimization_active or self.online_spot_check_active:
+            return
+        if not self.spot_check_enabled_input.isChecked():
+            return
+        self.online_spot_check_active = True
+        try:
+            image = self._get_image()
+            if image is None:
+                self._log_message("Online spot-check: no image available")
+                return
+            result = self._find_bright_spot(image)
+            if result is None:
+                self._log_message("Online spot-check: could not compute ratio")
+                return
+            ratio, peak_y, peak_x = result
+            threshold = self.spot_threshold_input.value()
+            self._log_message(
+                f"Online spot-check: peak ({peak_x}, {peak_y}) "
+                f"ratio={ratio:.2f} (threshold {threshold:.2f})"
+            )
+            if ratio <= threshold:
+                return
+
+            # Direction: push spot away from image center (upper half → +1,
+            # lower → -1), scaled by direction_sign for motor wiring.
+            image_center_y = image.shape[0] / 2.0
+            y_sign = +1 if peak_y < image_center_y else -1
+            direction = y_sign * self.bright_spot_direction_sign
+
+            pv = self.motor1_pv_input.text()
+            step_size = self.motor1_step_input.value()
+            current_pos = self._get_pv_value(pv)
+            if current_pos is None:
+                self._log_message("Online spot-check: cannot read motor1")
+                return
+            shift = direction * self.bright_spot_nudge_steps * step_size
+            new_pos = current_pos + shift
+            self._log_message(
+                f"Online spot-check: motor1 nudge {shift:+.4f} → {new_pos:.4f}"
+            )
+            self._set_pv_value(pv, new_pos)
+        finally:
+            self.online_spot_check_active = False
 
     def _check_central_bright_spot(self):
         """Detect a bright circular feature at image center and correct it."""
