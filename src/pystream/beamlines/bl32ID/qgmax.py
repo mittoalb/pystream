@@ -56,10 +56,38 @@ class QGMaxBackgroundWatcher(QtCore.QObject):
         req_ts = float(state.get("ts", 0) or 0)
         if req_ts <= self._last_handled_ts:
             return
+        self._last_handled_ts = req_ts
+
+        # New: control commands that manage automated mode instead of firing
+        # a one-shot optimization. gui.py (3D XANES) uses these so QGMax's
+        # own pause/optimize/resume loop drives the scan.
+        cmd = str(state.get("cmd", "") or "").strip().lower()
+        if cmd in ("auto_enable", "auto_disable"):
+            dlg = self._ensure_dialog()
+            dlg._log_message(f"Background auto-mode {cmd} (ts={req_ts:.3f})")
+            if cmd == "auto_enable":
+                try:
+                    n = int(state.get("run_every", 1) or 1)
+                except (TypeError, ValueError):
+                    n = 1
+                dlg._external_set_auto_mode(True, run_every=max(1, n))
+            else:
+                dlg._external_set_auto_mode(False)
+            try:
+                with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                    json.dump({"last_completed_ts": 0,
+                               "auto_mode": (cmd == "auto_enable"),
+                               "started_ts": req_ts,
+                               "started_at": time.time()}, fh)
+            except Exception:
+                pass
+            return
+
+        # Default (no cmd): treat as a single-shot optimization request
+        # (backward-compatible with gui_2d.py).
         dlg = self._ensure_dialog()
         if dlg.optimization_active:
             return
-        self._last_handled_ts = req_ts
         dlg._qgmax_trigger_ts = req_ts
         dlg._qgmax_last_handled_ts = req_ts
         dlg._log_message(f"Background trigger ts={req_ts:.3f}")
@@ -131,10 +159,15 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.coarse_multiplier = 5.0  # Coarse step = step_size * 5
         self.fine_multiplier = 1.0  # Fine step = step_size * 1
 
-        # Central bright-spot correction state
+        # Central bright-spot correction state. When a bright spot is
+        # detected, nudge motor1 by ONE step; the direction is decided per
+        # check from the spot's Y position (peak above image center → +1,
+        # below → -1). If the motor sign convention pushes the spot the
+        # WRONG way, invert bright_spot_direction_sign to flip the mapping.
         self.bright_spot_correction_count = 0
-        self.bright_spot_nudge_steps = 2  # Number of motor1 step units per correction
-        self.bright_spot_nudge_direction = +1  # +1 or -1, toggled on retry
+        self.bright_spot_nudge_steps = 1  # motor1 step units per correction
+        self.bright_spot_direction_sign = +1  # flip to -1 if mapping is inverted
+        self.bright_spot_nudge_direction = +1  # actual sign used; recomputed per check
 
         self._init_ui()
         self._restore_settings()
@@ -561,6 +594,20 @@ class QGMaxDialog(QtWidgets.QDialog):
         """Update the run_every value when changed."""
         self.hdf5_location_run_every = value
 
+    def _external_set_auto_mode(self, enable: bool, run_every: int = 1):
+        """Enable/disable automated mode from outside (e.g. 3D XANES's gui.py).
+        Keeps the auto-mode button's checked state in sync so the UI still
+        reflects reality if the user opens the dialog afterward."""
+        if enable:
+            try:
+                self.run_every_input.setValue(max(1, int(run_every)))
+            except Exception:
+                pass
+        if self.auto_mode_enabled == enable:
+            return
+        self.auto_mode_btn.setChecked(enable)
+        self._toggle_auto_mode(enable)
+
     def _toggle_auto_mode(self, checked: bool):
         """Toggle automated mode on/off."""
         self.auto_mode_enabled = checked
@@ -933,8 +980,7 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.waiting_for_image = False
         self._log_message("=== Optimization done - checking central bright spot ===")
         self.bright_spot_correction_count = 0
-        self.bright_spot_nudge_direction = +1
-        # Let the detector see the image at the optimized position first.
+        # Direction is recomputed per check from the spot's position.
         QtCore.QTimer.singleShot(1000, self._check_central_bright_spot)
 
     def _check_central_bright_spot(self):
@@ -979,9 +1025,14 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._complete_optimization()
             return
 
-        # Flip direction on the second attempt so we don't drift monotonically.
-        if self.bright_spot_correction_count == 1:
-            self.bright_spot_nudge_direction = -1
+        # Direction: push the spot AWAY from image center. If the peak is
+        # in the upper half of the image (peak_y < center), move motor1
+        # +1 * direction_sign; if in the lower half, -1 * direction_sign.
+        # direction_sign accounts for the physical wiring of motor1 vs the
+        # image Y axis — flip it in __init__ if the moves go the wrong way.
+        image_center_y = image.shape[0] / 2.0
+        y_sign = +1 if peak_y < image_center_y else -1
+        self.bright_spot_nudge_direction = y_sign * self.bright_spot_direction_sign
 
         pv = self.motor1_pv_input.text()
         step_size = self.motor1_step_input.value()
