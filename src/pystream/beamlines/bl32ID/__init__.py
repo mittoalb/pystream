@@ -13,8 +13,9 @@ from .autocenter import AutoCenterDialog
 from .blgui import BLGuiDialog
 from .agent import AgentDialog
 from .datamap import DataMapDialog
+from .xraytools import XRayToolsDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog']
+__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog', 'XRayToolsDialog']
 
 
 def start_background_services(parent_window):
