@@ -1035,20 +1035,36 @@ class PvViewerApp(QtWidgets.QMainWindow):
         contrast_group = QtWidgets.QGroupBox("Contrast")
         contrast_layout = QtWidgets.QVBoxLayout()
         contrast_layout.setSpacing(4)
-        
+
+        # Auto-contrast method selector — drives _autoscale_values_fast().
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Auto:"))
+        self.cmb_autoscale_mode = QtWidgets.QComboBox()
+        self.cmb_autoscale_mode.addItems([
+            "Percentile 0.5-99.5 (default)",
+            "Min/Max",
+            "Percentile 1-99",
+            "Percentile 2-98",
+            "Percentile 5-95",
+            "Percentile 10-90",
+        ])
+        self.cmb_autoscale_mode.currentIndexChanged.connect(self._autoscale_mode_changed)
+        mode_row.addWidget(self.cmb_autoscale_mode, stretch=1)
+        contrast_layout.addLayout(mode_row)
+
         contrast_layout.addWidget(QtWidgets.QLabel("Min (vmin)"))
         self.sld_min = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.sld_min.setRange(0, 65535)
         self.sld_min.valueChanged.connect(self._slider_changed)
         contrast_layout.addWidget(self.sld_min)
-        
+
         contrast_layout.addWidget(QtWidgets.QLabel("Max (vmax)"))
         self.sld_max = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.sld_max.setRange(0, 65535)
         self.sld_max.setValue(65535)
         self.sld_max.valueChanged.connect(self._slider_changed)
         contrast_layout.addWidget(self.sld_max)
-        
+
         contrast_group.setLayout(contrast_layout)
         left_layout.addWidget(contrast_group)
         
@@ -1584,6 +1600,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.sld_min.blockSignals(False)
             self.sld_max.blockSignals(False)
     
+    # (low, high) percentile bounds keyed by the "Auto:" combo box index.
+    # Min/Max uses np.min / np.max instead of percentiles for speed.
+    _AUTOSCALE_MODES = [
+        ("percentile", 0.5, 99.5),
+        ("minmax",     None, None),
+        ("percentile", 1.0, 99.0),
+        ("percentile", 2.0, 98.0),
+        ("percentile", 5.0, 95.0),
+        ("percentile", 10.0, 90.0),
+    ]
+
     def _autoscale_values_fast(self, img: np.ndarray):
         # Use ROI sub-region for contrast if enabled and ROI is active
         source = img
@@ -1593,11 +1620,34 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 source = roi_data
         step = max(1, int(max(source.shape) / 512))
         samp = source[::step, ::step] if source.ndim >= 2 else source
-        lo = float(np.percentile(samp, 0.5))
-        hi = float(np.percentile(samp, 99.5))
+
+        mode_idx = 0
+        if hasattr(self, 'cmb_autoscale_mode'):
+            mode_idx = self.cmb_autoscale_mode.currentIndex()
+        kind, plo, phi = self._AUTOSCALE_MODES[mode_idx]
+        if kind == "minmax":
+            lo = float(np.nanmin(samp))
+            hi = float(np.nanmax(samp))
+        else:
+            lo = float(np.percentile(samp, plo))
+            hi = float(np.percentile(samp, phi))
         if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
             lo, hi = float(np.nanmin(samp)), float(np.nanmax(samp))
         return lo, hi
+
+    def _autoscale_mode_changed(self, _index):
+        """Auto-mode changed — if autoscale is on and we have a frame,
+        recompute levels immediately with the new method."""
+        if not getattr(self, 'autoscale_enabled', False):
+            return
+        if getattr(self, '_last_display_img', None) is None:
+            return
+        self.vmin, self.vmax = self._autoscale_values_fast(self._last_display_img)
+        self._update_sliders(self.vmin, self.vmax)
+        self.image_view.setImage(
+            self._last_display_img, autoRange=False, autoLevels=False,
+            levels=(self.vmin, self.vmax),
+        )
     
     def _slider_changed(self):
         if hasattr(self, '_updating_sliders') and self._updating_sliders:
