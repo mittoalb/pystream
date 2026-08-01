@@ -404,6 +404,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.hist_interval = 1.0 / max(0.1, float(hist_fps))
         
         self.display_bin = int(display_bin)
+        # Effective decimation applied to the last displayed frame; set
+        # by _apply_view_ops. Consumed by the scalebar / line-length code
+        # so a µm reading stays truthful under auto-decimation.
+        self._current_display_bin = 1
         
         self.queue = queue.Queue(maxsize=1)
         self.sub = None
@@ -963,6 +967,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_reset_line.setMaximumWidth(60)
         btn_reset_line.clicked.connect(lambda: self.line_manager.reset() if self.line_manager else None)
         line_layout.addWidget(btn_reset_line)
+        self.btn_line_profile = QtWidgets.QPushButton("Profile")
+        self.btn_line_profile.setMaximumWidth(70)
+        self.btn_line_profile.setToolTip(
+            "Open the ImageJ-style intensity-profile plot. Live-updates "
+            "with the current line and each new frame.")
+        self.btn_line_profile.clicked.connect(
+            lambda: self.line_manager.show_profile_dialog()
+            if self.line_manager else None)
+        line_layout.addWidget(self.btn_line_profile)
         analysis_layout.addLayout(line_layout)
         
         analysis_group.setLayout(analysis_layout)
@@ -1406,8 +1419,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         return max(1, min(by, bx))
     
     def _apply_view_ops(self, img: np.ndarray) -> np.ndarray:
-        # Decimation
+        # Decimation. Cache the effective factor so scalebar / line
+        # measurements can compensate — otherwise auto-decimation makes
+        # both silently under-report physical size at the display side.
         b = self.display_bin if self.display_bin > 0 else self._auto_display_bin(img)
+        self._current_display_bin = b
         if b > 1:
             img = img[::b, ::b]
         
@@ -1478,10 +1494,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Update ROI Statistics
         self.roi_manager.update_stats(img)
         self.ellipse_roi_manager.update_stats(img)
+        # Tell measurement widgets the current display decimation so
+        # they can convert displayed pixels back to sensor pixels.
+        self.line_manager.display_bin = self._current_display_bin
         self.line_manager.update_stats(img)
 
         # Update scale bar
         if self.scalebar_manager is not None:
+            self.scalebar_manager.display_bin = self._current_display_bin
             self.scalebar_manager.update_image(img)
 
 

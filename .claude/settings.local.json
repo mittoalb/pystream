@@ -19,7 +19,9 @@
       "Bash(grep -n \"def \\\\|append_data\\\\|append_flat\\\\|append_meta\\\\|append_step\\\\|write_instrument_snapshot\\\\|_ensure\\\\|MasterH5\\\\b\" /home/beams0/AMITTONE/Software/xanes_gui/xanes_gui/gui_2d.py | head -30)",
       "Read(//home/beams0/AMITTONE/Software/xanes_gui/xanes_gui/**)",
       "Bash(pip show *)",
-      "Read(//home/beams0/AMITTONE/miniconda3/envs/pystream/lib/python3.10/site-packages/pystream/plugins/**)"
+      "Read(//home/beams0/AMITTONE/miniconda3/envs/pystream/lib/python3.10/site-packages/pystream/plugins/**)",
+      "Bash(grep -n \"adaptive_tomo\\\\|Adaptive Tomo\\\\|AdaptiveTomo\\\\|adaptive-tomo\\\\|Adaptive-Exposure\\\\|Adaptive Tomography\" /home/beams0/AMITTONE/Software/atomo/atomo/gui.py | head -30)",
+      "Read(//home/beams0/AMITTONE/Software/atomo/atomo/**)"
     ],
     "deny": [],
     "ask": []

@@ -15,8 +15,9 @@ from .agent import AgentDialog
 from .datamap import DataMapDialog
 from .xraytools import XRayToolsDialog
 from .autofocus import AutofocusLauncherDialog
+from .atomo import AtomoLauncherDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog']
+__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
 
 
 def start_background_services(parent_window):

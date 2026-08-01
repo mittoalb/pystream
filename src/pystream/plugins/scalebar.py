@@ -48,6 +48,11 @@ class SingleScaleBar:
         # State
         self.enabled = False
         self._last_image_shape = None
+        # Effective viewer decimation. One displayed pixel spans
+        # display_bin sensor pixels, so the µm-per-displayed-pixel
+        # scaling is pixel_size * display_bin. Set from ScaleBarManager
+        # every frame.
+        self.display_bin: int = 1
 
         # Graphics items
         self.bar_rect: Optional[QtWidgets.QGraphicsRectItem] = None
@@ -145,16 +150,21 @@ class SingleScaleBar:
         x_range = view_range[0]  # [xmin, xmax]
         y_range = view_range[1]  # [ymin, ymax]
 
-        # Calculate visible width in image pixels
+        # Calculate visible width in image pixels (displayed pixels —
+        # the image was decimated by display_bin before it reached us).
         visible_width_px = x_range[1] - x_range[0]
+
+        # µm per displayed pixel = pixel_size (µm/sensor-px) * display_bin.
+        b = max(1, int(self.display_bin))
+        um_per_disp_px = self.pixel_size * b
 
         # Calculate desired bar width (fraction of visible width)
         desired_bar_width_px = visible_width_px * self.bar_width_fraction
-        desired_bar_width_real = desired_bar_width_px * self.pixel_size
+        desired_bar_width_real = desired_bar_width_px * um_per_disp_px
 
         # Round to nice number
         bar_width_real = self._get_nice_scale(desired_bar_width_real)
-        bar_width_px = bar_width_real / self.pixel_size
+        bar_width_px = bar_width_real / um_per_disp_px
 
         # Calculate position in image coordinates based on visible range
         margin_px = self.margin
@@ -259,6 +269,8 @@ class ScaleBarManager:
         # State
         self._last_image: Optional[np.ndarray] = None
         self._global_enabled = False  # Master toggle state
+        # Effective viewer decimation, propagated to both bars.
+        self._display_bin: int = 1
         
         # Create two independent scale bars
         self.scale_bar_1 = SingleScaleBar(
@@ -379,11 +391,24 @@ class ScaleBarManager:
     def update_image(self, image: np.ndarray):
         """Update with new image dimensions."""
         self._last_image = image
+        # Fan display_bin out to the two bars before they redraw.
+        self.scale_bar_1.display_bin = self._display_bin
+        self.scale_bar_2.display_bin = self._display_bin
         if self._global_enabled:
             if self.bar_1_individually_enabled:
                 self.scale_bar_1.update(image)
             if self.bar_2_individually_enabled:
                 self.scale_bar_2.update(image)
+
+    @property
+    def display_bin(self) -> int:
+        return self._display_bin
+
+    @display_bin.setter
+    def display_bin(self, value: int) -> None:
+        self._display_bin = max(1, int(value))
+        self.scale_bar_1.display_bin = self._display_bin
+        self.scale_bar_2.display_bin = self._display_bin
 
     def cleanup(self):
         """Remove both scale bars from view."""
