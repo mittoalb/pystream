@@ -13,6 +13,12 @@ Interaction:
 
 Physical length is computed using the pixel sizes stored in the two
 scale bars (scale_bar_1 for X, scale_bar_2 for Y).
+
+Coordinates: all endpoint state (`_x1..y2`) is in the ImageItem's local
+frame — i.e. image pixels. Graphics items are children of the
+ImageItem, so they pan/zoom WITH the image and stay pinned to the
+feature they were drawn across. Viewport-space mouse events are
+converted to image coords once, on entry (`_to_image`).
 """
 
 import logging
@@ -142,6 +148,7 @@ class LineProfileManager:
         self._handle_p1: Optional[QtWidgets.QGraphicsRectItem] = None  # start
         self._handle_p2: Optional[QtWidgets.QGraphicsRectItem] = None  # end
 
+        # Endpoints are stored in ImageItem-local coords (image pixels).
         self._x1 = self._y1 = self._x2 = self._y2 = 0.0
 
         self._state    = self._IDLE
@@ -152,9 +159,11 @@ class LineProfileManager:
         # must scale by this factor.
         self.display_bin: int = 1
 
-        self._drag_start_sp    = None
-        self._drag_start_geom  = None   # (x1,y1,x2,y2) snapshot for move
-        self._drag_endpoint_idx = None  # 1 or 2
+        # Drag anchors: for _MOVING we snapshot in image coords too, so
+        # the delta arithmetic is in the same frame as the endpoint state.
+        self._drag_start_ip    = None      # QPointF in image coords
+        self._drag_start_geom  = None      # (x1,y1,x2,y2) snapshot
+        self._drag_endpoint_idx = None     # 1 or 2
 
         self._shift = False
 
@@ -173,14 +182,10 @@ class LineProfileManager:
     def show_profile_dialog(self):
         """Open (or raise) the intensity-profile popup. Non-modal."""
         if self._profile_dialog is None:
-            # Parent = None keeps it as a top-level window that can be
-            # moved independently of the main viewer.
             self._profile_dialog = LineProfileDialog(parent=None)
         self._profile_dialog.show()
         self._profile_dialog.raise_()
         self._profile_dialog.activateWindow()
-        # Push a fresh sample immediately so the plot isn't empty when
-        # the user opens the dialog after already drawing a line.
         if self._state == self._PLACED:
             self._refresh_stats()
 
@@ -233,13 +238,19 @@ class LineProfileManager:
                 pass
             self._profile_dialog = None
 
-    # ── helpers ───────────────────────────────────────────────────────────
+    # ── coord helpers ─────────────────────────────────────────────────────
 
-    def _sc(self):
-        return self._gv.scene()
+    def _img_item(self):
+        return self.image_view.getImageItem()
 
-    def _to_scene(self, vp_pos) -> QtCore.QPointF:
-        return self._gv.mapToScene(vp_pos)
+    def _to_image(self, vp_pos) -> Optional[QtCore.QPointF]:
+        """Viewport pixel → ImageItem-local (image pixel) coords.
+        Returns None if no image is loaded yet."""
+        img_item = self._img_item()
+        if img_item is None:
+            return None
+        scene_pt = self._gv.mapToScene(vp_pos)
+        return img_item.mapFromScene(scene_pt)
 
     def _pixel_sizes(self):
         if self.scalebar_manager is None:
@@ -250,12 +261,22 @@ class LineProfileManager:
     # ── graphics ──────────────────────────────────────────────────────────
 
     def _remove_graphics(self):
-        sc = self._sc()
+        sc = self._gv.scene()
         for attr in ('_item', '_handle_c', '_handle_p1', '_handle_p2'):
             item = getattr(self, attr)
             if item is not None:
-                if sc:
-                    sc.removeItem(item)
+                # Detach from parent (the ImageItem) then remove from
+                # the scene. Order matters: setParentItem(None) so that
+                # the removal doesn't cascade through the parent.
+                try:
+                    item.setParentItem(None)
+                except Exception:
+                    pass
+                if sc is not None:
+                    try:
+                        sc.removeItem(item)
+                    except Exception:
+                        pass
                 setattr(self, attr, None)
 
     def _make_handle(self) -> QtWidgets.QGraphicsRectItem:
@@ -263,28 +284,30 @@ class LineProfileManager:
         h = QtWidgets.QGraphicsRectItem(-s, -s, 2*s, 2*s)
         h.setPen(_handle_pen())
         h.setBrush(_handle_brush())
+        # Handle stays at fixed screen size regardless of view zoom, but
+        # its POSITION is in the parent's frame (image pixels) so it
+        # tracks the feature.
         h.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
         h.setZValue(1001)
         return h
 
     def _create_graphics(self):
         self._remove_graphics()
-        sc = self._sc()
-        if sc is None:
-            return
+        img_item = self._img_item()
+        if img_item is None:
+            return  # no image yet — nothing to anchor to
 
         self._item = QtWidgets.QGraphicsLineItem(
             self._x1, self._y1, self._x2, self._y2)
         self._item.setPen(_line_pen())
         self._item.setZValue(1000)
-        sc.addItem(self._item)
+        self._item.setParentItem(img_item)  # transforms + pans with image
 
         self._handle_c  = self._make_handle()
         self._handle_p1 = self._make_handle()
         self._handle_p2 = self._make_handle()
-        sc.addItem(self._handle_c)
-        sc.addItem(self._handle_p1)
-        sc.addItem(self._handle_p2)
+        for h in (self._handle_c, self._handle_p1, self._handle_p2):
+            h.setParentItem(img_item)
 
         self._place_handles()
 
@@ -303,11 +326,14 @@ class LineProfileManager:
         self._place_handles()
 
     def _hit(self, handle, vp_pos) -> bool:
+        """Handle hit test in viewport pixels — independent of zoom."""
         if handle is None:
             return False
-        h_vp = self._gv.mapFromScene(handle.pos())
-        return (np.hypot(vp_pos.x() - h_vp.x(),
-                         vp_pos.y() - h_vp.y()) <= _HANDLE_HIT_PX)
+        # scenePos() gives the handle's origin in scene coords, then
+        # map to viewport for pixel-distance comparison.
+        vp_pt = self._gv.mapFromScene(handle.scenePos())
+        return (np.hypot(vp_pos.x() - vp_pt.x(),
+                         vp_pos.y() - vp_pt.y()) <= _HANDLE_HIT_PX)
 
     # ── constraint ────────────────────────────────────────────────────────
 
@@ -324,11 +350,13 @@ class LineProfileManager:
         if not self._enabled:
             return False
 
-        sp = self._to_scene(vp_pos)
+        ip = self._to_image(vp_pos)
+        if ip is None:
+            return False
 
         if self._state == self._IDLE:
-            self._x1 = self._x2 = sp.x()
-            self._y1 = self._y2 = sp.y()
+            self._x1 = self._x2 = ip.x()
+            self._y1 = self._y2 = ip.y()
             self._create_graphics()
             self._state = self._PLACING
             self.stats_label.setText("Line: drag to end, release to place")
@@ -347,7 +375,7 @@ class LineProfileManager:
                 return True
             if self._hit(self._handle_c, vp_pos):
                 self._state = self._MOVING
-                self._drag_start_sp   = sp
+                self._drag_start_ip   = ip
                 self._drag_start_geom = (self._x1, self._y1,
                                          self._x2, self._y2)
                 self._gv.viewport().setCursor(QtCore.Qt.SizeAllCursor)
@@ -356,10 +384,12 @@ class LineProfileManager:
         return False
 
     def _on_move(self, vp_pos) -> bool:
-        sp = self._to_scene(vp_pos)
+        ip = self._to_image(vp_pos)
+        if ip is None:
+            return False
 
         if self._state == self._PLACING:
-            x, y = self._constrain(self._x1, self._y1, sp.x(), sp.y())
+            x, y = self._constrain(self._x1, self._y1, ip.x(), ip.y())
             self._x2, self._y2 = x, y
             self._apply_geom()
             self._refresh_stats()
@@ -367,18 +397,18 @@ class LineProfileManager:
 
         if self._state == self._DRAG_ENDPOINT:
             if self._drag_endpoint_idx == 1:
-                x, y = self._constrain(self._x2, self._y2, sp.x(), sp.y())
+                x, y = self._constrain(self._x2, self._y2, ip.x(), ip.y())
                 self._x1, self._y1 = x, y
             else:
-                x, y = self._constrain(self._x1, self._y1, sp.x(), sp.y())
+                x, y = self._constrain(self._x1, self._y1, ip.x(), ip.y())
                 self._x2, self._y2 = x, y
             self._apply_geom()
             self._refresh_stats()
             return True
 
         if self._state == self._MOVING:
-            dx = sp.x() - self._drag_start_sp.x()
-            dy = sp.y() - self._drag_start_sp.y()
+            dx = ip.x() - self._drag_start_ip.x()
+            dy = ip.y() - self._drag_start_ip.y()
             x1, y1, x2, y2 = self._drag_start_geom
             self._x1, self._y1 = x1 + dx, y1 + dy
             self._x2, self._y2 = x2 + dx, y2 + dy
@@ -389,10 +419,11 @@ class LineProfileManager:
 
     def _on_release(self, vp_pos) -> bool:
         if self._state == self._PLACING:
-            sp = self._to_scene(vp_pos)
-            x, y = self._constrain(self._x1, self._y1, sp.x(), sp.y())
-            self._x2, self._y2 = x, y
-            self._apply_geom()
+            ip = self._to_image(vp_pos)
+            if ip is not None:
+                x, y = self._constrain(self._x1, self._y1, ip.x(), ip.y())
+                self._x2, self._y2 = x, y
+                self._apply_geom()
             self._state = self._PLACED
             self._gv.viewport().setCursor(QtCore.Qt.ArrowCursor)
             self._refresh_stats()
@@ -408,14 +439,9 @@ class LineProfileManager:
     # ── stats ─────────────────────────────────────────────────────────────
 
     def _refresh_stats(self):
-        img_item = self.image_view.getImageItem()
-        if img_item is None:
-            return
-
-        p1 = img_item.mapFromScene(QtCore.QPointF(self._x1, self._y1))
-        p2 = img_item.mapFromScene(QtCore.QPointF(self._x2, self._y2))
-        ix1, iy1 = p1.x(), p1.y()
-        ix2, iy2 = p2.x(), p2.y()
+        # Endpoints are ALREADY in image-item local (image pixel) coords.
+        ix1, iy1 = self._x1, self._y1
+        ix2, iy2 = self._x2, self._y2
 
         # dx/dy are in *displayed* pixels — the image was decimated by
         # display_bin before it reached the viewer. Scale up so lengths

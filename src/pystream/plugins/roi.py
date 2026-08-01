@@ -3,9 +3,11 @@
 """
 ROI Plugin - mirrors the line plugin pattern exactly.
 
-All graphics items live in the QGraphicsScene (scene coords throughout).
-pg.RectROI is placed in the scene, so its pos/size are scene coords, and
-its built-in handles work without any coordinate-system gymnastics.
+All graphics items live in the ViewBox (image-item local coords —
+i.e. image pixels). That means the ROI pans and zooms WITH the image
+and stays pinned to the feature it was drawn across. Mouse events are
+in viewport pixels; they're converted to image coords once, on entry,
+via `_to_image`.
 
 Interaction:
   - Toggle ON      → crosshair cursor, wait for draw.
@@ -50,8 +52,18 @@ class ROIManager:
         self._last_image: Optional[np.ndarray] = None
         self.dimension_text: Optional[pg.TextItem] = None
 
+        # Belt-and-suspenders: keep a strong reference to every ROI /
+        # dimension-text this manager has ever created. `_remove_roi`
+        # sweeps this list, not just `self.roi`, so an orphan left
+        # behind by a failed `view.removeItem` (which we swallow silently
+        # via the try/except pattern) gets cleaned up on the next call.
+        # Without this, the symptom is: multiple ROIs on screen that
+        # toggle-off / reset can't clear because the reference was nulled.
+        self._all_rois: list = []
+        self._all_texts: list = []
+
         self._state       = self._IDLE
-        self._press_scene = None                              # QPointF
+        self._press_image = None                              # QPointF (image coords)
         self._preview: Optional[QtWidgets.QGraphicsRectItem] = None
 
         self._gv = image_view.ui.graphicsView
@@ -60,11 +72,20 @@ class ROIManager:
 
     # ── helpers ───────────────────────────────────────────────────────────
 
-    def _sc(self):
-        return self._gv.scene()
+    def _view(self):
+        """The ViewBox — anything we add here lives in ImageItem-local
+        coords (image pixels) and rides the ImageItem's transform."""
+        return self.image_view.getView()
 
-    def _to_scene(self, vp_pos) -> QtCore.QPointF:
-        return self._gv.mapToScene(vp_pos)
+    def _img_item(self):
+        return self.image_view.getImageItem()
+
+    def _to_image(self, vp_pos) -> Optional[QtCore.QPointF]:
+        """Viewport pixel → image-item local (image pixel) coords."""
+        img_item = self._img_item()
+        if img_item is None:
+            return None
+        return img_item.mapFromScene(self._gv.mapToScene(vp_pos))
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -85,18 +106,15 @@ class ROIManager:
         if self._last_image is None:
             QtWidgets.QMessageBox.information(None, "Reset ROI", "No image available.")
             return
-        img_item = self.image_view.getImageItem()
         h, w = self._last_image.shape[:2]
         rw = max(2, w // 4)
         rh = max(2, h // 4)
         rx = (w - rw) // 2
         ry = (h - rh) // 2
-        # convert image-pixel coords to scene coords
-        p  = img_item.mapToScene(QtCore.QPointF(rx, ry))
-        p2 = img_item.mapToScene(QtCore.QPointF(rx + rw, ry + rh))
+        # Coords already in image-pixel space — no scene conversion needed
+        # now that the ROI lives in ViewBox (= ImageItem local) coords.
         self._remove_all()
-        self._build_roi(p.x(), p.y(),
-                        abs(p2.x() - p.x()), abs(p2.y() - p.y()))
+        self._build_roi(rx, ry, rw, rh)
         self.enabled = True
         self._state  = self._PLACED
         self._gv.viewport().setCursor(QtCore.Qt.ArrowCursor)
@@ -129,16 +147,10 @@ class ROIManager:
         return {"x": pos[0], "y": pos[1], "width": size[0], "height": size[1]}
 
     def set_roi_bounds(self, x, y, width, height):
-        img_item = self.image_view.getImageItem()
-        if img_item is not None:
-            p  = img_item.mapToScene(QtCore.QPointF(x, y))
-            p2 = img_item.mapToScene(QtCore.QPointF(x + width, y + height))
-            sx, sy = p.x(), p.y()
-            sw, sh = abs(p2.x() - p.x()), abs(p2.y() - p.y())
-        else:
-            sx, sy, sw, sh = x, y, width, height
+        # x/y/width/height are image-pixel values; the ROI already lives
+        # in that same frame, so no coord conversion is required.
         self._remove_all()
-        self._build_roi(sx, sy, sw, sh)
+        self._build_roi(x, y, width, height)
         self.enabled = True
         self._state  = self._PLACED
         self._update_stats()
@@ -157,47 +169,62 @@ class ROIManager:
     def _on_press(self, vp_pos) -> bool:
         if not self.enabled or self._state != self._IDLE:
             return False
-        sp = self._to_scene(vp_pos)
-        sc = self._sc()
-        if sc is None:
+        ip = self._to_image(vp_pos)
+        img_item = self._img_item()
+        if ip is None or img_item is None:
             return False
-        self._press_scene = sp
+        self._press_image = ip
         pen = pg.mkPen('y', width=2)
         pen.setCosmetic(True)
-        self._preview = QtWidgets.QGraphicsRectItem(sp.x(), sp.y(), 0, 0)
+        # Preview lives in image-item local coords too so it tracks the
+        # image while the user is dragging (in case a zoom/pan happens
+        # via another input).
+        self._preview = QtWidgets.QGraphicsRectItem(ip.x(), ip.y(), 0, 0)
         self._preview.setPen(pen)
         self._preview.setZValue(1000)
-        sc.addItem(self._preview)
+        self._preview.setParentItem(img_item)
         self._state = self._PLACING
         return True
 
     def _on_move(self, vp_pos) -> bool:
         if self._state != self._PLACING or self._preview is None:
             return False
-        sp = self._to_scene(vp_pos)
-        x  = min(self._press_scene.x(), sp.x())
-        y  = min(self._press_scene.y(), sp.y())
-        w  = max(1.0, abs(sp.x() - self._press_scene.x()))
-        h  = max(1.0, abs(sp.y() - self._press_scene.y()))
+        ip = self._to_image(vp_pos)
+        if ip is None:
+            return False
+        x  = min(self._press_image.x(), ip.x())
+        y  = min(self._press_image.y(), ip.y())
+        w  = max(1.0, abs(ip.x() - self._press_image.x()))
+        h  = max(1.0, abs(ip.y() - self._press_image.y()))
         self._preview.setRect(x, y, w, h)
         return True
 
     def _on_release(self, vp_pos) -> bool:
         if self._state != self._PLACING:
             return False
-        sp = self._to_scene(vp_pos)
+        ip = self._to_image(vp_pos)
+        if ip is None:
+            return False
 
         # remove preview
-        sc = self._sc()
-        if sc is not None and self._preview is not None:
-            sc.removeItem(self._preview)
+        if self._preview is not None:
+            try:
+                self._preview.setParentItem(None)
+            except Exception:
+                pass
+            sc = self._gv.scene()
+            if sc is not None:
+                try:
+                    sc.removeItem(self._preview)
+                except Exception:
+                    pass
         self._preview = None
 
-        # bounding box in scene coordinates (same as line plugin)
-        x = min(self._press_scene.x(), sp.x())
-        y = min(self._press_scene.y(), sp.y())
-        w = max(1.0, abs(sp.x() - self._press_scene.x()))
-        h = max(1.0, abs(sp.y() - self._press_scene.y()))
+        # Bounding box in image-item local coords (image pixels).
+        x = min(self._press_image.x(), ip.x())
+        y = min(self._press_image.y(), ip.y())
+        w = max(1.0, abs(ip.x() - self._press_image.x()))
+        h = max(1.0, abs(ip.y() - self._press_image.y()))
 
         self._remove_roi()
         self._build_roi(x, y, w, h)
@@ -209,30 +236,50 @@ class ROIManager:
     # ── graphics ─────────────────────────────────────────────────────────
 
     def _remove_roi(self):
-        sc = self._sc()
+        view = self._view()
+        # Disconnect signals on the currently-tracked ROI first (only
+        # this one had a connection).
         if self.roi is not None:
             try:
                 self.roi.sigRegionChanged.disconnect(self._on_roi_changed)
             except Exception:
                 pass
-            if sc:
+        # Sweep EVERY ROI this manager ever created — including orphans
+        # from prior failed removals — plus the current one.
+        seen = set()
+        for r in self._all_rois:
+            if r is None or id(r) in seen:
+                continue
+            seen.add(id(r))
+            if view is not None:
                 try:
-                    sc.removeItem(self.roi)
+                    view.removeItem(r)
                 except Exception:
                     pass
-            self.roi = None
-        if self.dimension_text is not None:
-            if sc:
+        self._all_rois = []
+        self.roi = None
+        # Same sweep for dimension_text items.
+        seen = set()
+        for t in self._all_texts:
+            if t is None or id(t) in seen:
+                continue
+            seen.add(id(t))
+            if view is not None:
                 try:
-                    sc.removeItem(self.dimension_text)
+                    view.removeItem(t)
                 except Exception:
                     pass
-            self.dimension_text = None
+        self._all_texts = []
+        self.dimension_text = None
 
     def _remove_all(self):
-        sc = self._sc()
         if self._preview is not None:
-            if sc:
+            try:
+                self._preview.setParentItem(None)
+            except Exception:
+                pass
+            sc = self._gv.scene()
+            if sc is not None:
                 try:
                     sc.removeItem(self._preview)
                 except Exception:
@@ -241,26 +288,26 @@ class ROIManager:
         self._remove_roi()
 
     def _build_roi(self, x, y, w, h):
-        """Create pg.RectROI in SCENE coordinates — same as line plugin."""
-        sc = self._sc()
-        if sc is None:
+        """Create pg.RectROI in image-item local coords (image pixels).
+        The ROI is added to the ViewBox so its pos/size are naturally
+        in image-pixel units and it inherits the ImageItem's transform,
+        staying pinned to the underlying feature on zoom/pan."""
+        view = self._view()
+        if view is None:
             return
         self._remove_roi()  # always clean up any existing ROI first
 
         pen       = pg.mkPen('y', width=self.roi_pen_width)
         hover_pen = pg.mkPen((255, 255, 100), width=self.roi_pen_width + 1)
 
-        # Create at (0,0) then place after adding to scene — avoids any
-        # parent-change coordinate adjustment (same reason line plugin sets
-        # line coords directly in QGraphicsLineItem constructor).
         self.roi = pg.RectROI(
-            [0, 0], [w, h],
+            [x, y], [w, h],
             pen=pen, hoverPen=hover_pen,
             movable=True, resizable=True, removable=False,
         )
         self.roi.setZValue(1000)
-        sc.addItem(self.roi)           # scene is parent-less → scene coords
-        self.roi.setPos(x, y)         # now in scene coords ✓
+        view.addItem(self.roi)  # ViewBox local coords = image pixels
+        self._all_rois.append(self.roi)
 
         # 4 corners + 4 edges
         self.roi.addScaleHandle([1, 1], [0, 0])
@@ -280,7 +327,8 @@ class ROIManager:
                 fill=(0, 0, 0, 180), border='y',
             )
             self.dimension_text.setZValue(2000)
-            sc.addItem(self.dimension_text)
+            view.addItem(self.dimension_text)
+            self._all_texts.append(self.dimension_text)
 
         self.roi.sigRegionChanged.connect(self._on_roi_changed)
         self.roi.setVisible(True)
