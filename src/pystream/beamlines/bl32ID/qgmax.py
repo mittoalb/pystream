@@ -33,10 +33,26 @@ class QGMaxBackgroundWatcher(QtCore.QObject):
         super().__init__()
         self._parent_window = parent_window
         self._dialog = None
-        self._last_handled_ts = 0.0
+        # Seed from whatever is on disk RIGHT NOW so a stale request
+        # left behind by a previous pystream session (or a crash mid-scan)
+        # doesn't re-fire on fresh startup. Only strictly-newer ts values
+        # written after we started should trigger optimization.
+        self._last_handled_ts = self._read_current_request_ts()
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._poll)
         self._timer.start(500)
+
+    @staticmethod
+    def _read_current_request_ts() -> float:
+        try:
+            with open(QGMAX_REQUEST_FILE) as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return 0.0
+        try:
+            return float(state.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _ensure_dialog(self):
         if self._dialog is None:
