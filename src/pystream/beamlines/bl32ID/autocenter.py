@@ -26,6 +26,7 @@ class AutoCenterDialog(QtWidgets.QDialog):
     """Dialog for auto-centering optical elements."""
 
     BUTTON_TEXT = "AutoCenter"
+    GROUP       = "Test"
     HANDLER_TYPE = 'singleton'
 
     ELEMENTS = ["Pinhole", "Condenser", "Zone Plate"]

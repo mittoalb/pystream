@@ -18,6 +18,7 @@ class DetectorControlDialog(QtWidgets.QDialog):
     """Dialog for controlling detector binning and ROI."""
 
     BUTTON_TEXT = "Detector"
+    GROUP       = "Detector"
     HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):

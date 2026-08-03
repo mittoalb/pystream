@@ -159,6 +159,7 @@ class XRayToolsDialog(QtWidgets.QDialog):
     """Two-tab dialog: transmissivity/refractive index + absorption edges."""
 
     BUTTON_TEXT = "X-ray Tools"
+    GROUP       = "Calculators"
     HANDLER_TYPE = 'singleton'
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):

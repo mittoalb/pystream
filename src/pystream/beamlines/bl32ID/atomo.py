@@ -16,6 +16,7 @@ class AtomoLauncherDialog(QtWidgets.QDialog):
     """Launcher for the standalone atomo GUI — no dialog shown."""
 
     BUTTON_TEXT = "aTomo"
+    GROUP       = "Scans"
     HANDLER_TYPE = 'launcher'
 
     def __init__(self, parent=None, logger=None):

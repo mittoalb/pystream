@@ -800,33 +800,66 @@ class PvViewerApp(QtWidgets.QMainWindow):
             group_label = QtWidgets.QLabel(f"<b>{active_beamline}:</b>")
             bar_layout.addWidget(group_label)
 
-            # Create button for each dialog class
+            # Bucket plugins by their `GROUP` class attribute (falls back
+            # to "Other" for plugins that don't declare one). Groups are
+            # rendered in first-appearance order from __all__, so
+            # reordering __all__ reorders the top-level menu buttons.
+            # Plugins within a group keep __all__ order too.
+            grouped: dict[str, list[str]] = {}
+            group_order: list[str] = []
             for dialog_class_name in dialog_classes:
                 try:
-                    dialog_class = getattr(beamline_module, dialog_class_name)
+                    cls = getattr(beamline_module, dialog_class_name)
+                except AttributeError:
+                    continue
+                group = getattr(cls, "GROUP", None) or "Other"
+                if group not in grouped:
+                    grouped[group] = []
+                    group_order.append(group)
+                grouped[group].append(dialog_class_name)
 
-                    # Get button text from class attribute or use class name
-                    if hasattr(dialog_class, 'BUTTON_TEXT'):
-                        btn_text = dialog_class.BUTTON_TEXT
-                    else:
-                        # Convert ClassName to Class Name
-                        btn_text = dialog_class_name.replace('Dialog', '').replace('_', ' ').title()
+            # One QToolButton with a QMenu per group.
+            for group_name in group_order:
+                menu = QtWidgets.QMenu(bar)
+                for dialog_class_name in grouped[group_name]:
+                    try:
+                        dialog_class = getattr(beamline_module, dialog_class_name)
+                        if hasattr(dialog_class, 'BUTTON_TEXT'):
+                            item_text = dialog_class.BUTTON_TEXT
+                        else:
+                            item_text = (dialog_class_name.replace('Dialog', '')
+                                                          .replace('_', ' ')
+                                                          .title())
+                        action = menu.addAction(item_text)
+                        # Same launcher/singleton/multi-instance dispatch as
+                        # the flat-button era, wired to QAction.triggered.
+                        handler = self._beamline_handler(dialog_class_name,
+                                                        beamline_module)
+                        if handler is None:
+                            action.setEnabled(False)
+                            handler_type = getattr(dialog_class, 'HANDLER_TYPE',
+                                                   '<unknown>')
+                            action.setToolTip(
+                                f"Unknown handler type {handler_type!r} "
+                                f"for {dialog_class_name!r}")
+                        else:
+                            action.triggered.connect(handler)
+                    except Exception as e:
+                        if LOGGER:
+                            LOGGER.warning(
+                                f"Failed to add menu action for "
+                                f"{dialog_class_name}: {e}")
 
-                    btn = QtWidgets.QPushButton(btn_text)
-                    # Size the max width to the label so long names
-                    # (e.g. "XANES 2D Viewer") aren't truncated. Keep a
-                    # floor of 120 so short-name buttons stay uniform.
-                    text_w = btn.fontMetrics().horizontalAdvance(btn_text)
-                    btn.setMaximumWidth(max(120, text_w + 24))
-
-                    # Connect to appropriate handler based on class name
-                    self._connect_beamline_button(btn, dialog_class_name, beamline_module)
-
-                    bar_layout.addWidget(btn)
-
-                except Exception as e:
-                    if LOGGER:
-                        LOGGER.warning(f"Failed to create button for {dialog_class_name}: {e}")
+                group_btn = QtWidgets.QToolButton(bar)
+                group_btn.setText(group_name + "  ▾")
+                group_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+                group_btn.setMenu(menu)
+                group_btn.setToolTip(
+                    f"{group_name} — {len(grouped[group_name])} plugin(s)")
+                text_w = group_btn.fontMetrics().horizontalAdvance(
+                    group_btn.text())
+                group_btn.setMinimumWidth(max(110, text_w + 24))
+                bar_layout.addWidget(group_btn)
 
         except Exception as e:
             if LOGGER:
@@ -836,30 +869,23 @@ class PvViewerApp(QtWidgets.QMainWindow):
         bar_layout.addStretch()
         return bar
 
-    def _connect_beamline_button(self, btn, dialog_class_name, module):
-        """
-        Connect a beamline button to its appropriate handler.
+    def _beamline_handler(self, dialog_class_name, module):
+        """Return a zero-arg callable that opens/launches the plugin,
+        dispatched by its `HANDLER_TYPE`. Returns None for unknown
+        types so the caller can disable + tooltip the widget.
 
-        Uses plugin-defined behavior if available, otherwise falls back to generic handling.
-        """
+        Same launcher / singleton / multi-instance semantics as before —
+        this factory just decouples the handler from the widget signal
+        (QPushButton.clicked vs QAction.triggered)."""
         dialog_class = getattr(module, dialog_class_name)
+        handler_type = getattr(dialog_class, 'HANDLER_TYPE', 'singleton')
 
-        # Check if plugin defines its own handler type
-        if hasattr(dialog_class, 'HANDLER_TYPE'):
-            handler_type = dialog_class.HANDLER_TYPE
-        else:
-            # Auto-detect handler type based on class attributes
-            handler_type = 'singleton'  # Default to singleton
-
-        # Create appropriate handler based on type
         if handler_type == 'launcher':
-            # Launcher plugins: execute immediately and close
             def handler():
                 dialog_class(parent=self, logger=LOGGER)
-            btn.clicked.connect(handler)
+            return handler
 
-        elif handler_type == 'singleton':
-            # Singleton plugins: keep one instance, show/hide it
+        if handler_type == 'singleton':
             def handler():
                 attr_name = f'{dialog_class_name.lower()}_instance'
                 if not hasattr(self, attr_name) or getattr(self, attr_name) is None:
@@ -868,20 +894,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
-            btn.clicked.connect(handler)
+            return handler
 
-        elif handler_type == 'multi-instance':
-            # Multi-instance plugins: create new instance each time
+        if handler_type == 'multi-instance':
             def handler():
                 dialog = dialog_class(parent=self, logger=LOGGER)
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
-            btn.clicked.connect(handler)
+            return handler
 
-        else:
-            btn.setEnabled(False)
-            btn.setToolTip(f"Unknown handler type '{handler_type}' for '{dialog_class_name}'")
+        return None
 
     def _toggle_beamlines_bar(self):
         """Toggle visibility of beamlines toolbar"""
@@ -2028,56 +2051,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.error("Failed saving frame to %s", path)
                 log_exception(LOGGER, e)
-
-    def _open_motor_scan(self):
-        """Open the motor scan dialog"""
-        if self.motor_scan_dialog is None:
-                self.motor_scan_dialog = MotorScanDialog(parent=self, logger=LOGGER)
-        self.motor_scan_dialog.show()
-        self.motor_scan_dialog.raise_()
-        self.motor_scan_dialog.activateWindow()
-
-    def _open_softbpm(self, module):
-        """Open the SoftBPM dialog"""
-        if not hasattr(self, 'softbpm_dialog') or self.softbpm_dialog is None:
-            self.softbpm_dialog = module.SoftBPMDialog(parent=self, logger=LOGGER)
-        self.softbpm_dialog.show()
-        self.softbpm_dialog.raise_()
-        self.softbpm_dialog.activateWindow()
-
-    def _open_detector_control(self, module):
-        """Open the Detector Control dialog"""
-        if not hasattr(self, 'detector_control_dialog') or self.detector_control_dialog is None:
-            self.detector_control_dialog = module.DetectorControlDialog(parent=self, logger=LOGGER)
-        self.detector_control_dialog.show()
-        self.detector_control_dialog.raise_()
-        self.detector_control_dialog.activateWindow()
-
-    def _open_rotation_axis(self, module):
-        """Open the Rotation Axis Detection dialog"""
-        if not hasattr(self, 'rotation_axis_dialog') or self.rotation_axis_dialog is None:
-            self.rotation_axis_dialog = module.RotationAxisDialog(parent=self, logger=LOGGER)
-        self.rotation_axis_dialog.show()
-        self.rotation_axis_dialog.raise_()
-        self.rotation_axis_dialog.activateWindow()
-
-    def _open_xanes_gui(self, module):
-        """Launch the XANES GUI (runs immediately, no dialog)"""
-        # Create launcher - it executes immediately and closes itself
-        module.XANESGuiDialog(parent=self, logger=LOGGER)
-
-    def _open_optics_calc(self, module):
-        """Launch the Optics Calculator (runs immediately, no dialog)"""
-        # Create launcher - it executes immediately and closes itself
-        module.OpticsCalcDialog(parent=self, logger=LOGGER)
-
-    def _open_qgmax(self, module):
-        """Open the QGMax dialog"""
-        if not hasattr(self, 'qgmax_dialog') or self.qgmax_dialog is None:
-            self.qgmax_dialog = module.QGMaxDialog(parent=self, logger=LOGGER)
-        self.qgmax_dialog.show()
-        self.qgmax_dialog.raise_()
-        self.qgmax_dialog.activateWindow()
 
     def _open_viewer(self):
         """Open a standalone viewer window"""

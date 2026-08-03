@@ -129,6 +129,7 @@ class QGMaxDialog(QtWidgets.QDialog):
     """Dialog for optimizing image mean by adjusting two motors."""
 
     BUTTON_TEXT = "QGMax"
+    GROUP       = "Alignment"
     HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):

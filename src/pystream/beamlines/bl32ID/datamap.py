@@ -332,6 +332,7 @@ class DataMapDialog(QtWidgets.QDialog):
     """Two tabs: (1) Acquisition + Positions table, (2) Motor PVs."""
 
     BUTTON_TEXT  = "DataMap"
+    GROUP        = "Scans"
     HANDLER_TYPE = 'singleton'
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):

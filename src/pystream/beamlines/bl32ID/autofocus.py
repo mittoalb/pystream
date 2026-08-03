@@ -16,6 +16,7 @@ class AutofocusLauncherDialog(QtWidgets.QDialog):
     """Launcher for the standalone autofocus GUI — no dialog shown."""
 
     BUTTON_TEXT = "Autofocus"
+    GROUP       = "Test"
     HANDLER_TYPE = 'launcher'
 
     def __init__(self, parent=None, logger=None):

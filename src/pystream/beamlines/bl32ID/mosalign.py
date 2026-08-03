@@ -16,6 +16,7 @@ class MotorScanDialog(QtWidgets.QDialog):
     """Launcher for Mosalign - no dialog shown."""
 
     BUTTON_TEXT = "Mosalign"
+    GROUP       = "Alignment"
     HANDLER_TYPE = 'launcher'  # Execute immediately and close
 
     def __init__(self, parent=None, logger=None):

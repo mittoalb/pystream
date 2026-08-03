@@ -17,6 +17,7 @@ class OpticsCalcDialog(QtWidgets.QDialog):
     """Simple launcher for Optics Calculator - no dialog shown."""
 
     BUTTON_TEXT = "TXM Optics"
+    GROUP       = "Calculators"
     HANDLER_TYPE = 'launcher'  # Execute immediately and close
 
     def __init__(self, parent=None, logger=None):

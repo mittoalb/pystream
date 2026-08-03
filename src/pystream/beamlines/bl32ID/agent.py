@@ -565,6 +565,7 @@ class AgentDialog(QtWidgets.QDialog):
     pystream and leave it; settings persist across sessions."""
 
     BUTTON_TEXT = "AI"
+    GROUP       = "Tools"
     HANDLER_TYPE = "singleton"
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):

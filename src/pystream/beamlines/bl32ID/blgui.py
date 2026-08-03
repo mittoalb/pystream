@@ -17,6 +17,7 @@ class BLGuiDialog(QtWidgets.QDialog):
     """Launcher: spawns bl_gui bl32id.json and closes without showing a UI."""
 
     BUTTON_TEXT = "BL GUI"
+    GROUP       = "Tools"
     HANDLER_TYPE = 'launcher'
 
     LAYOUT_ARG = "bl32id.json"

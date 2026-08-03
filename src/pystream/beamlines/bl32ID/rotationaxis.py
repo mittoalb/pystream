@@ -19,6 +19,7 @@ class RotationAxisDialog(QtWidgets.QDialog):
     """Dialog for detecting and displaying rotation axis position."""
 
     BUTTON_TEXT = "AutoROT"
+    GROUP       = "Test"
     HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):

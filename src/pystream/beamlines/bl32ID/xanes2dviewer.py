@@ -15,6 +15,7 @@ class XANES2DViewerDialog(QtWidgets.QDialog):
     """Launcher for the XANES 2D data viewer — no dialog shown."""
 
     BUTTON_TEXT = "XANES 2D Viewer"
+    GROUP       = "Viewers"
     HANDLER_TYPE = 'launcher'
 
     def __init__(self, parent=None, logger=None):

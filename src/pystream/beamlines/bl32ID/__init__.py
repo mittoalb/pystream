@@ -1,7 +1,6 @@
 """bl32ID beamline plugins."""
 
 from .mosalign import MotorScanDialog
-from .softbpm import SoftBPMDialog
 from .detectorcontrol import DetectorControlDialog
 from .xanesgui import XANESGuiDialog
 from .xanes2dgui import XANES2DGuiDialog
@@ -17,7 +16,7 @@ from .xraytools import XRayToolsDialog
 from .autofocus import AutofocusLauncherDialog
 from .atomo import AtomoLauncherDialog
 
-__all__ = ['MotorScanDialog', 'SoftBPMDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
+__all__ = ['MotorScanDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'AgentDialog', 'DataMapDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
 
 
 def start_background_services(parent_window):
