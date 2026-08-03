@@ -16,11 +16,45 @@ Shows: data / data_white with real-time shift adjustment
 Tab 2: Comprehensive metadata viewer
 """
 
+import os
+
 import h5py
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
 
+from .line import LineProfileManager
+from .roi import ROIManager
+from .ellipse import EllipseROIManager
+from .scalebar import ScaleBarManager, ScaleBarDialog
+
 pg = None  # imported in main() after QApplication is created
+
+
+def _vertical_separator() -> QtWidgets.QFrame:
+    """Thin vertical rule for the top-bar between tool groups."""
+    line = QtWidgets.QFrame()
+    line.setFrameShape(QtWidgets.QFrame.VLine)
+    line.setFrameShadow(QtWidgets.QFrame.Sunken)
+    return line
+
+
+# scipy is optional — filters degrade gracefully if it's not importable.
+try:
+    from scipy import ndimage as _sp_ndimage  # noqa: F401
+    _HAS_SCIPY = True
+except Exception:
+    _HAS_SCIPY = False
+
+# tifffile / imageio: TIFF export — try both, keep whatever's available.
+try:
+    import tifffile as _tifffile  # noqa: F401
+    _TIFF_BACKEND = "tifffile"
+except Exception:
+    try:
+        import imageio.v3 as _imageio  # noqa: F401
+        _TIFF_BACKEND = "imageio"
+    except Exception:
+        _TIFF_BACKEND = None
 
 
 def _ensure_pyqtgraph():
@@ -380,16 +414,31 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         self.shift_y = 0
         self.normalization_enabled = True
         self.last_directory = ""  # Remember last directory for file dialog
-        
+        # ±N frame averaging window (0 = single slice, N > 0 → mean of
+        # data[i-N:i+N+1]). Applied BEFORE the data/white division.
+        self.avg_n = 0
+        # Filter kind + parameter, applied to the displayed image only.
+        self.filter_kind = "None"
+        self.filter_param = 3.0
+
         # Cached images
         self.current_data = None
         self.current_white = None
         self.result_image = None
-        
+
+        # Tool managers — attached to self.image_view once it's built.
+        self.line_manager = None
+        self.roi_manager = None
+        self.ellipse_manager = None
+        self.scalebar_manager = None
+        self.scalebar_dialog = None
+
         self.setWindowTitle("HDF5 Image Divider with Metadata Viewer")
         self.setModal(False)
         self.resize(1600, 900)
-        
+        # Enable drag-and-drop of .h5/.hdf5 files onto the window.
+        self.setAcceptDrops(True)
+
         self._build_ui()
     
     def _build_ui(self):
@@ -412,10 +461,38 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         main_layout.addWidget(self.main_tabs)
     
     def _build_image_tab(self, parent):
-        """Build the image viewer tab"""
-        layout = QtWidgets.QHBoxLayout(parent)
+        """Build the image viewer tab. Layout is:
+
+            ┌─────────────────────────────────────────────────────────┐
+            │  top_bar: [ Tools ]  [ Filter ]  [ Export ]              │
+            ├──────────┬──────────────────────────────────────────────┤
+            │ left     │                                              │
+            │ panel:   │  right panel: pyqtgraph ImageView            │
+            │ file /   │                                              │
+            │ index /  │                                              │
+            │ contrast │                                              │
+            │ / shift  │                                              │
+            │ / stats  │                                              │
+            └──────────┴──────────────────────────────────────────────┘
+
+        Tools/Filter/Export live in a horizontal top bar so the left
+        controls column doesn't stretch tall enough to shrink the image.
+        """
+        outer = QtWidgets.QVBoxLayout(parent)
+        outer.setSpacing(6)
+
+        # Top bar container (populated later once its subgroups exist).
+        top_bar = QtWidgets.QWidget()
+        self._top_bar_layout = QtWidgets.QHBoxLayout(top_bar)
+        self._top_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self._top_bar_layout.setSpacing(8)
+        outer.addWidget(top_bar)
+
+        # Below the top bar: original two-column split.
+        layout = QtWidgets.QHBoxLayout()
         layout.setSpacing(10)
-        
+        outer.addLayout(layout, stretch=1)
+
         # Left panel - Controls
         left_panel = QtWidgets.QWidget()
         left_panel.setMaximumWidth(350)
@@ -480,7 +557,21 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         self.image_slider.setEnabled(False)
         self.image_slider.valueChanged.connect(self._on_slider_changed)
         selection_layout.addWidget(self.image_slider)
-        
+
+        # Frame averaging: ±N slices around the current index. 0 = single
+        # slice (default). Averages before the data/white division.
+        avg_layout = QtWidgets.QHBoxLayout()
+        avg_layout.addWidget(QtWidgets.QLabel("Average ±N frames:"))
+        self.avg_spin = QtWidgets.QSpinBox()
+        self.avg_spin.setRange(0, 500)
+        self.avg_spin.setValue(0)
+        self.avg_spin.setToolTip(
+            "Show the mean of frames [i-N, i+N]. 0 = single slice.\n"
+            "Averaging happens BEFORE the data/white division.")
+        self.avg_spin.valueChanged.connect(self._on_avg_n_changed)
+        avg_layout.addWidget(self.avg_spin)
+        selection_layout.addLayout(avg_layout)
+
         selection_group.setLayout(selection_layout)
         control_layout.addWidget(selection_group)
         
@@ -587,22 +678,53 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         # Statistics group
         stats_group = QtWidgets.QGroupBox("Image Statistics")
         stats_layout = QtWidgets.QFormLayout()
-        
+
         self.min_val_label = QtWidgets.QLabel("N/A")
         self.max_val_label = QtWidgets.QLabel("N/A")
         self.mean_val_label = QtWidgets.QLabel("N/A")
         self.std_val_label = QtWidgets.QLabel("N/A")
-        
+
         stats_layout.addRow("Min:", self.min_val_label)
         stats_layout.addRow("Max:", self.max_val_label)
         stats_layout.addRow("Mean:", self.mean_val_label)
         stats_layout.addRow("Std Dev:", self.std_val_label)
-        
+
         stats_group.setLayout(stats_layout)
         control_layout.addWidget(stats_group)
-        
+
+        # Stat labels for the tools live in the LEFT panel (they can get
+        # multi-line long — "Length: 234 px | 179.3 µm | ΔX: … ΔY: …") so
+        # they don't crowd the top bar. Grouped under an "Analysis"
+        # box below Image Statistics.
+        analysis_group = QtWidgets.QGroupBox("Analysis")
+        analysis_layout = QtWidgets.QVBoxLayout()
+        self.lbl_line_info = QtWidgets.QLabel("No line")
+        self.lbl_line_info.setStyleSheet("font-size: 9px; color: #ccc;")
+        self.lbl_line_info.setWordWrap(True)
+        analysis_layout.addWidget(self.lbl_line_info)
+        self.lbl_roi_info = QtWidgets.QLabel("No ROI")
+        self.lbl_roi_info.setStyleSheet("font-size: 9px; color: #ccc;")
+        self.lbl_roi_info.setWordWrap(True)
+        analysis_layout.addWidget(self.lbl_roi_info)
+        self.lbl_ellipse_info = QtWidgets.QLabel("No ellipse ROI")
+        self.lbl_ellipse_info.setStyleSheet("font-size: 9px; color: #ccc;")
+        self.lbl_ellipse_info.setWordWrap(True)
+        analysis_layout.addWidget(self.lbl_ellipse_info)
+        analysis_group.setLayout(analysis_layout)
+        control_layout.addWidget(analysis_group)
+
+        # ── TOP BAR: Tools ▾  Filter ▾  Export ▾  (dropdown menus) ────
+        # Three compact dropdowns. Same shape as the beamline toolbar.
+        # Actions inside each menu do the same thing the removed
+        # checkboxes/buttons used to do — no behavior change.
+
+        self._top_bar_layout.addWidget(self._build_tools_menu_button())
+        self._top_bar_layout.addWidget(self._build_filter_menu_button())
+        self._top_bar_layout.addWidget(self._build_export_menu_button())
+        self._top_bar_layout.addStretch(1)
+
         control_layout.addStretch()
-        
+
         layout.addWidget(left_panel)
         
         # Right panel - Image display
@@ -615,27 +737,56 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
         right_layout.addWidget(self.image_view)
-        
+
         layout.addWidget(right_panel)
         layout.setStretch(1, 1)
+
+        # ── Attach tool managers now that image_view exists ─────────
+        # Same manager classes as the live viewer — coord-anchored to the
+        # ImageItem, orphan-safe, decimation-aware (display_bin=1 here).
+        self.scalebar_manager = ScaleBarManager(
+            self.image_view, logger=None, pixel_size=1.0, unit="µm")
+        self.line_manager = LineProfileManager(
+            self.image_view, self.lbl_line_info, logger=None)
+        self.line_manager.set_scalebar_manager(self.scalebar_manager)
+        self.roi_manager = ROIManager(
+            self.image_view, self.lbl_roi_info, logger=None)
+        self.ellipse_manager = EllipseROIManager(
+            self.image_view, self.lbl_ellipse_info, logger=None)
+
+        # Wire the checkable menu actions into the four managers.
+        # Managers' toggle() expects a Qt.CheckState value, not a bool,
+        # so we translate. QAction.toggled(bool) fires only on the
+        # user-driven check/uncheck.
+        def _toggle(mgr):
+            def _cb(checked):
+                mgr.toggle(QtCore.Qt.Checked if checked
+                           else QtCore.Qt.Unchecked)
+            return _cb
+        self.act_line.toggled.connect(_toggle(self.line_manager))
+        self.act_roi.toggled.connect(_toggle(self.roi_manager))
+        self.act_ellipse.toggled.connect(_toggle(self.ellipse_manager))
+        self.act_scalebar.toggled.connect(_toggle(self.scalebar_manager))
     
     def _load_file(self):
-        """Open file dialog and load HDF5 file"""
-        import os
-
-        # Use last directory or home directory as starting point
+        """Open a file dialog and route the chosen path through
+        `_load_specific_file`. Drag-and-drop uses the same load method."""
         start_dir = self.last_directory if self.last_directory else os.path.expanduser("~")
-
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open HDF5 File", start_dir, "HDF5 Files (*.h5 *.hdf5);;All Files (*)"
+            self, "Open HDF5 File", start_dir,
+            "HDF5 Files (*.h5 *.hdf5);;All Files (*)"
         )
-
         if not filename:
             return
+        self._load_specific_file(filename)
 
-        # Remember the directory for next time
+    def _load_specific_file(self, filename: str):
+        """Open `filename` as an HDF5 file and populate the viewer.
+        Shared by the file dialog, drag-and-drop, and any future
+        programmatic caller."""
+        if not filename:
+            return
         self.last_directory = os.path.dirname(filename)
-
         try:
             if self.hdf5_file is not None:
                 self.hdf5_file.close()
@@ -646,8 +797,9 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
                 self.data_dataset = self.hdf5_file['exchange/data']
                 self.data_white_dataset = self.hdf5_file['exchange/data_white']
 
-                self.file_path_label.setText(filename.split('/')[-1])
+                self.file_path_label.setText(os.path.basename(filename))
                 self.file_path_label.setStyleSheet("color: white;")
+                self.file_path_label.setToolTip(filename)
 
                 self.data_shape_label.setText(str(self.data_dataset.shape))
                 self.white_shape_label.setText(str(self.data_white_dataset.shape))
@@ -661,7 +813,7 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
                 self._load_and_display_image(0)
 
                 self.metadata_viewer.load_metadata(self.hdf5_file)
-                
+
             else:
                 QtWidgets.QMessageBox.warning(
                     self, "Invalid File Structure",
@@ -671,7 +823,7 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
                 )
                 self.hdf5_file.close()
                 self.hdf5_file = None
-                
+
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to load file:\n{str(e)}"
@@ -679,9 +831,50 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             if self.hdf5_file is not None:
                 self.hdf5_file.close()
                 self.hdf5_file = None
+
+    # ── Drag-and-drop ────────────────────────────────────────────────
+    @staticmethod
+    def _urls_to_hdf5_paths(mime):
+        """Return the list of local .h5 / .hdf5 paths inside a mime object.
+        Ignores non-file URLs and other extensions."""
+        paths = []
+        if not mime.hasUrls():
+            return paths
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            p = url.toLocalFile()
+            if p.lower().endswith((".h5", ".hdf5")):
+                paths.append(p)
+        return paths
+
+    def dragEnterEvent(self, event):
+        if self._urls_to_hdf5_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        # Needed on some platforms to keep the drag cursor showing "accept".
+        if self._urls_to_hdf5_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = self._urls_to_hdf5_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        # If several files dropped, take the first — mirrors most viewer
+        # conventions (Preview.app, Fiji, etc.).
+        self._load_specific_file(paths[0])
     
     def _load_and_display_image(self, index):
-        """Load and display image at given index"""
+        """Load and display image at given index. When `self.avg_n > 0`
+        loads the ±N-frame window and averages along axis 0 before the
+        data/white division."""
         if self.data_dataset is None:
             return
 
@@ -689,20 +882,44 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             self.current_index = index
             self.index_label.setText(str(index))
 
-            self.current_data = np.array(self.data_dataset[index])
+            n_frames_total = self.data_dataset.shape[0]
+            n_whites_total = self.data_white_dataset.shape[0]
 
-            white_index = min(index, self.data_white_dataset.shape[0] - 1)
-            self.current_white = np.array(self.data_white_dataset[white_index])
+            if self.avg_n > 0:
+                lo = max(0, index - self.avg_n)
+                hi = min(n_frames_total, index + self.avg_n + 1)
+                # h5py sliced read — only pulls the frames we need.
+                self.current_data = np.array(
+                    self.data_dataset[lo:hi], dtype=np.float32
+                ).mean(axis=0)
+                # White average: use the matching slab if available
+                # (per-projection whites), otherwise the single white
+                # closest to `index`.
+                if n_whites_total > 1:
+                    wlo = max(0, min(lo, n_whites_total - 1))
+                    whi = max(wlo + 1, min(hi, n_whites_total))
+                    self.current_white = np.array(
+                        self.data_white_dataset[wlo:whi], dtype=np.float32
+                    ).mean(axis=0)
+                else:
+                    self.current_white = np.array(
+                        self.data_white_dataset[0], dtype=np.float32)
+            else:
+                self.current_data = np.array(self.data_dataset[index])
+                white_index = min(index, n_whites_total - 1)
+                self.current_white = np.array(
+                    self.data_white_dataset[white_index])
 
             self._update_display()
-            
+
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to load image:\n{str(e)}"
             )
     
     def _update_display(self):
-        """Update the image display with current shift and normalization settings"""
+        """Update the image display with current shift, normalization,
+        and display-only filter settings."""
         if self.current_data is None:
             return
 
@@ -717,27 +934,54 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             else:
                 self.result_image = self.current_data.copy()
 
+            # Display-only filter (never touches the on-disk data).
+            self.result_image = self._apply_filter(self.result_image)
+
             self._update_statistics()
 
             self._apply_contrast_settings()
-            
+
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to update display:\n{str(e)}"
             )
+
+    def _apply_filter(self, img):
+        """Apply the currently-selected filter to `img`. Display-only:
+        the returned array replaces `self.result_image` in the display
+        pipeline; the raw dataset is never modified."""
+        if not _HAS_SCIPY or self.filter_kind == "None":
+            return img
+        try:
+            if self.filter_kind == "Median":
+                k = max(1, int(round(self.filter_param)))
+                if k % 2 == 0:
+                    k += 1  # scipy wants an odd kernel
+                return _sp_ndimage.median_filter(img, size=k)
+            if self.filter_kind == "Gaussian":
+                sigma = max(0.0, float(self.filter_param))
+                if sigma == 0.0:
+                    return img
+                return _sp_ndimage.gaussian_filter(img, sigma=sigma)
+            if self.filter_kind == "Threshold (>)":
+                return (img > float(self.filter_param)).astype(np.float32)
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.warning("Filter %s failed: %s", self.filter_kind, e)
+        return img
     
     def _apply_contrast_settings(self):
         """Apply contrast/level settings to the image"""
         if self.result_image is None:
             return
-        
+
         mode_index = self.auto_level_combo.currentIndex()
-        
+
         if mode_index == 0:  # Per Image (default)
             self.image_view.setImage(self.result_image, autoLevels=True, autoRange=False)
         elif mode_index == 1:  # Min/Max
             vmin, vmax = np.min(self.result_image), np.max(self.result_image)
-            self.image_view.setImage(self.result_image, autoLevels=False, autoRange=False, 
+            self.image_view.setImage(self.result_image, autoLevels=False, autoRange=False,
                                     levels=(vmin, vmax))
         elif mode_index == 2:  # Percentile 1-99%
             vmin, vmax = np.percentile(self.result_image, [1, 99])
@@ -756,6 +1000,21 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             vmax = self.max_spin.value()
             self.image_view.setImage(self.result_image, autoLevels=False, autoRange=False,
                                     levels=(vmin, vmax))
+
+        # Fan the fresh displayed image out to the tool managers so ROI
+        # stats, line profile, and scale bar all refresh whenever the
+        # slice / filter / contrast changes.
+        for mgr in (self.line_manager, self.roi_manager, self.ellipse_manager):
+            if mgr is not None:
+                try:
+                    mgr.update_stats(self.result_image)
+                except Exception:
+                    pass
+        if self.scalebar_manager is not None:
+            try:
+                self.scalebar_manager.update_image(self.result_image)
+            except Exception:
+                pass
     
     def _update_statistics(self):
         """Update image statistics labels"""
@@ -819,10 +1078,213 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
         """Handle manual level spinbox changes"""
         if self.auto_level_combo.currentIndex() == 5:  # Only if in manual mode
             self._update_display()
-    
+
     def _auto_adjust_contrast(self):
         """Auto-adjust contrast based on current mode"""
         self._update_display()
+
+    # ── Top-bar dropdown builders ────────────────────────────────────
+    def _build_tools_menu_button(self) -> QtWidgets.QToolButton:
+        """Tools ▾ — checkable actions for each tool plus reset /
+        profile / settings actions. Same behavior as the removed
+        checkboxes and buttons."""
+        menu = QtWidgets.QMenu(self)
+
+        self.act_line = menu.addAction("Line")
+        self.act_line.setCheckable(True)
+        self.act_roi = menu.addAction("Rect ROI")
+        self.act_roi.setCheckable(True)
+        self.act_ellipse = menu.addAction("Ellipse ROI")
+        self.act_ellipse.setCheckable(True)
+        self.act_scalebar = menu.addAction("Scale bar")
+        self.act_scalebar.setCheckable(True)
+
+        menu.addSeparator()
+
+        act_line_profile = menu.addAction("Line: open profile plot…")
+        act_line_profile.triggered.connect(
+            lambda: self.line_manager.show_profile_dialog()
+            if self.line_manager else None)
+        act_line_reset = menu.addAction("Line: reset")
+        act_line_reset.triggered.connect(
+            lambda: self.line_manager.reset() if self.line_manager else None)
+        act_roi_reset = menu.addAction("Rect ROI: reset")
+        act_roi_reset.triggered.connect(
+            lambda: self.roi_manager.reset() if self.roi_manager else None)
+        act_ell_reset = menu.addAction("Ellipse ROI: reset")
+        act_ell_reset.triggered.connect(
+            lambda: self.ellipse_manager.reset() if self.ellipse_manager else None)
+
+        menu.addSeparator()
+        act_sb_settings = menu.addAction("Scale bar: settings…")
+        act_sb_settings.triggered.connect(self._open_scalebar_settings)
+
+        btn = QtWidgets.QToolButton(self)
+        btn.setText("Tools  ▾")
+        btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        btn.setMenu(menu)
+        btn.setToolTip(
+            "Line, ROI, and scale-bar tools.\n"
+            "Check to enable, uncheck to remove.")
+        return btn
+
+    def _build_filter_menu_button(self) -> QtWidgets.QToolButton:
+        """Filter ▾ — radio-check kind + inline spinbox for the param."""
+        menu = QtWidgets.QMenu(self)
+
+        # Kind selection as an exclusive group of checkable actions.
+        self.filter_action_group = QtWidgets.QActionGroup(menu)
+        self.filter_action_group.setExclusive(True)
+        self.filter_actions: dict = {}
+        for kind in ("None", "Median", "Gaussian", "Threshold (>)"):
+            act = menu.addAction(kind)
+            act.setCheckable(True)
+            act.setActionGroup(self.filter_action_group)
+            if kind == "None":
+                act.setChecked(True)
+            act.triggered.connect(
+                lambda _checked, k=kind: self._on_filter_kind_changed(k))
+            self.filter_actions[kind] = act
+
+        menu.addSeparator()
+
+        # Param spinbox lives inside the menu as a QWidgetAction.
+        param_widget = QtWidgets.QWidget()
+        pl = QtWidgets.QHBoxLayout(param_widget)
+        pl.setContentsMargins(8, 4, 8, 4)
+        pl.addWidget(QtWidgets.QLabel("Param:"))
+        self.filter_param_spin = QtWidgets.QDoubleSpinBox()
+        self.filter_param_spin.setRange(0.0, 1e6)
+        self.filter_param_spin.setDecimals(3)
+        self.filter_param_spin.setValue(3.0)
+        self.filter_param_spin.setSingleStep(0.5)
+        self.filter_param_spin.setToolTip(
+            "Median: kernel (odd int, rounded)\n"
+            "Gaussian: σ pixels\n"
+            "Threshold: cutoff value")
+        self.filter_param_spin.valueChanged.connect(self._on_filter_param_changed)
+        pl.addWidget(self.filter_param_spin)
+        wa = QtWidgets.QWidgetAction(menu)
+        wa.setDefaultWidget(param_widget)
+        menu.addAction(wa)
+
+        if not _HAS_SCIPY:
+            for act in self.filter_actions.values():
+                if act.text() != "None":
+                    act.setEnabled(False)
+            self.filter_param_spin.setEnabled(False)
+            menu.addSeparator()
+            note = menu.addAction("scipy not installed — filters disabled")
+            note.setEnabled(False)
+
+        btn = QtWidgets.QToolButton(self)
+        btn.setText("Filter  ▾")
+        btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        btn.setMenu(menu)
+        btn.setToolTip(
+            "Display-only filter applied to the current slice "
+            "(does not modify the file).")
+        return btn
+
+    def _build_export_menu_button(self) -> QtWidgets.QToolButton:
+        """Export ▾ — one action per format, each pops a save dialog
+        pre-filtered to that extension."""
+        menu = QtWidgets.QMenu(self)
+        act_png = menu.addAction("Save as PNG… (rendered view)")
+        act_png.triggered.connect(lambda: self._on_save(preferred="png"))
+        act_tif = menu.addAction("Save as TIFF… (float32 raw)")
+        act_tif.triggered.connect(lambda: self._on_save(preferred="tiff"))
+        act_npy = menu.addAction("Save as NPY… (numpy array)")
+        act_npy.triggered.connect(lambda: self._on_save(preferred="npy"))
+        btn = QtWidgets.QToolButton(self)
+        btn.setText("Export  ▾")
+        btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        btn.setMenu(menu)
+        btn.setToolTip(
+            "Save the current view — PNG mirrors what you see "
+            "(with overlays), TIFF/NPY save the raw float32.")
+        return btn
+
+    # ── Averaging + filter handlers ──────────────────────────────────
+    def _on_avg_n_changed(self, value):
+        self.avg_n = max(0, int(value))
+        # Re-read the current index with the new window size.
+        self._load_and_display_image(self.current_index)
+
+    def _on_filter_kind_changed(self, text):
+        self.filter_kind = text
+        # Nudge the param default to something sensible per kind.
+        if text == "Median" and self.filter_param_spin.value() < 3:
+            self.filter_param_spin.setValue(3.0)
+        elif text == "Gaussian" and self.filter_param_spin.value() > 20:
+            self.filter_param_spin.setValue(2.0)
+        self._update_display()
+
+    def _on_filter_param_changed(self, value):
+        self.filter_param = float(value)
+        if self.filter_kind != "None":
+            self._update_display()
+
+    # ── Scale bar settings dialog ────────────────────────────────────
+    def _open_scalebar_settings(self):
+        if self.scalebar_manager is None:
+            return
+        if self.scalebar_dialog is None:
+            self.scalebar_dialog = ScaleBarDialog(self.scalebar_manager, parent=self)
+        self.scalebar_dialog.show()
+        self.scalebar_dialog.raise_()
+        self.scalebar_dialog.activateWindow()
+
+    # ── Save / export ────────────────────────────────────────────────
+    def _on_save(self, preferred: str = "png"):
+        """Save the current displayed image. `preferred` is one of
+        'png' / 'tiff' / 'npy' and only controls which filter appears
+        first in the dialog — the user can still pick another."""
+        if self.result_image is None:
+            QtWidgets.QMessageBox.information(
+                self, "Save", "Load a file first — nothing to save.")
+            return
+        start_dir = self.last_directory if self.last_directory else os.path.expanduser("~")
+
+        png_f = "PNG (*.png)"
+        tif_f = "TIFF (*.tif *.tiff)"
+        npy_f = "Numpy (*.npy)"
+        order = {"png": [png_f, tif_f, npy_f],
+                 "tiff": [tif_f, png_f, npy_f],
+                 "npy": [npy_f, png_f, tif_f]}.get(preferred, [png_f, tif_f, npy_f])
+        filters = ";;".join(order)
+
+        filename, chosen = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save current view", start_dir, filters)
+        if not filename:
+            return
+        try:
+            lower = filename.lower()
+            if lower.endswith(".png") or "PNG" in chosen:
+                # Render the visible ImageView — includes tool overlays.
+                from pyqtgraph.exporters import ImageExporter
+                exporter = ImageExporter(self.image_view.getImageItem())
+                exporter.export(filename)
+            elif lower.endswith((".tif", ".tiff")) or "TIFF" in chosen:
+                arr = self.result_image.astype(np.float32)
+                if _TIFF_BACKEND == "tifffile":
+                    _tifffile.imwrite(filename, arr)
+                elif _TIFF_BACKEND == "imageio":
+                    _imageio.imwrite(filename, arr)
+                else:
+                    raise RuntimeError(
+                        "TIFF export needs `tifffile` or `imageio` — "
+                        "neither is installed.")
+            elif lower.endswith(".npy") or "Numpy" in chosen:
+                np.save(filename, self.result_image.astype(np.float32))
+            else:
+                # No recognized extension → default to PNG.
+                from pyqtgraph.exporters import ImageExporter
+                exporter = ImageExporter(self.image_view.getImageItem())
+                exporter.export(filename + ".png")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Save failed", f"Could not save:\n{e}")
     
     def _reset_shift(self):
         """Reset shift to zero"""
@@ -872,6 +1334,15 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     
     def closeEvent(self, event):
         """Clean up when closing"""
+        # Tear down tool managers first (drops their scene items + any
+        # popup dialogs like the line-profile plot).
+        for mgr in (self.line_manager, self.roi_manager,
+                    self.ellipse_manager, self.scalebar_manager):
+            if mgr is not None:
+                try:
+                    mgr.cleanup()
+                except Exception:
+                    pass
         try:
             if self.hdf5_file is not None:
                 self.hdf5_file.close()
