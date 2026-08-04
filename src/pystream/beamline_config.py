@@ -5,7 +5,7 @@ This file allows users to configure which beamline plugins to load.
 Set ACTIVE_BEAMLINE to your beamline name, or None to disable beamline plugins.
 
 Available beamlines:
-- 'bl32ID': Beamline 32-ID plugins (SoftBPM, Detector Control, etc.)
+- 'bl32ID': Beamline 32-ID plugins (Detector Control, XANES, etc.)
 - None: No beamline plugins loaded
 
 To add a new beamline:
@@ -20,5 +20,5 @@ ACTIVE_BEAMLINE = 'bl32ID'
 
 # Optional: Customize which plugins to load from the active beamline
 # If None, all available plugins will be loaded
-# Example: ENABLED_PLUGINS = ['SoftBPMDialog', 'DetectorControlDialog']
+# Example: ENABLED_PLUGINS = ['DetectorControlDialog', 'XANESGuiDialog']
 ENABLED_PLUGINS = None

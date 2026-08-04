@@ -17,6 +17,7 @@ class OpticsCalcDialog(QtWidgets.QDialog):
     """Simple launcher for Optics Calculator - no dialog shown."""
 
     BUTTON_TEXT = "TXM Optics"
+    GROUP       = "Calculators"
     HANDLER_TYPE = 'launcher'  # Execute immediately and close
 
     def __init__(self, parent=None, logger=None):
@@ -33,6 +34,7 @@ class OpticsCalcDialog(QtWidgets.QDialog):
         """Launch the Optics Calculator script."""
         # Try multiple possible locations
         possible_paths = [
+            "/home/beams0/AMITTONE/Software/txm_calc/optics_calc.py",
             "/home/beams/USERTXM/Software/txm_calc/optics_calc.py",
             "/home/beams0/USERTXM/Software/txm_calc/optics_calc.py",
             os.path.expanduser("~/Software/txm_calc/optics_calc.py"),

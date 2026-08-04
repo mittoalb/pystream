@@ -1,261 +1,168 @@
 # bl32ID Beamline Plugins
 
-Advanced Photon Source beamline 32-ID specialized tools for tomography and imaging.
+APS beamline 32-ID tools for TXM tomography, XANES imaging, and beam
+optimization.
 
-## Overview
-
-The bl32ID beamline package provides built-in tools and launchers for optional external GUIs:
-
-### Built-in Tools (Always Available)
-
-- **Detector Control**: Manage camera binning and ROI settings
-- **SoftBPM**: Software beam position monitor with automatic motor adjustment
-- **Mosalign**: 2D motor scanning with image stitching
-
-### Optional External Tools (Install Separately)
-
-- **XANES GUI**: Energy calibration and XANES scanning control
-- **Optics Calculator**: TXM optics parameter calculator
-
-External tools are optional packages installed separately. Click the button to launch - if not installed, you'll see installation instructions.
-
-## Detector Control
-
-Controls detector binning and region-of-interest (ROI) for the area detector camera.
-
-### Features
-
-- **Binning Control**: Set X and Y binning factors (1-16)
-- **ROI Drawing**: Interactive ROI rectangle on live image
-- **Direct PV Control**: Apply settings directly to detector PVs
-- **Real-time Feedback**: Read and display current detector settings
-
-### Controlled PVs
-
-The plugin controls the following EPICS PVs (default prefix: `32idbSP1:cam1`):
-
-| PV | Description |
-|---|---|
-| `BinX` | X-axis binning factor |
-| `BinY` | Y-axis binning factor |
-| `MinX` | ROI minimum X position (unbinned pixels) |
-| `MinY` | ROI minimum Y position (unbinned pixels) |
-| `SizeX` | ROI width (automatically updated with binning) |
-| `SizeY` | ROI height (automatically updated with binning) |
-
-### Usage
-
-1. **Open the Plugin**
-   - Click "Detectorcontrol" button in the bl32ID beamlines toolbar
-
-2. **Set Binning**
-   - Adjust BinX and BinY spinboxes (range: 1-16)
-   - Click "Apply Binning" to push values to detector
-   - Click "Read Current" to verify settings
-
-3. **Draw and Apply ROI**
-   - Click "Enable ROI Drawing" to show interactive ROI
-   - Red rectangle appears on the live image
-   - Drag corners/edges to resize
-   - Drag center to reposition
-   - Click "Apply ROI to Detector" to push coordinates to detector PVs
-
-4. **Reset ROI**
-   - Click "Reset ROI" to center ROI at 50% of image size
-
-### Notes
-
-- **Binning updates Size**: When binning changes, SizeX/SizeY automatically update to reflect the binned dimensions
-- **Unbinned coordinates**: ROI coordinates (MinX, MinY) are always in unbinned pixel units
-- **PV Prefix**: The camera PV prefix can be changed in the dialog if using a different detector
-- **Live image required**: ROI drawing requires a live image from the parent viewer
-
-### Example Workflow
-
-```
-1. Set binning to 2x2 for faster readout
-2. Enable ROI drawing
-3. Adjust ROI to region of interest (e.g., sample area)
-4. Apply ROI to detector
-5. Detector now acquires binned 2x2 images of the selected region
-```
-
-## SoftBPM (Software Beam Position Monitor)
-
-Monitors beam-normalized image intensity during data acquisition and automatically adjusts motors to maximize intensity when it drops beyond a threshold.
-
-### Features
-
-- **Event-Driven Synchronization**: Directly synchronized with viewer updates (no polling)
-- **Beam Normalization**: Normalizes image intensity by storage ring beam current
-- **Automatic Motor Adjustment**: Moves motors to restore beam intensity
-- **Threshold Detection**: Configurable drop threshold for triggering adjustments
-- **Empty Frame Filtering**: Skips images below 70% of reference (empty first frames)
-- **Test Mode**: Monitor without moving motors (safe observation)
-- **Real-time Plotting**: Live intensity plot over time
-- **HDF5 Trigger**: Only monitors when HDF5 location is `/exchange/data_white`
-
-### Default PVs
-
-| PV | Description |
-|---|---|
-| `32id:TomoScan:HDF5Location` | Trigger PV (monitors when `/exchange/data_white`) |
-| `32idbSP1:Pva1:Image` | Camera image PV (PVAccess NTNDArray) |
-| `S:SRcurrentAI` | Storage ring beam current (mA) |
-| `32idb:m1` | Motor 1 for beam adjustment |
-| `32idb:m2` | Motor 2 for beam adjustment |
-
-### Settings
-
-| Parameter | Default | Description |
-|---|---|---|
-| Threshold (%) | 10.0% | Intensity drop threshold to trigger adjustment |
-| Test Mode | Off | If enabled, monitors without moving motors |
-| Poll Interval | 1.0 s | Not used - kept for UI compatibility (event-driven) |
-| Motor 1 Step | 0.1 | Step size for motor 1 |
-| Motor 2 Step | 0.1 | Step size for motor 2 |
-
-### Usage
-
-1. **Configure Settings**
-   - Set threshold percentage (typically 5-15%)
-   - Configure motor step sizes
-   - Enable Test Mode for initial observation
-
-2. **Start Monitoring**
-   - Click "Start Monitoring"
-   - Plugin waits for HDF5 location to be `/exchange/data_white`
-   - Once triggered, establishes reference intensity
-
-3. **Automatic Operation**
-   - Processes each new image as viewer updates (event-driven)
-   - Skips empty images (< 70% of reference)
-   - If intensity drops > threshold, adjusts motors
-   - Updates reference intensity after adjustment
-
-4. **Stop/Reset**
-   - "Stop Monitoring" to pause
-   - "Reset Reference" to re-establish baseline
-
-### How It Works
-
-```
-1. Connect to viewer's image_ready signal (event-driven)
-2. On each new image from viewer:
-   a. Check HDF5Location PV
-   b. If location == "/exchange/data_white":
-      - Calculate mean intensity from image
-      - Normalize by beam current (I_norm = I_raw / I_beam)
-      - If no reference, establish reference
-      - Calculate change: Δ = (I_norm - I_ref) / I_ref × 100%
-      - If Δ < -70%: skip (empty frame)
-      - If Δ < -threshold: move motors to restore intensity
-      - Update plot
-```
-
-### Motor Adjustment Algorithm
-
-When intensity drops beyond threshold:
-1. Calculate direction: `dir = -1` (move to restore)
-2. Move motor 1 by `motor1_step × dir`
-3. Move motor 2 by `motor2_step × dir`
-4. Update reference intensity
-5. Log adjustment
-
-The algorithm performs simple gradient ascent to find the intensity maximum.
-
-### Notes
-
-- **Event-driven architecture**: No polling - directly synchronized with viewer's image updates
-- **Real-time response**: Processes each frame as viewer displays it
-- **Beam current normalization**: Accounts for storage ring current variations
-- **Empty frame filtering**: Automatically skips first/empty frames in acquisition sequences
-- **Test mode recommended**: Always test with motors disabled before enabling automatic adjustment
-
-### Example Workflow
-
-```
-1. Set threshold to 10%
-2. Enable Test Mode
-3. Start acquisition with /exchange/data_white
-4. Observe intensity plot and log messages
-5. Verify intensity is stable
-6. Disable Test Mode for automatic motor adjustment
-7. Monitor continues and adjusts motors as needed
-```
-
-## Mosalign
-
-2D motor scanning with image stitching and tomoscan integration. See [Mosalign Documentation](../plugins/mosalign.md) for complete details.
-
-## Installation Notes
-
-All bl32ID plugins are automatically discovered and loaded by PyStream. No additional installation or configuration is required beyond installing PyStream itself.
-
-## Requirements
-
-- PyQt5
-- pyqtgraph
-- pvaccess (for PVAccess image data)
-- numpy
-- EPICS environment properly configured
-
-## Troubleshooting
+## Plugins
 
 ### Detector Control
 
-**ROI not appearing:**
-- Ensure a live image is displayed in the viewer
-- Check that "Enable ROI Drawing" is toggled on
-- Verify parent viewer has `image_view` attribute
-
-**PV connection fails:**
-- Verify camera PV prefix is correct
-- Test with `caget 32idbSP1:cam1:BinX`
-- Check EPICS environment variables
+Sets camera binning and applies a crop ROI drawn on the live image. Use
+*Enable ROI Drawing* to draw, then *Apply ROI to Detector*.
 
 ### SoftBPM
 
-**No data updating:**
-- Verify viewer is receiving and displaying images
-- Check HDF5Location PV is set to `/exchange/data_white`
-- Verify beam current PV is readable
-- Check log for connection errors
+Watches beam-normalized image intensity and, when it drops past a
+threshold, nudges two motors to recover it. Run with *Test Mode* on first
+to verify before enabling motor moves.
 
-**Empty frames triggering adjustment:**
-- Plugin automatically skips frames < 70% of reference
-- Adjust threshold if needed
+### QGMax
 
-**Motors not moving:**
-- Check Test Mode is disabled
-- Verify motor PVs are correct and writable
-- Check motor permissions in EPICS
+Optimizes two motors to maximize image mean using coarse-then-fine
+gradient steps. Can run once or run automatically inside a TomoScan.
 
-### General
+**Automated Mode** watches the TomoScan `HDF5Location` PV and, on every
+new `/exchange/data` event (i.e., every new energy point in a 3D XANES
+scan):
 
-**Plugin not appearing in toolbar:**
-- Check bl32ID directory exists in `src/pystream/beamlines/`
-- Verify `__init__.py` properly exports dialog classes
-- Check PyStream log for import errors
+- Runs a fast **online bright-spot check** without pausing tomoscan.
+  After a 1.5 s settle it grabs one frame, computes the center/outer
+  ratio, and if a bright spot is detected nudges **motor 1 by one fine
+  step**. The step direction is picked from the spot's Y position
+  (upper half of image → +1, lower → -1, scaled by the internal
+  `bright_spot_direction_sign` if the wiring is inverted).
+- On every N-th event (configurable), instead runs a **full
+  motor 1 + motor 2 optimization** — this pauses tomoscan via
+  `TomoScan:Pause`, sweeps both motors to maximise the mean, ends with
+  the same bright-spot correction, and resumes tomoscan.
 
-**EPICS connectivity:**
-- Set EPICS environment: `EPICS_CA_ADDR_LIST`, `EPICS_CA_AUTO_ADDR_LIST`
-- Test PV access: `caget <PV_NAME>`
-- Check IOC status and network connectivity
+Auto-mode can be toggled from the QGMax dialog directly, or driven from
+the XANES GUIs — see the *XANES GUI* and *XANES 2D GUI* sections below.
+Requests from the XANES GUIs use a small JSON file at
+`~/.pystream/qgmax_request.json`; QGMax's background watcher (started
+automatically on pystream launch) picks them up whether or not the QGMax
+dialog is open.
 
-## Development
+### AutoCenter
 
-To modify or extend bl32ID plugins:
+Detects a pinhole, condenser, or zone plate in the live image and moves
+X/Y motors to bring it to the target. *Detect* shows the overlay,
+*Center* moves once, *Auto Center* iterates until within tolerance.
 
-1. Navigate to `src/pystream/beamlines/bl32ID/`
-2. Edit the plugin file (e.g., `detectorcontrol.py`)
-3. Update `__init__.py` if adding new dialog classes
-4. Restart PyStream to load changes
+### AutoROT
 
-For hot-reloading during development, consider using Python's `importlib.reload()`.
+Estimates the vertical rotation axis from variance across a buffer of
+recent images and overlays it on the viewer.
 
-## See Also
+### TXM Optics
 
-- [Beamlines Plugin System](index.md) - Overview of the beamlines architecture
-- [Mosalign Documentation](../plugins/mosalign.md) - Detailed mosalign guide
-- [PyStream API](../api.md) - Core PyStream API reference
+Launches the external TXM Optics Calculator. *Set Pixel Size PV* writes
+the calculator's effective pixel size to `32id:TXMOptics:ImagePixelSize`.
+
+### Mosalign
+
+2D motor scan with image stitching and tomoscan integration. See
+[Mosalign](../plugins/mosalign.md).
+
+### DataMap
+
+Runs a 2D projection (sample + flat) or a Tomoscan at every row of a
+user-defined motor positions table.
+
+- *Add Motor Column* on the Positions tab adds a motor; fill its PV on
+  the **Motor PVs** tab.
+- *Add Row* adds a blank point; *Capture Live Values → New Row*
+  snapshots current motor RBVs.
+- Pick **2D Projection** or **Tomoscan** under *Mode* — applies to every
+  row. Expand the matching section to edit its parameters.
+- *Run Selected Row* runs one point; *Run All* runs them in order.
+
+### TXMBot (AI)
+
+LLM chat assistant with read-only beamline introspection and gated
+IOC-recovery actions. See [TXMBot](txmbot.md).
+
+### XANES GUI
+
+Launcher for the external 3D XANES energy-calibration and scanning GUI
+(`xanes_gui.gui`). The 3D XANES scan is executed by an external
+`xanes_energy.py` process that hands the energy list to `tomoscan
+energy`.
+
+The scan tab has a **QGMax optimization** box with *Run every N
+tomoscans (0 = off)*. Setting N ≥ 1 writes to
+`~/.pystream/qgmax_request.json` on Start to enable QGMax's Automated
+Mode with that N, and to disable it on Finish / Error / Stop. All other
+QGMax knobs (motor PVs, step sizes, thresholds, TomoScan pause PV) stay
+in the QGMax dialog.
+
+### XANES 2D GUI
+
+Launcher for the external 2D XANES GUI (`xanes_gui.gui_2d`) — the
+Python-driven loop that steps energies, moves ZP, and acquires
+sample/flat frames per energy. The energy loop runs in Python here (not
+in tomoscan), so QGMax is called inline between energies using the same
+`qgmax_request.json` protocol.
+
+**Fast-shutter behavior**: the shutter is opened at the top of each scan
+series (`_run_one_scan`) and closed in the `finally` at the end of the
+series. Between series, the wait is a *gap* (`interval_s` measured
+end-of-scan to start-of-next-scan), and the shutter stays closed during
+that wait.
+
+### XANES 2D Viewer
+
+Standalone Qt viewer for the HDF5 master files produced by the XANES 2D
+GUI. Launches `xanes_gui/viewer_2d.py` in a subprocess.
+
+- **Image Viewer tab**: slider + spinbox over N frames, live
+  `E = <eV>` label, on-the-fly `data / data_flat` division, six
+  contrast presets, integer X/Y flat shift (arrow keys), image
+  statistics.
+- **Normalization**: default uses the flats stored in the file. Switch
+  to *Use flats from external file* to normalize against another
+  master's `/exchange/data_flat` (matched by index; shape-checked
+  on load).
+- **Metadata tab**: filterable attribute table + full HDF5 tree.
+
+### X-ray Tools
+
+Reference calculator ported from the xraytr web app (originally a Dash
+app on port 8009). Two tabs:
+
+- **Transmissivity & Refractive Index**: enter a formula (e.g. `SiO2`,
+  `Fe`, `Lu3Al5O12`), an optional density, thickness in mm, and an
+  energy range as `start:stop:step` in keV. Uses `xraylib` to compute
+  transmission `T(E)` and refractive-index components `δ, β(E)`. Density
+  is auto-resolved: user input → `xraylib` elemental density → PubChem
+  (asynchronous, off the UI thread) → local cache
+  (`~/.pystream/xray_densities.csv`) → fallback 1.0 g/cm³. Left-click
+  either plot to snap a marker to the nearest data point and read the
+  value in the readout label above the plots.
+- **X-ray Absorption Edges**: filterable/sortable table of K/L1/L2/L3
+  edges for Z = 1–103, with search and energy-range filters.
+
+`xraylib` is required for the transmissivity tab. If it isn't installed
+in the pystream env, the tab shows a red banner and disables *Compute*;
+the edges tab still works. To install:
+
+```bash
+conda install -n pystream -c conda-forge xraylib
+```
+
+## Settings
+
+Plugin state is saved to `~/.pystream/bl32ID_settings.json` on close and
+restored on next open. The directory `~/.pystream/` also holds the
+QGMax request/response files and the X-ray Tools density cache.
+
+## Adding a new plugin
+
+1. Create `my_plugin.py` in `src/pystream/beamlines/bl32ID/`.
+2. Define a `QDialog` subclass with `BUTTON_TEXT = "..."` and
+   `HANDLER_TYPE = 'singleton'` (or `'launcher'` for a fire-and-close
+   external-process launcher).
+3. For persistence: `from .plugin_settings import load_settings, save_settings`.
+4. Import and add the class to `__all__` in
+   `src/pystream/beamlines/bl32ID/__init__.py`.
+5. Restart PyStream.

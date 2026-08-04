@@ -17,6 +17,7 @@ class XANESGuiDialog(QtWidgets.QDialog):
     """Launcher for XANES GUI - no dialog shown."""
 
     BUTTON_TEXT = "XANES"
+    GROUP       = "Scans"
     HANDLER_TYPE = 'launcher'  # Execute immediately and close
 
     def __init__(self, parent=None, logger=None):

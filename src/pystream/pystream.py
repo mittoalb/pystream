@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-NTNDArray Real-time Viewer (PyQt5/PyQtGraph)
+pystream
 ---------------------------------------------------------------------
 
 Usage:
@@ -66,65 +66,113 @@ except Exception:
     _HAS_ADU = False
 
 
-# Background TIFF writer thread for recording
-class TiffWriterThread(threading.Thread):
-    """Background thread that writes TIFF frames from a queue to disk."""
+# High-throughput parallel TIFF recorder
+class _RecordingPool:
+    """
+    N worker threads all pull from the same bounded queue and write TIFF files
+    in parallel.  No compression by default — this is the single biggest
+    throughput win (DEFLATE caps at ~200 MB/s; raw I/O can reach GB/s on NVMe).
 
-    def __init__(self, output_dir: str, frame_queue: queue.Queue, prefix: str = "frame"):
-        super().__init__(daemon=True)
+    Usage:
+        pool = _RecordingPool(out_dir, prefix="frame", n_workers=4, compress=False)
+        pool.start()
+        pool.put(idx, frame_array)   # non-blocking, drops frame if queue full
+        pool.stop()                  # send poison pill
+        pool.wait()                  # block until all workers finish
+    """
+
+    def __init__(self, output_dir: str, prefix: str = "frame",
+                 n_workers: int = 4, max_queue: int = 512, compress: bool = False):
         self.output_dir = output_dir
-        self.frame_queue = frame_queue
-        self.prefix = prefix
-        self.running = True
-        self.frames_written = 0
+        self.prefix     = prefix
+        self.compress   = compress
+        self._q         = queue.Queue(maxsize=max_queue)
+        self._n_written = 0
+        self._n_dropped = 0
+        self._lock      = threading.Lock()
+        self._workers   = [
+            threading.Thread(target=self._worker, daemon=True, name=f"rec-w{i}")
+            for i in range(max(1, n_workers))
+        ]
 
-    def run(self):
-        """Process frames from queue and write to disk."""
-        from PIL import Image
+    def start(self):
+        for w in self._workers:
+            w.start()
 
-        while self.running or not self.frame_queue.empty():
+    def put(self, idx: int, frame: np.ndarray) -> bool:
+        """Non-blocking enqueue.  Returns False (frame dropped) if queue full."""
+        try:
+            self._q.put_nowait((idx, frame))
+            return True
+        except queue.Full:
+            with self._lock:
+                self._n_dropped += 1
+            return False
+
+    def _worker(self):
+        while True:
             try:
-                # Get frame from queue with timeout
-                item = self.frame_queue.get(timeout=0.5)
-
-                if item is None:  # Poison pill to stop thread
-                    break
-
-                frame_idx, frame_data = item
-
-                # Convert to uint16 for TIFF
-                if frame_data.dtype != np.uint16:
-                    img_min = frame_data.min()
-                    img_max = frame_data.max()
-                    if img_max > img_min:
-                        normalized = (frame_data - img_min) / (img_max - img_min)
-                        frame_u16 = (normalized * 65535).astype(np.uint16)
-                    else:
-                        frame_u16 = np.zeros_like(frame_data, dtype=np.uint16)
-                else:
-                    frame_u16 = frame_data
-
-                # Save to disk
-                filename = f"{self.prefix}_{frame_idx:06d}.tiff"
-                filepath = os.path.join(self.output_dir, filename)
-
-                pil_image = Image.fromarray(frame_u16)
-                pil_image.save(filepath, compression="tiff_deflate")
-
-                self.frames_written += 1
-                self.frame_queue.task_done()
-
+                item = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
+            if item is None:                    # poison pill
+                self._q.put(None)              # propagate to sibling workers
+                break
+            idx, frame = item
+            try:
+                self._write(idx, frame)
             except Exception as e:
                 if LOGGER:
-                    LOGGER.error(f"Error writing frame: {e}")
-                    log_exception(LOGGER, e)
-                break
+                    LOGGER.error("RecordingPool write error frame %d: %s", idx, e)
+            finally:
+                self._q.task_done()
+
+    def _write(self, idx: int, frame: np.ndarray):
+        if frame.dtype != np.uint16:
+            fmin = float(frame.min())
+            fmax = float(frame.max())
+            if fmax > fmin:
+                frame = ((frame.astype(np.float32) - fmin) / (fmax - fmin) * 65535).astype(np.uint16)
+            else:
+                frame = np.zeros(frame.shape, dtype=np.uint16)
+        path = os.path.join(self.output_dir, f"{self.prefix}_{idx:06d}.tiff")
+        try:
+            import tifffile
+            tifffile.imwrite(path, frame, compression="deflate" if self.compress else None)
+        except ImportError:
+            from PIL import Image
+            pil = Image.fromarray(frame)
+            pil.save(path, compression="tiff_deflate" if self.compress else None)
+        with self._lock:
+            self._n_written += 1
 
     def stop(self):
-        """Signal thread to stop."""
-        self.running = False
+        """Send one poison pill; each worker re-queues it for its siblings."""
+        try:
+            self._q.put(None, timeout=2.0)
+        except queue.Full:
+            pass
+
+    def wait(self, timeout: float = 60.0):
+        for w in self._workers:
+            w.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return any(w.is_alive() for w in self._workers)
+
+    @property
+    def frames_written(self) -> int:
+        with self._lock:
+            return self._n_written
+
+    @property
+    def frames_dropped(self) -> int:
+        with self._lock:
+            return self._n_dropped
+
+    @property
+    def qsize(self) -> int:
+        return self._q.qsize()
 
 
 # ----------------------- Config I/O -----------------------
@@ -344,7 +392,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 auto_every: int = 10):
         super().__init__()
         
-        self.setWindowTitle("NTNDArray PyQtGraph Viewer")
+        self.setWindowTitle("pystream")
 
         screen = QtWidgets.QApplication.desktop().availableGeometry()
         self.is_small_screen = screen.width() < 1600 or screen.height() < 1000
@@ -356,6 +404,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.hist_interval = 1.0 / max(0.1, float(hist_fps))
         
         self.display_bin = int(display_bin)
+        # Effective decimation applied to the last displayed frame; set
+        # by _apply_view_ops. Consumed by the scalebar / line-length code
+        # so a µm reading stays truthful under auto-decimation.
+        self._current_display_bin = 1
         
         self.queue = queue.Queue(maxsize=1)
         self.sub = None
@@ -394,8 +446,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.recorded_frame_count = 0
         self.record_path = ""
         self.record_dir = ""
-        self.recording_queue = None
-        self.recording_thread = None
+        self.recording_pool: Optional[_RecordingPool] = None
 
         self.motor_scan_dialog = None
         self.roi_manager = None
@@ -433,6 +484,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.chk_scalebar.stateChanged.connect(self._toggle_scalebar)
 
         self.line_manager = LineProfileManager(self.image_view, self.lbl_line_info, logger=LOGGER)
+        self.line_manager.set_scalebar_manager(self.scalebar_manager)
         self.chk_line.stateChanged.connect(self.line_manager.toggle)
         if hasattr(self, 'btn_reset_line'):
             self.btn_reset_line.clicked.connect(self.line_manager.reset)
@@ -523,14 +575,45 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view = pg.ImageView()
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
-        self.image_view.view.setMouseMode(pg.ViewBox.PanMode)
-
-        # Enable mouse wheel zoom and panning
         self.image_view.view.setMouseEnabled(x=True, y=True)
+        # Custom drag: pan only when zoomed in, clamped to image bounds
+        self._img_full_range = None
+        _orig_drag = self.image_view.view.mouseDragEvent
+        def _clamped_drag(ev, orig=_orig_drag):
+            if ev.button() == QtCore.Qt.LeftButton:
+                vb = self.image_view.view
+                vr = vb.viewRange()
+                img_item = self.image_view.getImageItem()
+                if img_item is None or img_item.image is None:
+                    ev.accept()
+                    return
+                iw = img_item.width()
+                ih = img_item.height()
+                # Only allow pan if zoomed in (view range < image size)
+                if (vr[0][1] - vr[0][0]) >= iw and (vr[1][1] - vr[1][0]) >= ih:
+                    ev.accept()
+                    return
+                # Let pyqtgraph do the pan
+                orig(ev)
+                # Clamp view to image bounds
+                vr = vb.viewRange()
+                x0, x1 = vr[0]
+                y0, y1 = vr[1]
+                w = x1 - x0
+                h = y1 - y0
+                if x0 < 0:
+                    x0, x1 = 0, w
+                if x1 > iw:
+                    x0, x1 = iw - w, iw
+                if y0 < 0:
+                    y0, y1 = 0, h
+                if y1 > ih:
+                    y0, y1 = ih - h, ih
+                vb.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+            else:
+                orig(ev)
+        self.image_view.view.mouseDragEvent = _clamped_drag
 
-        # No limits - allow free panning
-        self.image_view.view.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
-        
         # Add crosshair lines
         self.crosshair_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=2))
         self.crosshair_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('y', width=2))
@@ -598,9 +681,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
         top_layout.addWidget(self.btn_record)
         
         self.chk_autoscale = QtWidgets.QCheckBox("Auto")
-        self.chk_autoscale.setChecked(True)
+        self.chk_autoscale.setChecked(False)
         self.chk_autoscale.stateChanged.connect(self._autoscale_toggled)
         top_layout.addWidget(self.chk_autoscale)
+
+        self.chk_roi_contrast = QtWidgets.QCheckBox("ROI Contrast")
+        self.chk_roi_contrast.setChecked(False)
+        self.chk_roi_contrast.setToolTip("Adjust contrast based on ROI region")
+        top_layout.addWidget(self.chk_roi_contrast)
 
         btn_reset_view = QtWidgets.QPushButton("Reset View")
         btn_reset_view.setMaximumWidth(120)
@@ -681,6 +769,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 bar_layout.addStretch()
                 return bar
 
+            # Start any background services the beamline declares (e.g. the
+            # QGMax trigger watcher — runs without the dialog being open).
+            start_bg = getattr(beamline_module, "start_background_services", None)
+            if callable(start_bg):
+                try:
+                    start_bg(self)
+                except Exception as e:
+                    if LOGGER:
+                        LOGGER.warning(f"start_background_services({active_beamline}) failed: {e}")
+
             # Get all exported dialog classes
             if hasattr(beamline_module, '__all__'):
                 dialog_classes = beamline_module.__all__
@@ -702,29 +800,66 @@ class PvViewerApp(QtWidgets.QMainWindow):
             group_label = QtWidgets.QLabel(f"<b>{active_beamline}:</b>")
             bar_layout.addWidget(group_label)
 
-            # Create button for each dialog class
+            # Bucket plugins by their `GROUP` class attribute (falls back
+            # to "Other" for plugins that don't declare one). Groups are
+            # rendered in first-appearance order from __all__, so
+            # reordering __all__ reorders the top-level menu buttons.
+            # Plugins within a group keep __all__ order too.
+            grouped: dict[str, list[str]] = {}
+            group_order: list[str] = []
             for dialog_class_name in dialog_classes:
                 try:
-                    dialog_class = getattr(beamline_module, dialog_class_name)
+                    cls = getattr(beamline_module, dialog_class_name)
+                except AttributeError:
+                    continue
+                group = getattr(cls, "GROUP", None) or "Other"
+                if group not in grouped:
+                    grouped[group] = []
+                    group_order.append(group)
+                grouped[group].append(dialog_class_name)
 
-                    # Get button text from class attribute or use class name
-                    if hasattr(dialog_class, 'BUTTON_TEXT'):
-                        btn_text = dialog_class.BUTTON_TEXT
-                    else:
-                        # Convert ClassName to Class Name
-                        btn_text = dialog_class_name.replace('Dialog', '').replace('_', ' ').title()
+            # One QToolButton with a QMenu per group.
+            for group_name in group_order:
+                menu = QtWidgets.QMenu(bar)
+                for dialog_class_name in grouped[group_name]:
+                    try:
+                        dialog_class = getattr(beamline_module, dialog_class_name)
+                        if hasattr(dialog_class, 'BUTTON_TEXT'):
+                            item_text = dialog_class.BUTTON_TEXT
+                        else:
+                            item_text = (dialog_class_name.replace('Dialog', '')
+                                                          .replace('_', ' ')
+                                                          .title())
+                        action = menu.addAction(item_text)
+                        # Same launcher/singleton/multi-instance dispatch as
+                        # the flat-button era, wired to QAction.triggered.
+                        handler = self._beamline_handler(dialog_class_name,
+                                                        beamline_module)
+                        if handler is None:
+                            action.setEnabled(False)
+                            handler_type = getattr(dialog_class, 'HANDLER_TYPE',
+                                                   '<unknown>')
+                            action.setToolTip(
+                                f"Unknown handler type {handler_type!r} "
+                                f"for {dialog_class_name!r}")
+                        else:
+                            action.triggered.connect(handler)
+                    except Exception as e:
+                        if LOGGER:
+                            LOGGER.warning(
+                                f"Failed to add menu action for "
+                                f"{dialog_class_name}: {e}")
 
-                    btn = QtWidgets.QPushButton(btn_text)
-                    btn.setMaximumWidth(120)
-
-                    # Connect to appropriate handler based on class name
-                    self._connect_beamline_button(btn, dialog_class_name, beamline_module)
-
-                    bar_layout.addWidget(btn)
-
-                except Exception as e:
-                    if LOGGER:
-                        LOGGER.warning(f"Failed to create button for {dialog_class_name}: {e}")
+                group_btn = QtWidgets.QToolButton(bar)
+                group_btn.setText(group_name + "  ▾")
+                group_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+                group_btn.setMenu(menu)
+                group_btn.setToolTip(
+                    f"{group_name} — {len(grouped[group_name])} plugin(s)")
+                text_w = group_btn.fontMetrics().horizontalAdvance(
+                    group_btn.text())
+                group_btn.setMinimumWidth(max(110, text_w + 24))
+                bar_layout.addWidget(group_btn)
 
         except Exception as e:
             if LOGGER:
@@ -734,30 +869,23 @@ class PvViewerApp(QtWidgets.QMainWindow):
         bar_layout.addStretch()
         return bar
 
-    def _connect_beamline_button(self, btn, dialog_class_name, module):
-        """
-        Connect a beamline button to its appropriate handler.
+    def _beamline_handler(self, dialog_class_name, module):
+        """Return a zero-arg callable that opens/launches the plugin,
+        dispatched by its `HANDLER_TYPE`. Returns None for unknown
+        types so the caller can disable + tooltip the widget.
 
-        Uses plugin-defined behavior if available, otherwise falls back to generic handling.
-        """
+        Same launcher / singleton / multi-instance semantics as before —
+        this factory just decouples the handler from the widget signal
+        (QPushButton.clicked vs QAction.triggered)."""
         dialog_class = getattr(module, dialog_class_name)
+        handler_type = getattr(dialog_class, 'HANDLER_TYPE', 'singleton')
 
-        # Check if plugin defines its own handler type
-        if hasattr(dialog_class, 'HANDLER_TYPE'):
-            handler_type = dialog_class.HANDLER_TYPE
-        else:
-            # Auto-detect handler type based on class attributes
-            handler_type = 'singleton'  # Default to singleton
-
-        # Create appropriate handler based on type
         if handler_type == 'launcher':
-            # Launcher plugins: execute immediately and close
             def handler():
                 dialog_class(parent=self, logger=LOGGER)
-            btn.clicked.connect(handler)
+            return handler
 
-        elif handler_type == 'singleton':
-            # Singleton plugins: keep one instance, show/hide it
+        if handler_type == 'singleton':
             def handler():
                 attr_name = f'{dialog_class_name.lower()}_instance'
                 if not hasattr(self, attr_name) or getattr(self, attr_name) is None:
@@ -766,20 +894,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
-            btn.clicked.connect(handler)
+            return handler
 
-        elif handler_type == 'multi-instance':
-            # Multi-instance plugins: create new instance each time
+        if handler_type == 'multi-instance':
             def handler():
                 dialog = dialog_class(parent=self, logger=LOGGER)
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
-            btn.clicked.connect(handler)
+            return handler
 
-        else:
-            btn.setEnabled(False)
-            btn.setToolTip(f"Unknown handler type '{handler_type}' for '{dialog_class_name}'")
+        return None
 
     def _toggle_beamlines_bar(self):
         """Toggle visibility of beamlines toolbar"""
@@ -865,6 +990,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_reset_line.setMaximumWidth(60)
         btn_reset_line.clicked.connect(lambda: self.line_manager.reset() if self.line_manager else None)
         line_layout.addWidget(btn_reset_line)
+        self.btn_line_profile = QtWidgets.QPushButton("Profile")
+        self.btn_line_profile.setMaximumWidth(70)
+        self.btn_line_profile.setToolTip(
+            "Open the ImageJ-style intensity-profile plot. Live-updates "
+            "with the current line and each new frame.")
+        self.btn_line_profile.clicked.connect(
+            lambda: self.line_manager.show_profile_dialog()
+            if self.line_manager else None)
+        line_layout.addWidget(self.btn_line_profile)
         analysis_layout.addLayout(line_layout)
         
         analysis_group.setLayout(analysis_layout)
@@ -937,20 +1071,36 @@ class PvViewerApp(QtWidgets.QMainWindow):
         contrast_group = QtWidgets.QGroupBox("Contrast")
         contrast_layout = QtWidgets.QVBoxLayout()
         contrast_layout.setSpacing(4)
-        
+
+        # Auto-contrast method selector — drives _autoscale_values_fast().
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Auto:"))
+        self.cmb_autoscale_mode = QtWidgets.QComboBox()
+        self.cmb_autoscale_mode.addItems([
+            "Percentile 0.5-99.5 (default)",
+            "Min/Max",
+            "Percentile 1-99",
+            "Percentile 2-98",
+            "Percentile 5-95",
+            "Percentile 10-90",
+        ])
+        self.cmb_autoscale_mode.currentIndexChanged.connect(self._autoscale_mode_changed)
+        mode_row.addWidget(self.cmb_autoscale_mode, stretch=1)
+        contrast_layout.addLayout(mode_row)
+
         contrast_layout.addWidget(QtWidgets.QLabel("Min (vmin)"))
         self.sld_min = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.sld_min.setRange(0, 65535)
         self.sld_min.valueChanged.connect(self._slider_changed)
         contrast_layout.addWidget(self.sld_min)
-        
+
         contrast_layout.addWidget(QtWidgets.QLabel("Max (vmax)"))
         self.sld_max = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.sld_max.setRange(0, 65535)
         self.sld_max.setValue(65535)
         self.sld_max.valueChanged.connect(self._slider_changed)
         contrast_layout.addWidget(self.sld_max)
-        
+
         contrast_group.setLayout(contrast_layout)
         left_layout.addWidget(contrast_group)
         
@@ -1058,9 +1208,29 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.record_prefix_entry = QtWidgets.QLineEdit()
         self.record_prefix_entry.setText("frame")
         self.record_prefix_entry.setPlaceholderText("frame")
-        self.record_prefix_entry.setToolTip("File prefix (files saved as prefix_000001.tiff, prefix_000002.tiff, ...)")
+        self.record_prefix_entry.setToolTip("File prefix (files saved as prefix_000001.tiff, …)")
         prefix_layout.addWidget(self.record_prefix_entry)
         record_layout.addLayout(prefix_layout)
+
+        # Writer threads + compression
+        rec_opt_layout = QtWidgets.QHBoxLayout()
+        rec_opt_layout.setSpacing(4)
+        rec_opt_layout.addWidget(QtWidgets.QLabel("Writers:"))
+        self.record_workers_spin = QtWidgets.QSpinBox()
+        self.record_workers_spin.setRange(1, 16)
+        self.record_workers_spin.setValue(4)
+        self.record_workers_spin.setMaximumWidth(50)
+        self.record_workers_spin.setToolTip(
+            "Parallel writer threads. More threads = higher throughput on fast NVMe.")
+        rec_opt_layout.addWidget(self.record_workers_spin)
+        self.record_compress_check = QtWidgets.QCheckBox("Compress")
+        self.record_compress_check.setChecked(False)
+        self.record_compress_check.setToolTip(
+            "DEFLATE compression: smaller files but ~5–10× slower. "
+            "Leave off for high frame rates.")
+        rec_opt_layout.addWidget(self.record_compress_check)
+        rec_opt_layout.addStretch()
+        record_layout.addLayout(rec_opt_layout)
 
         # Status label with instructions
         self.lbl_record_status = QtWidgets.QLabel(
@@ -1189,7 +1359,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         try:
             self.sub = NtndaSubscriber(pv, self.queue)
             self.sub.start()
-            self.setWindowTitle(f"NTNDArray PyQtGraph Viewer - {pv}")
+            self.setWindowTitle(f"pystream - {pv}")
             if LOGGER: LOGGER.info("Connected to PV %s", pv)
         except Exception as e:
             self.sub = None
@@ -1207,7 +1377,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
                     LOGGER.warning("Error stopping subscription:")
                     log_exception(LOGGER, e)
             self.sub = None
-            self.setWindowTitle("NTNDArray PyQtGraph Viewer")
+            self.setWindowTitle("pystream")
             if not silent:
                 QtWidgets.QMessageBox.information(self, "Disconnect PV", "Disconnected.")
             if LOGGER: LOGGER.info("Disconnected from PV")
@@ -1216,29 +1386,49 @@ class PvViewerApp(QtWidgets.QMainWindow):
     def _pump_queue(self):
         if self.paused:
             return
-        
+
         now = time.time()
-        if self.max_fps > 0 and (now - self.last_draw < self.frame_interval):
-            return
-        
+
         latest = None
         try:
             while True:
                 latest = self.queue.get_nowait()
         except Exception:
             pass
-        
-        if latest is not None:
-            ts, uid, img = latest
-            if PIPE is not None:
-                try:
-                    img = PIPE.apply(img, {"uid": uid, "timestamp": ts})
-                except Exception as e:
-                    if LOGGER:
-                        LOGGER.error("[Plugins] pipeline error")
-                        log_exception(LOGGER, e)
-            self.image_ready.emit(uid, img, ts)
-            self.last_draw = now
+
+        if latest is None:
+            return
+
+        ts, uid, img = latest
+        if PIPE is not None:
+            try:
+                img = PIPE.apply(img, {"uid": uid, "timestamp": ts})
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.error("[Plugins] pipeline error")
+                    log_exception(LOGGER, e)
+
+        # ── Recording: before display throttle so every frame is captured ──
+        if self.recording and self.recording_pool is not None:
+            frame_copy = img.copy()
+            self.recording_pool.put(self.recorded_frame_count, frame_copy)
+            self.recorded_frame_count += 1
+            nd = self.recording_pool.frames_dropped
+            nw = self.recording_pool.frames_written
+            nq = self.recording_pool.qsize
+            status = f"🔴 REC  {self.recorded_frame_count} frm"
+            if nd:
+                status += f"\n⚠ {nd} dropped"
+            else:
+                status += f"\nWritten: {nw}  Q: {nq}"
+            self.lbl_record_status.setText(status)
+
+        # ── Display throttle ──
+        if self.max_fps > 0 and (now - self.last_draw < self.frame_interval):
+            return
+
+        self.image_ready.emit(uid, img, ts)
+        self.last_draw = now
     
     # ------------- Image update -------------
     def _auto_display_bin(self, img) -> int:
@@ -1252,8 +1442,11 @@ class PvViewerApp(QtWidgets.QMainWindow):
         return max(1, min(by, bx))
     
     def _apply_view_ops(self, img: np.ndarray) -> np.ndarray:
-        # Decimation
+        # Decimation. Cache the effective factor so scalebar / line
+        # measurements can compensate — otherwise auto-decimation makes
+        # both silently under-report physical size at the display side.
         b = self.display_bin if self.display_bin > 0 else self._auto_display_bin(img)
+        self._current_display_bin = b
         if b > 1:
             img = img[::b, ::b]
         
@@ -1314,7 +1507,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         
         # Update PyQtGraph image - FAST rendering
         self.image_view.setImage(img, autoRange=False, autoLevels=False, levels=(vmin, vmax))
-        
+
         # Update crosshair if enabled - ALWAYS CENTER IT
         if self.crosshair_enabled:
             self.crosshair_y = img.shape[0] / 2.0
@@ -1324,11 +1517,16 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # Update ROI Statistics
         self.roi_manager.update_stats(img)
         self.ellipse_roi_manager.update_stats(img)
+        # Tell measurement widgets the current display decimation so
+        # they can convert displayed pixels back to sensor pixels.
+        self.line_manager.display_bin = self._current_display_bin
         self.line_manager.update_stats(img)
 
         # Update scale bar
         if self.scalebar_manager is not None:
+            self.scalebar_manager.display_bin = self._current_display_bin
             self.scalebar_manager.update_image(img)
+
 
         # FPS calculation
         now = time.time()
@@ -1349,37 +1547,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             f"Mean: {img.mean():.2f}"
         )
         
-        # Recording - add frame to queue for background writer
-        if self.recording and self.recording_queue is not None:
-            try:
-                # Add frame copy to queue (non-blocking)
-                # Make a copy to avoid reference issues
-                # Use astype to ensure contiguous copy
-                frame_copy = img.astype(img.dtype, order='C', copy=True)
-                self.recording_queue.put_nowait((self.recorded_frame_count, frame_copy))
-
-                self.recorded_frame_count += 1
-                queued = self.recording_queue.qsize()
-                self.lbl_record_status.setText(
-                    f"🔴 REC\nFrames: {self.recorded_frame_count}\nQueued: {queued}"
-                )
-            except queue.Full:
-                # Queue is full - skip this frame
-                if LOGGER:
-                    LOGGER.warning("Recording queue full - frame dropped")
-                self.lbl_record_status.setText(
-                    f"🔴 REC\nFrames: {self.recorded_frame_count}\n⚠ Queue full!"
-                )
-            except Exception as e:
-                # Stop recording on error
-                self.recording = False
-                self.btn_record.setChecked(False)
-                self.btn_record.setText("⏺" if self.is_small_screen else "Record")
-                self.btn_record.setStyleSheet("")
-                self.lbl_record_status.setText("✗ Recording error!")
-                if LOGGER:
-                    LOGGER.error("Recording error:")
-                    log_exception(LOGGER, e)
+        # Recording is handled in _pump_queue before the display throttle.
         
         # Histogram update (throttled)
         if (now - self._last_hist_t) >= self.hist_interval:
@@ -1475,14 +1643,54 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.sld_min.blockSignals(False)
             self.sld_max.blockSignals(False)
     
+    # (low, high) percentile bounds keyed by the "Auto:" combo box index.
+    # Min/Max uses np.min / np.max instead of percentiles for speed.
+    _AUTOSCALE_MODES = [
+        ("percentile", 0.5, 99.5),
+        ("minmax",     None, None),
+        ("percentile", 1.0, 99.0),
+        ("percentile", 2.0, 98.0),
+        ("percentile", 5.0, 95.0),
+        ("percentile", 10.0, 90.0),
+    ]
+
     def _autoscale_values_fast(self, img: np.ndarray):
-        step = max(1, int(max(img.shape) / 512))
-        samp = img[::step, ::step]
-        lo = float(np.percentile(samp, 0.5))
-        hi = float(np.percentile(samp, 99.5))
+        # Use ROI sub-region for contrast if enabled and ROI is active
+        source = img
+        if self.chk_roi_contrast.isChecked():
+            roi_data = self.roi_manager.get_roi_data(img)
+            if roi_data is not None and roi_data.size > 0:
+                source = roi_data
+        step = max(1, int(max(source.shape) / 512))
+        samp = source[::step, ::step] if source.ndim >= 2 else source
+
+        mode_idx = 0
+        if hasattr(self, 'cmb_autoscale_mode'):
+            mode_idx = self.cmb_autoscale_mode.currentIndex()
+        kind, plo, phi = self._AUTOSCALE_MODES[mode_idx]
+        if kind == "minmax":
+            lo = float(np.nanmin(samp))
+            hi = float(np.nanmax(samp))
+        else:
+            lo = float(np.percentile(samp, plo))
+            hi = float(np.percentile(samp, phi))
         if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
             lo, hi = float(np.nanmin(samp)), float(np.nanmax(samp))
         return lo, hi
+
+    def _autoscale_mode_changed(self, _index):
+        """Auto-mode changed — if autoscale is on and we have a frame,
+        recompute levels immediately with the new method."""
+        if not getattr(self, 'autoscale_enabled', False):
+            return
+        if getattr(self, '_last_display_img', None) is None:
+            return
+        self.vmin, self.vmax = self._autoscale_values_fast(self._last_display_img)
+        self._update_sliders(self.vmin, self.vmax)
+        self.image_view.setImage(
+            self._last_display_img, autoRange=False, autoLevels=False,
+            levels=(self.vmin, self.vmax),
+        )
     
     def _slider_changed(self):
         if hasattr(self, '_updating_sliders') and self._updating_sliders:
@@ -1714,18 +1922,22 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.btn_record.setChecked(False)
                 return
 
-            # Start background writer thread with queue
-            self.recording_queue = queue.Queue(maxsize=100)  # Buffer up to 100 frames in RAM
-            self.recording_thread = TiffWriterThread(self.record_dir, self.recording_queue, prefix)
-            self.recording_thread.start()
+            n_workers = self.record_workers_spin.value() if hasattr(self, 'record_workers_spin') else 4
+            compress  = self.record_compress_check.isChecked() if hasattr(self, 'record_compress_check') else False
+            self.recording_pool = _RecordingPool(
+                self.record_dir, prefix,
+                n_workers=n_workers, max_queue=512, compress=compress,
+            )
+            self.recording_pool.start()
 
             self.recording = True
             self.recorded_frame_count = 0
             self.btn_record.setText("⏹" if self.is_small_screen else "Stop Recording")
             self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
-            self.lbl_record_status.setText("🔴 REC\nFrames: 0")
+            self.lbl_record_status.setText("🔴 REC  0 frm")
             if LOGGER:
-                LOGGER.info("Started recording to %s", self.record_dir)
+                LOGGER.info("Started recording to %s (workers=%d compress=%s)",
+                            self.record_dir, n_workers, compress)
         else:
             # Stop recording
             self.recording = False
@@ -1735,57 +1947,45 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if self.recorded_frame_count == 0:
                 self.lbl_record_status.setText("Not recording")
                 QtWidgets.QMessageBox.information(
-                    self, "Stop Recording",
-                    "No frames were recorded."
-                )
+                    self, "Stop Recording", "No frames were recorded.")
                 return
 
-            # Wait for background writer to finish (non-blocking)
-            if self.recording_thread and self.recording_thread.is_alive():
-                queued_frames = self.recording_queue.qsize()
-                self.lbl_record_status.setText(f"Flushing {queued_frames} frames...")
-
-                # Signal thread to stop
-                try:
-                    self.recording_queue.put_nowait(None)  # Poison pill
-                except queue.Full:
-                    pass
-
-                # Use a timer to check when thread finishes (non-blocking)
+            if self.recording_pool and self.recording_pool.is_alive():
+                self.lbl_record_status.setText(
+                    f"Flushing {self.recording_pool.qsize} frames…")
+                self.recording_pool.stop()
                 self._finish_recording_async()
             else:
-                # Thread already done
                 self._show_recording_complete()
-    
+
     def _finish_recording_async(self):
-        """Check if recording thread finished (non-blocking with timer)."""
-        if self.recording_thread and self.recording_thread.is_alive():
-            # Still running, check again in 500ms
-            queued = self.recording_queue.qsize() if self.recording_queue else 0
-            written = self.recording_thread.frames_written if self.recording_thread else 0
-            self.lbl_record_status.setText(f"Flushing...\nWritten: {written}\nQueued: {queued}")
+        if self.recording_pool and self.recording_pool.is_alive():
+            nw = self.recording_pool.frames_written
+            nq = self.recording_pool.qsize
+            self.lbl_record_status.setText(f"Flushing…\nWritten: {nw}  Q: {nq}")
             QtCore.QTimer.singleShot(500, self._finish_recording_async)
         else:
-            # Thread finished
             self._show_recording_complete()
 
     def _show_recording_complete(self):
-        """Show recording completion message."""
-        frames_written = self.recording_thread.frames_written if self.recording_thread else self.recorded_frame_count
+        pool = self.recording_pool
+        nw  = pool.frames_written if pool else self.recorded_frame_count
+        nd  = pool.frames_dropped if pool else 0
         record_dir = self.record_dir
 
-        self.lbl_record_status.setText(f"✓ Saved {frames_written} frames")
+        msg = f"Saved {nw} frames"
+        if nd:
+            msg += f"  ({nd} dropped)"
+        self.lbl_record_status.setText(f"✓ {msg}")
         if LOGGER:
-            LOGGER.info("Recording stopped: %d frames saved to %s", frames_written, record_dir)
+            LOGGER.info("Recording stopped: %s to %s", msg, record_dir)
 
-        QtWidgets.QMessageBox.information(
-            self, "Recording Stopped",
-            f"Successfully saved {frames_written} frames\n"
-            f"as individual TIFF files to:\n\n{record_dir}"
-        )
+        body = f"{msg}\nTIFF files in:\n\n{record_dir}"
+        if nd:
+            body += f"\n\n⚠ {nd} frames were dropped (queue full).\nUse more writer threads or faster storage."
+        QtWidgets.QMessageBox.information(self, "Recording Stopped", body)
 
-        self.recording_thread = None
-        self.recording_queue = None
+        self.recording_pool = None
 
     # ------------- Other commands -------------
     def _toggle_pause(self):
@@ -1852,56 +2052,6 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 LOGGER.error("Failed saving frame to %s", path)
                 log_exception(LOGGER, e)
 
-    def _open_motor_scan(self):
-        """Open the motor scan dialog"""
-        if self.motor_scan_dialog is None:
-                self.motor_scan_dialog = MotorScanDialog(parent=self, logger=LOGGER)
-        self.motor_scan_dialog.show()
-        self.motor_scan_dialog.raise_()
-        self.motor_scan_dialog.activateWindow()
-
-    def _open_softbpm(self, module):
-        """Open the SoftBPM dialog"""
-        if not hasattr(self, 'softbpm_dialog') or self.softbpm_dialog is None:
-            self.softbpm_dialog = module.SoftBPMDialog(parent=self, logger=LOGGER)
-        self.softbpm_dialog.show()
-        self.softbpm_dialog.raise_()
-        self.softbpm_dialog.activateWindow()
-
-    def _open_detector_control(self, module):
-        """Open the Detector Control dialog"""
-        if not hasattr(self, 'detector_control_dialog') or self.detector_control_dialog is None:
-            self.detector_control_dialog = module.DetectorControlDialog(parent=self, logger=LOGGER)
-        self.detector_control_dialog.show()
-        self.detector_control_dialog.raise_()
-        self.detector_control_dialog.activateWindow()
-
-    def _open_rotation_axis(self, module):
-        """Open the Rotation Axis Detection dialog"""
-        if not hasattr(self, 'rotation_axis_dialog') or self.rotation_axis_dialog is None:
-            self.rotation_axis_dialog = module.RotationAxisDialog(parent=self, logger=LOGGER)
-        self.rotation_axis_dialog.show()
-        self.rotation_axis_dialog.raise_()
-        self.rotation_axis_dialog.activateWindow()
-
-    def _open_xanes_gui(self, module):
-        """Launch the XANES GUI (runs immediately, no dialog)"""
-        # Create launcher - it executes immediately and closes itself
-        module.XANESGuiDialog(parent=self, logger=LOGGER)
-
-    def _open_optics_calc(self, module):
-        """Launch the Optics Calculator (runs immediately, no dialog)"""
-        # Create launcher - it executes immediately and closes itself
-        module.OpticsCalcDialog(parent=self, logger=LOGGER)
-
-    def _open_qgmax(self, module):
-        """Open the QGMax dialog"""
-        if not hasattr(self, 'qgmax_dialog') or self.qgmax_dialog is None:
-            self.qgmax_dialog = module.QGMaxDialog(parent=self, logger=LOGGER)
-        self.qgmax_dialog.show()
-        self.qgmax_dialog.raise_()
-        self.qgmax_dialog.activateWindow()
-
     def _open_viewer(self):
         """Open a standalone viewer window"""
         from .plugins.viewer import HDF5ImageDividerDialog
@@ -1928,25 +2078,14 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 self.recording = False
                 self.btn_record.setChecked(False)
 
-                # Wait for background writer to finish
-                if self.recording_thread and self.recording_thread.is_alive():
+                if self.recording_pool and self.recording_pool.is_alive():
                     if LOGGER:
-                        LOGGER.info("Waiting for recording thread to finish...")
-
-                    # Signal thread to stop and wait for queue to empty
-                    try:
-                        self.recording_queue.put(None, timeout=1)  # Poison pill
-                    except Exception:
-                        pass
-
-                    self.recording_thread.join(timeout=5)  # Wait up to 5 seconds on close
-
-                    if self.recording_thread.is_alive():
-                        if LOGGER:
-                            LOGGER.warning("Recording thread did not finish in time during close")
-
-                self.recording_thread = None
-                self.recording_queue = None
+                        LOGGER.info("Waiting for recording pool to flush…")
+                    self.recording_pool.stop()
+                    self.recording_pool.wait(timeout=10)
+                    if self.recording_pool.is_alive() and LOGGER:
+                        LOGGER.warning("Recording pool did not finish in time on close")
+                self.recording_pool = None
         
         # Stop pump timer first to avoid processing during cleanup
         if self.pump_timer:
@@ -2004,7 +2143,7 @@ def _parse_loglevel(s: Optional[str]) -> int:
 
 def main():
     global LOGGER
-    ap = argparse.ArgumentParser(description="NTNDArray Viewer (PyQtGraph - SSH Compatible)")
+    ap = argparse.ArgumentParser(description="pystream")
     ap.add_argument("--pv", help="PVAccess NTNDArray PV name")
     ap.add_argument("--max-fps", type=int, default=0, help="Max redraw FPS (0 = unthrottled)")
     ap.add_argument("--hist-fps", type=float, default=4.0, help="Histogram updates per second")
@@ -2023,7 +2162,7 @@ def main():
         stream_to_console=True,
         level=_parse_loglevel(args.log_level),
     )
-    LOGGER.info("Starting NTNDArray PyQtGraph Viewer (SSH-compatible)")
+    LOGGER.info("Starting pystream (SSH-compatible)")
     LOGGER.info("Args: %s", vars(args))
     
     # Initialize plugins
@@ -2034,7 +2173,7 @@ def main():
     
     # Create Qt application
     app = QtWidgets.QApplication([])
-    app.setApplicationName("NTNDArray PyQtGraph Viewer")
+    app.setApplicationName("pystream")
     
     # Create viewer window
     viewer = PvViewerApp(

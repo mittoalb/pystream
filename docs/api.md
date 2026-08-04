@@ -1,5 +1,8 @@
 # API Reference
 
+Generated from docstrings. Requires `pip install -e .` and a doc build
+(`cd docs && make html`).
+
 ## Plugins
 
 ### ROI Manager
@@ -18,9 +21,9 @@
    :undoc-members:
 ```
 
-## Beamline Modules
+## bl32ID Beamline
 
-### bl32ID - Mosaic Alignment
+### Mosaic Alignment
 
 ```{eval-rst}
 .. automodule:: pystream.beamlines.bl32ID.mosalign
@@ -29,7 +32,7 @@
    :no-index:
 ```
 
-### bl32ID - SoftBPM
+### SoftBPM
 
 ```{eval-rst}
 .. automodule:: pystream.beamlines.bl32ID.softbpm
@@ -38,7 +41,7 @@
    :no-index:
 ```
 
-### bl32ID - Detector Control
+### Detector Control
 
 ```{eval-rst}
 .. automodule:: pystream.beamlines.bl32ID.detectorcontrol
@@ -47,18 +50,38 @@
    :no-index:
 ```
 
-## Note
+### QGMax
 
-Full API documentation requires the package to be installed. Install with:
-
-```bash
-pip install -e .
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.qgmax
+   :members:
+   :undoc-members:
+   :no-index:
 ```
 
-Then rebuild the docs:
+### AutoCenter
 
-```bash
-cd docs
-make clean
-make html
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.autocenter
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
+### Rotation Axis
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.rotationaxis
+   :members:
+   :undoc-members:
+   :no-index:
+```
+
+### DataMap
+
+```{eval-rst}
+.. automodule:: pystream.beamlines.bl32ID.datamap
+   :members:
+   :undoc-members:
+   :no-index:
 ```

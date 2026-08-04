@@ -7,18 +7,129 @@ Monitors the image mean value and optimizes two motors to maximize it.
 - Uses simple gradient-based optimization
 """
 
+import json
+import os
 import subprocess
 import logging
 import time
 from typing import Optional, Tuple
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
+from .plugin_settings import PYSTREAM_HOME, load_settings, save_settings
+
+
+QGMAX_REQUEST_FILE = os.path.join(PYSTREAM_HOME, "qgmax_request.json")
+QGMAX_RESPONSE_FILE = os.path.join(PYSTREAM_HOME, "qgmax_response.json")
+
+
+class QGMaxBackgroundWatcher(QtCore.QObject):
+    """Polls the QGMax request file in the background so external triggers
+    (e.g. XANES2D) work *without* the QGMax dialog being open. Creates the
+    dialog hidden on first trigger so its optimization machinery is reused."""
+
+    _instance = None
+
+    def __init__(self, parent_window):
+        super().__init__()
+        self._parent_window = parent_window
+        self._dialog = None
+        # Seed from whatever is on disk RIGHT NOW so a stale request
+        # left behind by a previous pystream session (or a crash mid-scan)
+        # doesn't re-fire on fresh startup. Only strictly-newer ts values
+        # written after we started should trigger optimization.
+        self._last_handled_ts = self._read_current_request_ts()
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(500)
+
+    @staticmethod
+    def _read_current_request_ts() -> float:
+        try:
+            with open(QGMAX_REQUEST_FILE) as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return 0.0
+        try:
+            return float(state.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _ensure_dialog(self):
+        if self._dialog is None:
+            logger = getattr(self._parent_window, "logger", None)
+            self._dialog = QGMaxDialog(parent=self._parent_window, logger=logger)
+            # Do NOT show it — background mode.
+        return self._dialog
+
+    def _poll(self):
+        try:
+            with open(QGMAX_REQUEST_FILE) as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        except Exception:
+            return
+        req_ts = float(state.get("ts", 0) or 0)
+        if req_ts <= self._last_handled_ts:
+            return
+        self._last_handled_ts = req_ts
+
+        # New: control commands that manage automated mode instead of firing
+        # a one-shot optimization. gui.py (3D XANES) uses these so QGMax's
+        # own pause/optimize/resume loop drives the scan.
+        cmd = str(state.get("cmd", "") or "").strip().lower()
+        if cmd in ("auto_enable", "auto_disable"):
+            dlg = self._ensure_dialog()
+            dlg._log_message(f"Background auto-mode {cmd} (ts={req_ts:.3f})")
+            if cmd == "auto_enable":
+                try:
+                    n = int(state.get("run_every", 1) or 1)
+                except (TypeError, ValueError):
+                    n = 1
+                dlg._external_set_auto_mode(True, run_every=max(1, n))
+            else:
+                dlg._external_set_auto_mode(False)
+            try:
+                with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                    json.dump({"last_completed_ts": 0,
+                               "auto_mode": (cmd == "auto_enable"),
+                               "started_ts": req_ts,
+                               "started_at": time.time()}, fh)
+            except Exception:
+                pass
+            return
+
+        # Default (no cmd): treat as a single-shot optimization request
+        # (backward-compatible with gui_2d.py).
+        dlg = self._ensure_dialog()
+        if dlg.optimization_active:
+            return
+        dlg._qgmax_trigger_ts = req_ts
+        dlg._qgmax_last_handled_ts = req_ts
+        dlg._log_message(f"Background trigger ts={req_ts:.3f}")
+        # Write ack to response file so callers know QGMax picked it up.
+        try:
+            with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                json.dump({"last_completed_ts": 0,
+                           "started_ts": req_ts,
+                           "started_at": time.time()}, fh)
+        except Exception:
+            pass
+        dlg._run_optimization_cycle()
+
+
+def ensure_qgmax_background_watcher(parent_window):
+    """Idempotent: create the singleton watcher if not already running."""
+    if QGMaxBackgroundWatcher._instance is None:
+        QGMaxBackgroundWatcher._instance = QGMaxBackgroundWatcher(parent_window)
+    return QGMaxBackgroundWatcher._instance
 
 
 class QGMaxDialog(QtWidgets.QDialog):
     """Dialog for optimizing image mean by adjusting two motors."""
 
     BUTTON_TEXT = "QGMax"
+    GROUP       = "Alignment"
     HANDLER_TYPE = 'singleton'  # Keep one instance, show/hide it
 
     def __init__(self, parent=None, logger: Optional[logging.Logger] = None):
@@ -34,6 +145,12 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Status PV for external monitoring
         self.status_pv = "32id:pystream:qgmax"
 
+        # Poll the status PV so external clients (e.g. the XANES2D scan) can
+        # request an optimization cycle by writing "START" to it.
+        self.trigger_poll_timer = QtCore.QTimer()
+        self.trigger_poll_timer.timeout.connect(self._check_trigger_pv)
+        self.trigger_poll_timer.start(500)
+
         # Automated mode monitoring
         self.auto_mode_enabled = False
         self.hdf5_location_monitor_timer = QtCore.QTimer()
@@ -42,6 +159,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.hdf5_location_trigger_count = 0
         self.hdf5_location_run_every = 1  # Run every N times HDF5Location = /exchange/data
         self.waiting_for_pause_location = False  # Flag to indicate we're waiting for /exchange/Pause
+        # Online bright-spot check state (runs without pausing tomoscan on
+        # every /exchange/data event that is not an N-th full-opt event).
+        self.online_spot_check_active = False
 
         # State for synchronized optimization
         self.optimization_active = False
@@ -59,7 +179,18 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.coarse_multiplier = 5.0  # Coarse step = step_size * 5
         self.fine_multiplier = 1.0  # Fine step = step_size * 1
 
+        # Central bright-spot correction state. When a bright spot is
+        # detected, nudge motor1 by ONE step; the direction is decided per
+        # check from the spot's Y position (peak above image center → +1,
+        # below → -1). If the motor sign convention pushes the spot the
+        # WRONG way, invert bright_spot_direction_sign to flip the mapping.
+        self.bright_spot_correction_count = 0
+        self.bright_spot_nudge_steps = 1  # motor1 step units per correction
+        self.bright_spot_direction_sign = +1  # flip to -1 if mapping is inverted
+        self.bright_spot_nudge_direction = +1  # actual sign used; recomputed per check
+
         self._init_ui()
+        self._restore_settings()
         self._load_current_values()
 
     def _init_ui(self):
@@ -230,6 +361,41 @@ class QGMaxDialog(QtWidgets.QDialog):
         opt_settings_group.setLayout(opt_settings_layout)
         settings_layout.addWidget(opt_settings_group)
 
+        # Central Bright-Spot Correction
+        spot_group = QtWidgets.QGroupBox("Central Bright-Spot Correction")
+        spot_layout = QtWidgets.QFormLayout()
+
+        self.spot_check_enabled_input = QtWidgets.QCheckBox("Enabled")
+        self.spot_check_enabled_input.setChecked(True)
+        spot_layout.addRow("Post-optimization check:", self.spot_check_enabled_input)
+
+        self.spot_threshold_input = QtWidgets.QDoubleSpinBox()
+        self.spot_threshold_input.setDecimals(2)
+        self.spot_threshold_input.setRange(1.0, 10.0)
+        self.spot_threshold_input.setSingleStep(0.05)
+        self.spot_threshold_input.setValue(1.30)
+        spot_layout.addRow("Center/outer ratio threshold:", self.spot_threshold_input)
+
+        self.spot_center_radius_input = QtWidgets.QSpinBox()
+        self.spot_center_radius_input.setRange(1, 4096)
+        self.spot_center_radius_input.setValue(50)
+        self.spot_center_radius_input.setSuffix(" px")
+        spot_layout.addRow("Spot radius:", self.spot_center_radius_input)
+
+        self.spot_outer_radius_input = QtWidgets.QSpinBox()
+        self.spot_outer_radius_input.setRange(2, 8192)
+        self.spot_outer_radius_input.setValue(150)
+        self.spot_outer_radius_input.setSuffix(" px")
+        spot_layout.addRow("Background inner radius:", self.spot_outer_radius_input)
+
+        self.spot_max_corrections_input = QtWidgets.QSpinBox()
+        self.spot_max_corrections_input.setRange(1, 10)
+        self.spot_max_corrections_input.setValue(3)
+        spot_layout.addRow("Max corrections:", self.spot_max_corrections_input)
+
+        spot_group.setLayout(spot_layout)
+        settings_layout.addWidget(spot_group)
+
         # Automated Mode Settings
         auto_settings_group = QtWidgets.QGroupBox("Automated Mode Settings")
         auto_settings_layout = QtWidgets.QFormLayout()
@@ -296,6 +462,42 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._log_message(f"Error setting PV {pv_name}: {e}")
             return False
 
+    def _check_trigger_pv(self):
+        """If an external client (e.g. the XANES2D scan) wrote a START request
+        to the trigger file, kick off an optimization cycle. QGMax owns its
+        own motors/steps/thresholds — the caller only says when to run.
+
+        File handshake is used instead of a CA PV because the PV isn't always
+        routable from subprocesses and a shared file is trivially reliable on
+        the local machine."""
+        if self.optimization_active:
+            return
+        try:
+            with open(QGMAX_REQUEST_FILE) as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        except Exception:
+            return
+        req_ts = float(state.get("ts", 0) or 0)
+        if req_ts <= getattr(self, "_qgmax_last_handled_ts", 0):
+            return
+        self._qgmax_trigger_ts = req_ts
+        self._qgmax_last_handled_ts = req_ts
+        self._log_message(f"External START trigger received (ts={req_ts:.3f})")
+        self.status_label.setText("Status: Optimizing (External)")
+        # Acknowledge receipt in the response file so the caller can verify
+        # that QGMax is actually listening (separate from completion).
+        try:
+            with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                json.dump({"last_completed_ts": getattr(
+                              self, "_last_completed_ts_cached", 0),
+                           "started_ts": req_ts,
+                           "started_at": time.time()}, fh)
+        except Exception:
+            pass
+        self._run_optimization_cycle()
+
     def _set_status_pv(self, status: str):
         """Set the status PV to RUN or STOP."""
         try:
@@ -309,22 +511,77 @@ class QGMaxDialog(QtWidgets.QDialog):
             # Don't log PV errors to avoid spam, just fail silently
             pass
 
-    def _get_image_mean(self) -> Optional[float]:
-        """Get the current mean value of the image."""
+    def _get_image(self) -> Optional[np.ndarray]:
+        """Get the current image from the parent viewer."""
         parent_viewer = self.parent()
         if not parent_viewer or not hasattr(parent_viewer, 'image_view'):
-            self._log_message("Error: Cannot access image view")
             return None
 
         image_view = parent_viewer.image_view
         image_item = image_view.getImageItem()
         if image_item is None or image_item.image is None:
-            self._log_message("Error: No image available")
             return None
 
-        image = image_item.image
-        mean_value = float(np.mean(image))
-        return mean_value
+        return image_item.image
+
+    def _get_image_mean(self) -> Optional[float]:
+        """Get the current mean value of the image."""
+        image = self._get_image()
+        if image is None:
+            self._log_message("Error: No image available")
+            return None
+        return float(np.mean(image))
+
+    def _find_bright_spot(self, image: np.ndarray) -> Optional[Tuple[float, int, int]]:
+        """Locate the brightest localized spot in the image.
+
+        Returns (ratio, peak_y, peak_x) where ratio is the mean intensity inside
+        a disk of `spot_radius` around the peak divided by the mean of the
+        background (pixels farther than `background_inner_radius` from the peak).
+        Returns None if the image is too small or parameters are invalid.
+        """
+        if image.ndim == 3:
+            image = image.mean(axis=-1)
+        image = np.asarray(image, dtype=np.float32)
+        h, w = image.shape[:2]
+        spot_radius = float(self.spot_center_radius_input.value())
+        bg_radius = float(self.spot_outer_radius_input.value())
+        if spot_radius < 1 or bg_radius <= spot_radius:
+            return None
+        if min(h, w) < 2 * bg_radius:
+            return None
+
+        # Coarse block-mean smoothing to suppress single-pixel noise before
+        # locating the peak. Block size ~spot radius keeps the peak stable.
+        block = max(1, int(spot_radius))
+        bh = h // block
+        bw = w // block
+        if bh < 2 or bw < 2:
+            py, px = np.unravel_index(int(np.argmax(image)), image.shape)
+        else:
+            coarse = image[: bh * block, : bw * block].reshape(
+                bh, block, bw, block
+            ).mean(axis=(1, 3))
+            by, bx = np.unravel_index(int(np.argmax(coarse)), coarse.shape)
+            py = int((by + 0.5) * block)
+            px = int((bx + 0.5) * block)
+
+        # Keep the spot disk fully inside the image.
+        r = int(spot_radius)
+        py = min(max(py, r), h - r - 1)
+        px = min(max(px, r), w - r - 1)
+
+        y, x = np.ogrid[:h, :w]
+        dist_sq = (y - py) ** 2 + (x - px) ** 2
+        spot_mask = dist_sq < spot_radius ** 2
+        bg_mask = dist_sq >= bg_radius ** 2
+        if not np.any(spot_mask) or not np.any(bg_mask):
+            return None
+        spot_mean = float(np.mean(image[spot_mask]))
+        bg_mean = float(np.mean(image[bg_mask]))
+        if bg_mean <= 0:
+            return None
+        return spot_mean / bg_mean, py, px
 
     def _load_current_values(self):
         """Load current motor positions and image mean."""
@@ -356,6 +613,20 @@ class QGMaxDialog(QtWidgets.QDialog):
     def _update_run_every(self, value: int):
         """Update the run_every value when changed."""
         self.hdf5_location_run_every = value
+
+    def _external_set_auto_mode(self, enable: bool, run_every: int = 1):
+        """Enable/disable automated mode from outside (e.g. 3D XANES's gui.py).
+        Keeps the auto-mode button's checked state in sync so the UI still
+        reflects reality if the user opens the dialog afterward."""
+        if enable:
+            try:
+                self.run_every_input.setValue(max(1, int(run_every)))
+            except Exception:
+                pass
+        if self.auto_mode_enabled == enable:
+            return
+        self.auto_mode_btn.setChecked(enable)
+        self._toggle_auto_mode(enable)
 
     def _toggle_auto_mode(self, checked: bool):
         """Toggle automated mode on/off."""
@@ -421,21 +692,29 @@ class QGMaxDialog(QtWidgets.QDialog):
             if self.waiting_for_pause_location:
                 # We're waiting for TomoScan to reach /exchange/Pause after we paused it
                 if current_value == "/exchange/Pause":
-                    self._log_message("Detected /exchange/Pause - starting optimization")
+                    self._log_message("Detected /exchange/Pause - starting FULL optimization")
                     self.waiting_for_pause_location = False
                     self.status_label.setText("Status: Optimizing (Automated)")
                     self._run_optimization_cycle()
             else:
-                # Normal mode: count /exchange/data occurrences
+                # Every new /exchange/data is a new energy point.
+                # - Every N-th one: pause tomoscan and run the FULL
+                #   motor1+motor2 optimization (intrusive; needs pause).
+                # - All the others: run an ONLINE bright-spot check with no
+                #   pause — grab the first beam-on frame, check, nudge
+                #   motor1 by one fine step if needed.
                 if current_value == "/exchange/data" and self.last_hdf5_location != "/exchange/data":
                     self.hdf5_location_trigger_count += 1
                     self._log_message(f"Detected /exchange/data ({self.hdf5_location_trigger_count}/{self.hdf5_location_run_every})")
-
-                    # Check if we should trigger pause
                     if self.hdf5_location_trigger_count >= self.hdf5_location_run_every:
-                        self._log_message("Threshold reached - pausing TomoScan")
+                        self._log_message("Threshold reached - pausing for FULL optimization")
                         self.hdf5_location_trigger_count = 0  # Reset counter
                         self._pause_tomoscan()
+                    else:
+                        # Give the shutter + energy a moment to settle before
+                        # sampling a frame. Runs entirely in this Qt thread —
+                        # no tomoscan pause, no motor sweep, single-shot nudge.
+                        QtCore.QTimer.singleShot(1500, self._online_bright_spot_check)
 
             self.last_hdf5_location = current_value
 
@@ -532,8 +811,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         initial_mean = self._get_image_mean()
         if initial_mean is None:
             self._log_message("ERROR: Cannot get image mean")
-            self.optimization_active = False
-            self._set_status_pv("Done")
+            # Route through _complete_optimization so the trigger file is
+            # updated to DONE and any external waiter (XANES2D) unblocks.
+            self._complete_optimization()
             return
 
         self._log_message(f"Initial mean: {initial_mean:.2f}")
@@ -724,12 +1004,164 @@ class QGMaxDialog(QtWidgets.QDialog):
             self._finish_optimization()
 
     def _finish_optimization(self):
-        """Complete the optimization cycle."""
-        self.optimization_active = False
+        """Both motors optimized - run bright-spot correction, then clean up."""
         self.waiting_for_image = False
+        self._log_message("=== Optimization done - checking central bright spot ===")
+        self.bright_spot_correction_count = 0
+        # Direction is recomputed per check from the spot's position.
+        QtCore.QTimer.singleShot(1000, self._check_central_bright_spot)
+
+    def _online_bright_spot_check(self):
+        """Single-shot bright-spot check that runs WITHOUT pausing tomoscan.
+        Called on every /exchange/data event that isn't an N-th full-opt
+        event. Grabs one frame (assumed beam-on shortly after the shutter
+        opens at the new energy), checks for a bright spot, and if found
+        moves motor1 by one fine step in the direction picked from the
+        spot's Y position. No retry loop — motor1 keeps moving while
+        tomoscan acquires the next frames.
+
+        No-ops if a full optimization or another online check is already
+        in progress, or if the post-optimization spot-check checkbox is
+        turned off."""
+        if self.optimization_active or self.online_spot_check_active:
+            return
+        if not self.spot_check_enabled_input.isChecked():
+            return
+        self.online_spot_check_active = True
+        try:
+            image = self._get_image()
+            if image is None:
+                self._log_message("Online spot-check: no image available")
+                return
+            result = self._find_bright_spot(image)
+            if result is None:
+                self._log_message("Online spot-check: could not compute ratio")
+                return
+            ratio, peak_y, peak_x = result
+            threshold = self.spot_threshold_input.value()
+            self._log_message(
+                f"Online spot-check: peak ({peak_x}, {peak_y}) "
+                f"ratio={ratio:.2f} (threshold {threshold:.2f})"
+            )
+            if ratio <= threshold:
+                return
+
+            # Direction: push spot away from image center (upper half → +1,
+            # lower → -1), scaled by direction_sign for motor wiring.
+            image_center_y = image.shape[0] / 2.0
+            y_sign = +1 if peak_y < image_center_y else -1
+            direction = y_sign * self.bright_spot_direction_sign
+
+            pv = self.motor1_pv_input.text()
+            step_size = self.motor1_step_input.value()
+            current_pos = self._get_pv_value(pv)
+            if current_pos is None:
+                self._log_message("Online spot-check: cannot read motor1")
+                return
+            shift = direction * self.bright_spot_nudge_steps * step_size
+            new_pos = current_pos + shift
+            self._log_message(
+                f"Online spot-check: motor1 nudge {shift:+.4f} → {new_pos:.4f}"
+            )
+            self._set_pv_value(pv, new_pos)
+        finally:
+            self.online_spot_check_active = False
+
+    def _check_central_bright_spot(self):
+        """Detect a bright circular feature at image center and correct it."""
+        if not self.optimization_active:
+            return
+
+        if not self.spot_check_enabled_input.isChecked():
+            self._complete_optimization()
+            return
+
+        image = self._get_image()
+        if image is None:
+            self._log_message("Bright-spot check: no image available - skipping")
+            self._complete_optimization()
+            return
+
+        result = self._find_bright_spot(image)
+        if result is None:
+            self._log_message("Bright-spot check: could not compute ratio - skipping")
+            self._complete_optimization()
+            return
+        ratio, peak_y, peak_x = result
+
+        threshold = self.spot_threshold_input.value()
+        max_corrections = self.spot_max_corrections_input.value()
+        self._log_message(
+            f"Bright-spot check: peak at ({peak_x}, {peak_y}) "
+            f"spot/background ratio = {ratio:.2f} (threshold {threshold:.2f})"
+        )
+
+        if ratio <= threshold:
+            self._log_message("No central bright spot - optimization finalized")
+            self._complete_optimization()
+            return
+
+        if self.bright_spot_correction_count >= max_corrections:
+            self._log_message(
+                f"Bright spot persists after {self.bright_spot_correction_count} "
+                f"corrections - stopping"
+            )
+            self._complete_optimization()
+            return
+
+        # Direction: push the spot AWAY from image center. If the peak is
+        # in the upper half of the image (peak_y < center), move motor1
+        # +1 * direction_sign; if in the lower half, -1 * direction_sign.
+        # direction_sign accounts for the physical wiring of motor1 vs the
+        # image Y axis — flip it in __init__ if the moves go the wrong way.
+        image_center_y = image.shape[0] / 2.0
+        y_sign = +1 if peak_y < image_center_y else -1
+        self.bright_spot_nudge_direction = y_sign * self.bright_spot_direction_sign
+
+        pv = self.motor1_pv_input.text()
+        step_size = self.motor1_step_input.value()
+        current_pos = self._get_pv_value(pv)
+        if current_pos is None:
+            self._log_message("Bright-spot check: cannot read motor1 - skipping")
+            self._complete_optimization()
+            return
+
+        shift = self.bright_spot_nudge_direction * self.bright_spot_nudge_steps * step_size
+        new_pos = current_pos + shift
+        self.bright_spot_correction_count += 1
+        self._log_message(
+            f"Bright spot detected - motor1 nudge {shift:+.4f} → {new_pos:.4f} "
+            f"({self.bright_spot_correction_count}/{max_corrections})"
+        )
+
+        if not self._set_pv_value(pv, new_pos):
+            self._log_message("Bright-spot check: motor1 move failed - stopping")
+            self._complete_optimization()
+            return
+
+        # Wait for motor to settle and a fresh image to arrive.
+        QtCore.QTimer.singleShot(1000, self._check_central_bright_spot)
+
+    def _complete_optimization(self):
+        """Final cleanup after optimization and bright-spot correction."""
+        self.optimization_active = False
 
         # Set status PV to Done
         self._set_status_pv("Done")
+
+        # If this cycle was triggered by the external request file, bump the
+        # response file's last_completed_ts so the caller unblocks. Using a
+        # separate response file means XANES2D's next request write doesn't
+        # clobber our completion record (and vice versa).
+        trigger_ts = getattr(self, "_qgmax_trigger_ts", None)
+        if trigger_ts is not None:
+            try:
+                with open(QGMAX_RESPONSE_FILE, "w") as fh:
+                    json.dump({"last_completed_ts": trigger_ts,
+                               "completed_at": time.time()}, fh)
+            except Exception:
+                pass
+            self._qgmax_trigger_ts = None
 
         # If in automated mode, resume TomoScan
         if self.auto_mode_enabled:
@@ -789,6 +1221,9 @@ class QGMaxDialog(QtWidgets.QDialog):
         # Set status PV to Done when closing
         self._set_status_pv("Done")
 
+        # Stop trigger polling
+        self.trigger_poll_timer.stop()
+
         # Stop automated mode if running
         if self.auto_mode_enabled:
             self.hdf5_location_monitor_timer.stop()
@@ -798,4 +1233,44 @@ class QGMaxDialog(QtWidgets.QDialog):
             self.optimization_timer.stop()
             self._log_message("Stopped optimization (dialog closed)")
 
+        self._persist_settings()
         event.accept()
+
+    def _restore_settings(self):
+        s = load_settings("QGMaxDialog")
+        if not s:
+            return
+        self.motor1_pv_input.setText(s.get("motor1_pv", self.motor1_pv_input.text()))
+        self.motor1_step_input.setValue(s.get("motor1_step", self.motor1_step_input.value()))
+        self.motor2_pv_input.setText(s.get("motor2_pv", self.motor2_pv_input.text()))
+        self.motor2_step_input.setValue(s.get("motor2_step", self.motor2_step_input.value()))
+        self.interval_input.setValue(s.get("interval", self.interval_input.value()))
+        self.max_iterations_input.setValue(s.get("max_iterations", self.max_iterations_input.value()))
+        self.convergence_threshold_input.setValue(s.get("convergence_threshold", self.convergence_threshold_input.value()))
+        self.hdf5_location_pv_input.setText(s.get("hdf5_location_pv", self.hdf5_location_pv_input.text()))
+        self.tomoscan_pause_pv_input.setText(s.get("tomoscan_pause_pv", self.tomoscan_pause_pv_input.text()))
+        self.run_every_input.setValue(s.get("run_every", self.run_every_input.value()))
+        self.spot_check_enabled_input.setChecked(s.get("spot_check_enabled", self.spot_check_enabled_input.isChecked()))
+        self.spot_threshold_input.setValue(s.get("spot_threshold", self.spot_threshold_input.value()))
+        self.spot_center_radius_input.setValue(int(s.get("spot_center_radius_px", self.spot_center_radius_input.value())))
+        self.spot_outer_radius_input.setValue(int(s.get("spot_outer_radius_px", self.spot_outer_radius_input.value())))
+        self.spot_max_corrections_input.setValue(s.get("spot_max_corrections", self.spot_max_corrections_input.value()))
+
+    def _persist_settings(self):
+        save_settings("QGMaxDialog", {
+            "motor1_pv": self.motor1_pv_input.text(),
+            "motor1_step": self.motor1_step_input.value(),
+            "motor2_pv": self.motor2_pv_input.text(),
+            "motor2_step": self.motor2_step_input.value(),
+            "interval": self.interval_input.value(),
+            "max_iterations": self.max_iterations_input.value(),
+            "convergence_threshold": self.convergence_threshold_input.value(),
+            "hdf5_location_pv": self.hdf5_location_pv_input.text(),
+            "tomoscan_pause_pv": self.tomoscan_pause_pv_input.text(),
+            "run_every": self.run_every_input.value(),
+            "spot_check_enabled": self.spot_check_enabled_input.isChecked(),
+            "spot_threshold": self.spot_threshold_input.value(),
+            "spot_center_radius_px": self.spot_center_radius_input.value(),
+            "spot_outer_radius_px": self.spot_outer_radius_input.value(),
+            "spot_max_corrections": self.spot_max_corrections_input.value(),
+        })
