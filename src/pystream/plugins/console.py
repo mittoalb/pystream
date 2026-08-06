@@ -145,7 +145,7 @@ class PythonConsole(QtWidgets.QWidget):
         self.status_display.setStyleSheet("""
             QTextEdit {
                 background-color: #1a1a1a;
-                color: #00ff00;
+                color: #d4d4d4;
                 border: 1px solid #404040;
                 border-radius: 3px;
                 padding: 5px;
@@ -401,12 +401,10 @@ def process(img):
                 self.logger.error(f"Failed to save file {file_path}: {e}")
     
     def _log_status(self, message: str, error: bool = False):
-        """Log message to status display"""
-        if error:
-            color = "#ff4444"
-        else:
-            color = "#00ff00"
-        
+        """Log message to status display. Neutral light-gray for info,
+        soft red for errors — matches the rest of pystream's palette
+        so the panel isn't one wall of bright green."""
+        color = "#ff6b6b" if error else "#d4d4d4"
         self.status_display.setTextColor(QtGui.QColor(color))
         self.status_display.append(f"[{QtCore.QTime.currentTime().toString()}] {message}")
         
