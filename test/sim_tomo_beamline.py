@@ -139,28 +139,77 @@ MM_PX   = 0.000766      # 0.766 µm/px (matches 32-ID TXM autocenter defaults)
 # have something to detect. Positive = right of center.
 COR_COL_OFFSET_PX = 25.0
 
-# Detector counts model.
-FLUX           = 8000.0    # photons/pixel through empty beam
-READ_NOISE     = 25.0      # Gaussian σ (counts)
+# Detector counts model — tuned so a subtle absorption feature sits
+# just barely above shot noise, matching real TXM projection images.
+FLUX           = 5000.0    # photons/pixel through empty beam
+READ_NOISE     = 45.0      # Gaussian σ (counts)
 DARK_OFFSET    = 100.0     # constant baseline (counts)
 N_HOT_PIXELS   = 30        # random pixels stuck at ~saturation
-ABSORPTION_SCL = 1.0       # multiplier on the phantom's absorption
+ABSORPTION_SCL = 1.0       # global multiplier on the phantom's absorption
 
-# Phantom: list of (x_mm, y_mm, z_mm, radius_mm, absorption).
+# ── Phantom generator ─────────────────────────────────────────────────
 # Sample frame: z is vertical (rotation axis direction), x is horizontal
-# perpendicular to the beam, y is along the beam.
-# Rotation happens around z. Positive rotation angle = right-handed
-# rotation around +z.
-DEFAULT_PHANTOM: List[Tuple[float, float, float, float, float]] = [
-    # Background sample stub — big, low-density (like a mounted rod).
-    ( 0.000,  0.000,  0.000, 0.180, 0.20),
-    # Discrete particles at various off-CoR positions the user can click.
-    ( 0.055,  0.020,  0.050, 0.010, 1.60),
-    (-0.040, -0.030, -0.020, 0.008, 1.90),
-    ( 0.025, -0.060,  0.010, 0.014, 1.10),
-    ( 0.075,  0.045, -0.045, 0.007, 2.10),
-    (-0.010,  0.010, -0.060, 0.006, 1.80),
-]
+# perpendicular to the beam, y is along the beam. Rotation is around z.
+#
+# Each "particle" is a CLUSTER of small sub-spheres at perturbed
+# positions with per-sub-sphere absorption variation. That gives:
+#   - irregular outlines (not perfect discs)
+#   - internal density texture (some inner regions denser than others)
+#   - a soft edge halo where sub-spheres taper out
+# Empirically this reads as a "real particle" rather than a hard puck.
+
+# Absorption values are unitless density × pixel-chord — a 0.01-mm-radius
+# particle with absorption 0.010 has max accumulated depth ≈ 26 px × 0.010
+# = 0.26 → exp(−0.26) ≈ 0.77, ie ~23 % local darkening. Subtle, like TXM.
+
+def _make_lumpy_cluster(cx, cy, cz, size_mm, base_absorption,
+                         n_lumps=6, seed=0):
+    """Return a list of overlapping sub-spheres approximating one
+    irregular particle. Positions jitter by ~30 % of size, sub-radii
+    range from 35–65 % of size, and absorptions vary ±30 % around
+    `base_absorption` so overlaps produce internal density hotspots."""
+    rng = np.random.default_rng(seed=seed)
+    lumps = []
+    for _ in range(int(n_lumps)):
+        dx = float(rng.normal(0.0, size_mm * 0.30))
+        dy = float(rng.normal(0.0, size_mm * 0.30))
+        dz = float(rng.normal(0.0, size_mm * 0.30))
+        r  = float(rng.uniform(size_mm * 0.35, size_mm * 0.65))
+        a  = float(base_absorption * rng.uniform(0.7, 1.3))
+        lumps.append((cx + dx, cy + dy, cz + dz, r, a))
+    return lumps
+
+
+def build_realistic_phantom(seed=0):
+    """Textured background stub + several irregular sub-particles."""
+    phantom = []
+    # Background sample stub — spread of ~25 low-density sub-spheres
+    # so the mounting-rod silhouette is grainy, not a perfect circle.
+    # Absorption tuned so the stub gives ~15-20 % darkening at center
+    # (real TXM matrix behaves similarly).
+    phantom.extend(_make_lumpy_cluster(
+        0.000, 0.000, 0.000,
+        size_mm=0.170, base_absorption=0.00055,
+        n_lumps=25, seed=seed + 1000))
+    # Discrete particles the user can click. Absorptions tuned so peak
+    # particle-center contrast is ~30-45 % (bumpy, not opaque).
+    particles = [
+        # (cx,     cy,     cz,     size_mm, base_absorption)
+        ( 0.055,   0.020,  0.050,  0.012,   0.007),
+        (-0.040,  -0.030, -0.020,  0.010,   0.008),
+        ( 0.025,  -0.060,  0.010,  0.016,   0.005),
+        ( 0.075,   0.045, -0.045,  0.009,   0.009),
+        (-0.010,   0.010, -0.060,  0.008,   0.008),
+    ]
+    for i, (cx, cy, cz, size, absorb) in enumerate(particles):
+        phantom.extend(_make_lumpy_cluster(
+            cx, cy, cz, size_mm=size, base_absorption=absorb,
+            n_lumps=6, seed=seed + i))
+    return phantom
+
+
+DEFAULT_PHANTOM: List[Tuple[float, float, float, float, float]] = \
+    build_realistic_phantom(seed=0)
 
 # PV names — hardcoded to match the bl32ID plugins.
 ROT_PV  = '32idbTXM:ens:c1:m1'
@@ -232,11 +281,10 @@ def render_projection(theta_deg: float, topx_mm: float, topz_mm: float,
     default_cor_col    = W / 2.0 + cor_col_offset_px
     default_center_row = H / 2.0
 
-    # Accumulated absorption per pixel.
+    # Accumulated absorption per pixel — filled in one sub-sphere at a
+    # time, but only within each sphere's bounding box (not the whole
+    # image) so a lumpy-cluster phantom with 50+ sub-spheres stays fast.
     absorb = np.zeros((H, W), dtype=np.float32)
-    col_idx = np.arange(W, dtype=np.float32)
-    row_idx = np.arange(H, dtype=np.float32)
-    cols, rows = np.meshgrid(col_idx, row_idx)
 
     for x0, y0, z0, r, absorption in spheres:
         # Projected center after rotation and topx/topz shift.
@@ -247,12 +295,23 @@ def render_projection(theta_deg: float, topx_mm: float, topz_mm: float,
         cx = default_cor_col + (x0 * cos_t - y0 * sin_t - topx_mm) / mm_px
         cy = default_center_row + (z0 - topz_mm) / mm_px
         r_px = r / mm_px
-        d2 = (cols - cx) ** 2 + (rows - cy) ** 2
         r2 = r_px * r_px
+        # Bounding box, clipped to image.
+        x_lo = max(0, int(np.floor(cx - r_px)))
+        x_hi = min(W, int(np.ceil(cx + r_px)) + 1)
+        y_lo = max(0, int(np.floor(cy - r_px)))
+        y_hi = min(H, int(np.ceil(cy + r_px)) + 1)
+        if x_lo >= x_hi or y_lo >= y_hi:
+            continue    # sphere is entirely off-image
+        # Local grid inside the bounding box only.
+        cols_bb = np.arange(x_lo, x_hi, dtype=np.float32)
+        rows_bb = np.arange(y_lo, y_hi, dtype=np.float32)[:, None]
+        d2 = (cols_bb - cx) ** 2 + (rows_bb - cy) ** 2
         mask = d2 < r2
         if mask.any():
             # Chord length through a solid sphere at pixel (col, row).
-            absorb[mask] += absorption * 2.0 * np.sqrt(r2 - d2[mask])
+            absorb[y_lo:y_hi, x_lo:x_hi][mask] += (
+                absorption * 2.0 * np.sqrt(r2 - d2[mask]))
 
     # Beer-Lambert transmitted intensity.
     if flat_field is not None:

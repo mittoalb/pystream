@@ -29,10 +29,20 @@ from PyQt5.QtCore import pyqtSignal
 
 try:
     from scipy.ndimage import label as _ndimage_label
+    from scipy.ndimage import binary_erosion as _binary_erosion
     _HAS_SCIPY = True
 except Exception:
     _ndimage_label = None
+    _binary_erosion = None
     _HAS_SCIPY = False
+
+# Optional SAM2 backend — reads ~/.pystream/ai_backends.json to find a
+# heavy-env python. Backend is asked for its own availability at pick
+# time; missing/broken → we silently fall through to Otsu.
+try:
+    from ...ai_backends.sam2_backend import SAM2Backend
+except Exception:
+    SAM2Backend = None  # type: ignore
 
 
 # ── Hardcoded constants — edit here to retune ─────────────────────────
@@ -46,7 +56,18 @@ _SETTLE_S   = 1.0                    # sample settle after any motor move
 _AVERAGE_N  = 3                      # frames averaged per grab
 _TOL_PX     = 1.0                    # convergence tolerance in pixels
 _MAX_ITER   = 6                      # max alignment iterations
-_WIN_PX     = 200                    # segmentation window half-size
+_WIN_PX     = 80                     # segmentation window half-size.
+                                     # Smaller than a real particle would
+                                     # ever be, but big enough to include
+                                     # local background so Otsu can split.
+                                     # A 200-px window at 32-ID TXM often
+                                     # engulfs the whole sample stub and
+                                     # then Otsu splits stub-vs-off-sample
+                                     # instead of particle-vs-stub.
+# A CC bigger than this is almost certainly the whole stub, not a
+# particle — refuse it so the plugin doesn't drive motors based on the
+# centroid of the entire sample.
+_MAX_PARTICLE_PX = 5000
 _SOFT_MIN_DEG = -180.0
 _SOFT_MAX_DEG = 540.0
 
@@ -131,19 +152,181 @@ def _segment_from_seed(img: np.ndarray, seed_x: float, seed_y: float,
     if nearest:
         chosen = _pick_nearest_cc(labeled, n, lx, ly)
     else:
+        # Strict: the click MUST land on a foreground pixel of a real CC.
+        # No "biggest CC" fallback — that used to happily grab the whole
+        # sample stub when the user clicked on background.
         chosen = int(labeled[ly, lx])
-        if chosen == 0:
-            # Click landed on background — fall back to the biggest blob.
-            chosen = _pick_largest_cc(labeled, n)
 
     if chosen == 0:
         return None
-    pts = np.where(labeled == chosen)
+    cc_mask = (labeled == chosen)
+    pts = np.where(cc_mask)
     if pts[0].size < 5:
+        return None
+    # Sanity cap: a "particle" bigger than _MAX_PARTICLE_PX is almost
+    # certainly the whole stub or a large sample region that got
+    # merged into one CC. Refuse — the user should click closer to a
+    # discrete feature, or reduce _WIN_PX if the sample really is that
+    # small.
+    if pts[0].size > _MAX_PARTICLE_PX:
         return None
     cy_local = float(np.mean(pts[0]))
     cx_local = float(np.mean(pts[1]))
-    return (cx_local + x0, cy_local + y0, int(pts[0].size))
+
+    # Boundary pixels of the chosen CC — for the on-image overlay.
+    # `mask & ~binary_erosion(mask)` is the classic 1-px-thick outline.
+    eroded = _binary_erosion(cc_mask)
+    bpy, bpx = np.where(cc_mask & ~eroded)
+    # Bounding box (inclusive) in full-image coords.
+    y_min, y_max = int(pts[0].min()), int(pts[0].max())
+    x_min, x_max = int(pts[1].min()), int(pts[1].max())
+    bbox = (x_min + x0, y_min + y0, x_max + x0, y_max + y0)
+    # Boundary in full-image coords (offset back from crop origin).
+    boundary_x = bpx + x0
+    boundary_y = bpy + y0
+    return (cx_local + x0, cy_local + y0, int(pts[0].size),
+            bbox, boundary_x, boundary_y)
+
+
+def _snap_to_local_extremum(img: np.ndarray, x: float, y: float,
+                            radius_px: int = 12, prefer_sign: int = 0):
+    """ImageJ-magic-wand-style snap: within `radius_px` of the click,
+    smooth locally to kill single-pixel noise, then pick the darkest
+    OR brightest pixel (whichever deviates more from the local
+    background). Returns (snap_x, snap_y, sign) — sign=+1 means bright
+    feature, -1 dark. `prefer_sign` can force one direction (0 = auto).
+
+    Why: users click NEAR a small particle but rarely on the exact
+    pixel-center. Without snapping, one pixel of noise at the click
+    dictates the sign and defeats the segmentation."""
+    H, W = img.shape[:2]
+    cx, cy = int(round(x)), int(round(y))
+    r = int(radius_px)
+    x_lo = max(0, cx - r)
+    x_hi = min(W, cx + r + 1)
+    y_lo = max(0, cy - r)
+    y_hi = min(H, cy + r + 1)
+    win = img[y_lo:y_hi, x_lo:x_hi].astype(np.float32)
+    if win.size == 0:
+        return x, y, 1
+    # 3x3 box filter to squash single-pixel noise so extrema mean
+    # something. Cheap; keeps subtle features intact.
+    try:
+        from scipy.ndimage import uniform_filter
+        smooth = uniform_filter(win, size=3)
+    except Exception:
+        smooth = win
+    # Larger context median = "what's typical background here".
+    R = max(r * 2, 40)
+    xL = max(0, cx - R); xH = min(W, cx + R + 1)
+    yL = max(0, cy - R); yH = min(H, cy + R + 1)
+    bg_med = float(np.median(img[yL:yH, xL:xH]))
+    dark_dev  = bg_med - float(smooth.min())    # >0 if darker than bg
+    bright_dev = float(smooth.max()) - bg_med    # >0 if brighter than bg
+
+    if prefer_sign > 0:
+        pick_dark = False
+    elif prefer_sign < 0:
+        pick_dark = True
+    else:
+        pick_dark = dark_dev >= bright_dev
+
+    if pick_dark:
+        idx = int(np.argmin(smooth))
+    else:
+        idx = int(np.argmax(smooth))
+    dy, dx = np.unravel_index(idx, smooth.shape)
+    sign = -1 if pick_dark else 1
+    return float(dx + x_lo), float(dy + y_lo), sign
+
+
+def _region_grow(img: np.ndarray, seed_x: float, seed_y: float, sign: int,
+                 max_radius: int = 25, sigma_k: float = 1.5,
+                 read_noise: float = 45.0):
+    """Bounded flood-fill from (seed_x, seed_y). Accepts pixels whose
+    intensity is within `sigma_k * σ_noise` of the seed's LOCAL MEAN,
+    where σ_noise = sqrt(seed + read_noise²) — the Poisson + read
+    noise floor. Growth is hard-capped by `max_radius` pixels from the
+    seed so a chain of noise-similar pixels can't run away into the
+    background.
+
+    Why this works when the older global-median approach didn't: on a
+    subtle particle (91-count contrast) inside a much larger fuzzy
+    stub, the LOCAL MEDIAN of an 80×80 window is dominated by stub-
+    background pixels only ~90 counts above the particle. Value-based
+    thresholds on that median can't distinguish. Anchoring the
+    threshold to the SEED value + noise σ instead means the accepted
+    band tracks the particle no matter how close the stub background
+    is, and the radius cap prevents the mask from bleeding beyond it.
+    """
+    H, W = img.shape[:2]
+    sy, sx = int(round(seed_y)), int(round(seed_x))
+    if not (0 <= sx < W and 0 <= sy < H):
+        return None
+    f = img.astype(np.float32)
+    # Seed value from a small 5x5 average — dampens the effect of a
+    # single-pixel outlier at the exact click point.
+    yL = max(0, sy - 2); yH = min(H, sy + 3)
+    xL = max(0, sx - 2); xH = min(W, sx + 3)
+    seed_val = float(f[yL:yH, xL:xH].mean())
+    noise = float(np.sqrt(max(seed_val, 1.0) + read_noise * read_noise))
+    delta = sigma_k * noise
+    if sign < 0:
+        thresh_hi = seed_val + delta      # accept anything up to seed+kσ
+        thresh_lo = -np.inf               # dark is fine
+    else:
+        thresh_lo = seed_val - delta
+        thresh_hi = np.inf
+    accept = lambda v: thresh_lo <= v <= thresh_hi
+
+    # BFS from the seed, bounded by radius.
+    mask = np.zeros((H, W), dtype=bool)
+    if not accept(float(f[sy, sx])):
+        # Even the seed pixel is outside the acceptance band — very
+        # noisy click, give up.
+        return None
+    mask[sy, sx] = True
+    stack = [(sy, sx)]
+    r2_max = max_radius * max_radius
+    while stack:
+        y, x = stack.pop()
+        # Reject if out of radius (measured from the seed, so a
+        # jagged noise chain can't extend the reach).
+        if (y - sy) * (y - sy) + (x - sx) * (x - sx) > r2_max:
+            continue
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < H and 0 <= nx < W and not mask[ny, nx]:
+                if accept(float(f[ny, nx])):
+                    mask[ny, nx] = True
+                    stack.append((ny, nx))
+    n = int(mask.sum())
+    if n < 5:
+        return None
+    return mask
+
+
+def _mask_to_segment_tuple(mask: np.ndarray):
+    """Turn a bool (H, W) SAM mask into the same 6-tuple that
+    `_segment_from_seed` returns: (cx, cy, size, bbox, bx, by).
+    Returns None if the mask is empty."""
+    if mask is None or not mask.any():
+        return None
+    pts = np.where(mask)
+    if pts[0].size < 5:
+        return None
+    if _binary_erosion is not None:
+        eroded = _binary_erosion(mask)
+        bpy, bpx = np.where(mask & ~eroded)
+    else:   # scipy missing — cheap-but-ugly outline via shifts
+        bpy = pts[0]; bpx = pts[1]
+    cx = float(np.mean(pts[1]))
+    cy = float(np.mean(pts[0]))
+    y_min, y_max = int(pts[0].min()), int(pts[0].max())
+    x_min, x_max = int(pts[1].min()), int(pts[1].max())
+    return (cx, cy, int(pts[0].size),
+            (x_min, y_min, x_max, y_max),
+            bpx.astype(np.int64), bpy.astype(np.int64))
 
 
 def _pick_largest_cc(labeled: np.ndarray, n: int) -> int:
@@ -278,7 +461,7 @@ class _AlignWorker(QtCore.QThread):
             if seg is None:
                 self.failed.emit("Could not segment a blob at the click point.")
                 return
-            cx0, cy0, sz0 = seg
+            cx0, cy0, sz0 = seg[0], seg[1], seg[2]
             self.log.emit(f"Segment @ θ₀: centroid=({cx0:.1f}, {cy0:.1f})  "
                           f"[{sz0} px]")
 
@@ -311,7 +494,7 @@ class _AlignWorker(QtCore.QThread):
                         "The particle may have rotated out of view — "
                         "aborting BEFORE moving topx/topz.")
                     return
-                cx180, cy180, sz180 = seg
+                cx180, cy180, sz180 = seg[0], seg[1], seg[2]
                 self.log.emit(f"Segment @ θ₀+Δ: centroid=({cx180:.1f}, "
                               f"{cy180:.1f})  [{sz180} px]")
 
@@ -352,7 +535,7 @@ class _AlignWorker(QtCore.QThread):
                             f"Iter {k}: lost the particle. Aborting; "
                             "the sample may have moved too far.")
                         return
-                    cx, cy, sz = seg
+                    cx, cy, sz = seg[0], seg[1], seg[2]
                     dx_px = c_rot - cx
                     dy_px = target_y - cy
                     last_dx, last_dy = dx_px, dy_px
@@ -480,7 +663,9 @@ class ParticleAlignDialog(QtWidgets.QDialog):
 
         self._worker: Optional[_AlignWorker] = None
         self._click_catcher: Optional[_ClickCatcher] = None
-        self._marker = None
+        self._marker = None            # crosshair at centroid
+        self._marker_bbox = None       # dashed bounding-box rect
+        self._marker_outline = None    # boundary-pixel dots
 
         # Picked-particle state (in image-pixel coords).
         self._pick_x: Optional[float] = None
@@ -629,42 +814,90 @@ class ParticleAlignDialog(QtWidgets.QDialog):
                       f"image (W={W}, H={H}).")
             return
 
-        # Infer contrast sign — bright blob if click is above local median.
-        cx_i, cy_i = int(x), int(y)
-        r = _WIN_PX // 2
-        window = img[max(0, cy_i - r):cy_i + r,
-                     max(0, cx_i - r):cx_i + r]
-        med = float(np.median(window)) if window.size else float(np.median(img))
-        pix = float(img[cy_i, cx_i])
-        self._sign = 1 if pix >= med else -1
+        # Snap to the nearest local extremum (ImageJ-magic-wand style)
+        # so imprecise clicks still land on the intended feature. This
+        # also determines the contrast sign — auto-picked from the
+        # deviation direction.
+        snap_x, snap_y, self._sign = _snap_to_local_extremum(img, x, y)
         sign_txt = "bright" if self._sign > 0 else "dark"
+        if (snap_x, snap_y) != (x, y):
+            self._log(f"Snapped click ({x:.1f}, {y:.1f}) → "
+                      f"({snap_x:.1f}, {snap_y:.1f}) [{sign_txt}]")
 
-        if not _HAS_SCIPY:
-            self._log("scipy missing — cannot segment. `pip install scipy`.")
-            return
+        # Segmentation cascade:
+        #   1. SAM2 backend (if configured + working env)
+        #   2. region-grow from the snapped seed (best classical for
+        #      lumpy low-contrast particles — ImageJ magic-wand style)
+        #   3. Otsu on a local window (last resort — often fails on
+        #      subtle features)
+        seg = None
+        used_backend = None
+        if SAM2Backend is not None:
+            sam = SAM2Backend()
+            if sam.available():
+                self._log("Segmenting with SAM2 (may take a few seconds)…")
+                mask = sam.segment(img, snap_x, snap_y)
+                if mask is not None:
+                    seg = _mask_to_segment_tuple(mask)
+                    used_backend = "sam2"
+                    if seg is None:
+                        self._log("SAM2 returned an empty mask — trying region-grow.")
+                else:
+                    self._log(f"SAM2 failed ({sam.last_error()}) — trying region-grow.")
 
-        seg = _segment_from_seed(img, x, y, self._sign, nearest=False)
         if seg is None:
-            self._log(f"Segmentation failed at click ({x:.1f}, {y:.1f}) "
-                      f"[{sign_txt}]. Try a different spot.")
-            return
+            mask = _region_grow(img, snap_x, snap_y, self._sign)
+            if mask is not None:
+                seg = _mask_to_segment_tuple(mask)
+                if seg is not None:
+                    used_backend = "region-grow"
 
-        cx, cy, sz = seg
-        self._pick_x, self._pick_y = x, y
+        if seg is None and _HAS_SCIPY:
+            seg = _segment_from_seed(img, snap_x, snap_y, self._sign,
+                                     nearest=False)
+            if seg is not None:
+                used_backend = "otsu"
+
+        if seg is None:
+            self._log(
+                f"No segmentation at snap=({snap_x:.1f}, {snap_y:.1f}) "
+                f"[{sign_txt}]. Try clicking closer to a visible small "
+                f"feature — snap only searches within ±12 px, so if your "
+                f"click is way off the particle, it can't find it.")
+            return
+        self._log(f"Segmentation backend: {used_backend}")
+
+        cx, cy, sz = seg[0], seg[1], seg[2]
+        bbox = seg[3]
+        boundary_x, boundary_y = seg[4], seg[5]
+        # Store the SNAPPED position as the pick — that's what future
+        # re-segmentations use as their seed anchor.
+        self._pick_x, self._pick_y = snap_x, snap_y
         self._centroid_x, self._centroid_y = cx, cy
 
+        bw = bbox[2] - bbox[0] + 1
+        bh = bbox[3] - bbox[1] + 1
         self.pick_label.setText(
             f"pick=({x:.1f}, {y:.1f})  centroid=({cx:.1f}, {cy:.1f})  "
-            f"[{sign_txt}, {sz} px]")
+            f"bbox={bw}×{bh}  [{sign_txt}, {sz} px]")
         self._log(f"Picked {sign_txt} blob: pick=({x:.1f}, {y:.1f})  "
-                  f"centroid=({cx:.1f}, {cy:.1f})  [{sz} px]")
+                  f"centroid=({cx:.1f}, {cy:.1f})  bbox={bw}×{bh} px  "
+                  f"[{sz} px area]")
 
-        self._place_marker(cx, cy)
+        # Overlay on the live viewer: crosshair at centroid + boundary
+        # outline of the detected pixels + bounding box.
+        self._place_marker(cx, cy, boundary_x, boundary_y, bbox)
         self.run_btn.setEnabled(True)
 
-    def _place_marker(self, x: float, y: float):
-        """Drop a small crosshair on the image at (x, y). Parented to
-        the ImageItem so it pans/zooms with the image."""
+    def _place_marker(self, x: float, y: float,
+                      boundary_x=None, boundary_y=None, bbox=None):
+        """Draw the segmentation overlay on the live viewer:
+          - crosshair at the centroid (fixed screen size)
+          - magenta bounding box around the detected pixels
+          - magenta dots on every boundary pixel of the CC
+
+        Everything is parented to the ImageItem so it pans/zooms with
+        the image."""
         self._remove_marker()
         iv = self._parent_image_view()
         if iv is None:
@@ -672,12 +905,14 @@ class ParticleAlignDialog(QtWidgets.QDialog):
         img_item = iv.getImageItem()
         if img_item is None:
             return
-        s = 8.0
-        pen = QtCore.Qt.magenta
-        from PyQt5 import QtGui  # local import
+        from PyQt5 import QtGui  # local import for QPen/QColor
+
         pen_obj = QtGui.QPen(QtGui.QColor("magenta"))
         pen_obj.setWidth(2)
         pen_obj.setCosmetic(True)
+
+        # Crosshair at the centroid — fixed screen size regardless of zoom.
+        s = 8.0
         marker = QtWidgets.QGraphicsItemGroup()
         h_line = QtWidgets.QGraphicsLineItem(x - s, y, x + s, y)
         v_line = QtWidgets.QGraphicsLineItem(x, y - s, x, y + s)
@@ -689,17 +924,59 @@ class ParticleAlignDialog(QtWidgets.QDialog):
         marker.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
         self._marker = marker
 
+        # Bounding-box rectangle (in image-pixel coords → zooms WITH the
+        # image so its size stays true to the segmentation).
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            bbox_pen = QtGui.QPen(QtGui.QColor("magenta"))
+            bbox_pen.setWidth(1)
+            bbox_pen.setCosmetic(True)      # constant pixel width on screen
+            bbox_pen.setStyle(QtCore.Qt.DashLine)
+            rect = QtWidgets.QGraphicsRectItem(
+                x0 - 0.5, y0 - 0.5, (x1 - x0) + 1.0, (y1 - y0) + 1.0)
+            rect.setPen(bbox_pen)
+            rect.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
+            rect.setZValue(1499)
+            rect.setParentItem(img_item)
+            self._marker_bbox = rect
+        else:
+            self._marker_bbox = None
+
+        # Boundary pixels — one tiny magenta dot per pixel on the CC edge.
+        # Parented to the ImageItem so it stays anchored. The QPainterPath
+        # here is a fast way to draw many 1-px marks in one item.
+        if boundary_x is not None and len(boundary_x) > 0:
+            path = QtGui.QPainterPath()
+            for bx, by in zip(boundary_x, boundary_y):
+                # +0.5 to hit pixel-centers, tiny 1×1 rect per pixel.
+                path.addRect(float(bx), float(by), 1.0, 1.0)
+            outline = QtWidgets.QGraphicsPathItem(path)
+            fill_pen = QtGui.QPen(QtGui.QColor(255, 0, 255, 220))
+            fill_pen.setWidth(0)
+            fill_pen.setCosmetic(True)
+            outline.setPen(fill_pen)
+            outline.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 255, 200)))
+            outline.setZValue(1498)
+            outline.setParentItem(img_item)
+            self._marker_outline = outline
+        else:
+            self._marker_outline = None
+
     def _remove_marker(self):
-        if self._marker is None:
-            return
-        try:
-            self._marker.setParentItem(None)
-            sc = self._marker.scene()
-            if sc is not None:
-                sc.removeItem(self._marker)
-        except Exception:
-            pass
-        self._marker = None
+        # Sweep every overlay item we may have created (crosshair,
+        # bbox rect, boundary path) so nothing accumulates on redraw.
+        for attr in ('_marker', '_marker_bbox', '_marker_outline'):
+            item = getattr(self, attr, None)
+            if item is None:
+                continue
+            try:
+                item.setParentItem(None)
+                sc = item.scene()
+                if sc is not None:
+                    sc.removeItem(item)
+            except Exception:
+                pass
+            setattr(self, attr, None)
 
     # ── Run / Abort ───────────────────────────────────────────────
     def _on_run(self):
