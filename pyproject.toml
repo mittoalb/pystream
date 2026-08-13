@@ -42,6 +42,7 @@ dev = ["black", "flake8", "pytest"]
 pystream = "pystream.pystream:main"
 viewer = "pystream.plugins.viewer:main"
 metrics = "pystream.plugins.metrics:main"
+pystream-new-beamline = "pystream.tools.new_beamline:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

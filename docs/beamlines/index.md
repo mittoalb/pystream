@@ -8,31 +8,44 @@ own subdirectory and provides one or more toolbar buttons.
 Edit [src/pystream/beamline_config.py](../../src/pystream/beamline_config.py):
 
 ```python
-ACTIVE_BEAMLINE = 'bl32ID'   # or None to disable
+ACTIVE_BEAMLINE = 'bl32ID'   # or 'bl19BM', or None to disable
 ```
 
 See the [Configuration Guide](configuration.md).
 
+## Toolbar layout
+
+Plugins render as **dropdown menus** in the top toolbar, one menu per
+group. A plugin's class attribute `GROUP = "Alignment"` (or `"Scans"`,
+`"Tools"`, …) decides which menu it lands in. Order within a menu and
+order of menus themselves comes from the beamline's `__all__` list.
+
+Click a menu → pick a plugin → it opens (launcher-style) or shows its
+dialog (singleton-style, per each plugin's `HANDLER_TYPE`).
+
 ## Using beamline tools
 
-Click **Beamlines** in the top toolbar to show the beamlines bar, pick a
-beamline, then select a tool.
+Click **Beamlines** in the top toolbar to show the beamlines bar, then
+pick a plugin from any dropdown.
 
 ## Built-in beamlines
 
-- [bl32ID](bl32ID.md) — APS 32-ID TXM imaging and tomography tools.
+- [bl32ID](bl32ID.md) — APS 32-ID TXM imaging + tomography. Full plugin
+  suite: CoR, AlignPart, QGMax, XANES, XANES 2D, DataMap, aTomo, ...
+- [bl19BM](bl19BM.md) — APS 19-BM. Empty scaffold; no plugins yet.
 
 ## Adding a new beamline
 
-1. Create `src/pystream/beamlines/bl<ID>/` with an `__init__.py`.
-2. In `__init__.py`, import each plugin class and list them in `__all__`:
-   ```python
-   from .my_tool import MyToolDialog
-   __all__ = ['MyToolDialog']
-   ```
-3. Each plugin class is a `QDialog` (or `QWidget`) with class attributes
-   `BUTTON_TEXT = "..."` and `HANDLER_TYPE = 'singleton'`.
-4. Set `ACTIVE_BEAMLINE = 'bl<ID>'` in `beamline_config.py` and restart.
+Fastest — use the built-in CLI:
+
+```bash
+pystream-new-beamline bl7BM --description "APS 7-BM tomography"
+```
+
+This creates `src/pystream/beamlines/bl7BM/__init__.py` with an empty
+plugin list and no-op `start_background_services()`. See
+[Adding a Beamline](adding_a_beamline.md) for the full flow (register
+plugins, set ACTIVE_BEAMLINE, add a pip extra).
 
 For launching standalone GUI scripts as separate processes, see the
 [Launcher Guide](launcher_guide.md).
@@ -43,6 +56,8 @@ For launching standalone GUI scripts as separate processes, see the
 
 configuration
 bl32ID
+bl19BM
+adding_a_beamline
 txmbot
 launcher_guide
 ```
