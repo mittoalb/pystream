@@ -1,4 +1,4 @@
-# TXMBot — AI Agent
+# Röntgen — AI Agent
 
 LLM chat assistant embedded in PyStream that can read live beamline state
 through a tool catalog and, with an explicit Yes/No confirmation, run
