@@ -30,6 +30,11 @@ bl32ID = [
   "xanes-gui @ git+https://github.com/mittoalb/xanes_gui.git",
   "mosalign @ git+https://github.com/mittoalb/mosalign.git",
 ]
+bl19BM = [
+  # No external deps yet — the bl19BM beamline package has no plugins
+  # that need extra Python libraries. Add here as you register plugins,
+  # e.g.  "some-tool @ git+https://github.com/…",
+]
 all = ["vispy>=0.14.0"]
 dev = ["black", "flake8", "pytest"]
 
