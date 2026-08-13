@@ -13,7 +13,7 @@ from .qgmax import QGMaxDialog, ensure_qgmax_background_watcher
 from .autocenter import AutoCenterDialog
 from .blgui import BLGuiDialog
 # NOTE: AgentDialog is NOT imported at package level. It's still available
-# via `from pystream.beamlines.bl32ID.agent import AgentDialog` and is
+# via the pystream.agent module (`from pystream.agent import AgentDialog`) and is
 # opened on demand by the AI Agent panel's ⚙ Settings button. Toolbar
 # registration would be redundant (chat is always visible at the bottom).
 from .datamap import DataMapDialog
@@ -26,33 +26,44 @@ from .atomo import AtomoLauncherDialog
 # below) with its own ⚙ Settings button that opens the full dialog on
 # demand. A toolbar button would be redundant. The class is still
 # importable (for the Settings button to instantiate it) via
-# `from pystream.beamlines.bl32ID.agent import AgentDialog`.
+# the pystream.agent module (`from pystream.agent import AgentDialog`).
 __all__ = ['MotorScanDialog', 'CenterOfRotationDialog', 'ParticleAlignDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'DataMapDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
 
 
 def start_background_services(parent_window):
-    """Invoked by pystream.py after the main window is built. Starts any
-    long-running watchers that should be active whether or not the user has
-    opened the corresponding dialog — currently just the QGMax request-file
-    listener."""
+    """Invoked by pystream.py after the main window is built. Two things:
+    (1) QGMax request-file listener (runs regardless of QGMax dialog open).
+    (2) One-time bootstrap of the 32-ID AI-agent knowledge base
+        (~/.pystream/docs symlinks, ioc_scripts.json, status_pages.json).
+    Both are idempotent."""
     try:
         ensure_qgmax_background_watcher(parent_window)
     except Exception:
         pass
-
-
-def provide_bottom_panels(parent_window):
-    """Invoked by pystream.py after the main window + background services
-    are up. Returns a list of (QWidget, title_str) pairs that pystream
-    inserts into its central vertical splitter beneath the viewer.
-
-    Panels are real children of the central widget (not floating
-    QDockWidgets) — user can resize via the splitter handle, hide via
-    the View menu, but not drag/detach.
-
-    Currently: the AI Agent chat panel."""
     try:
-        from .agent import build_agent_panel
-        return [(build_agent_panel(parent_window), "AI Agent")]
+        from .agent_tools import bootstrap_knowledge_base
+        bootstrap_knowledge_base()
     except Exception:
-        return []
+        pass
+
+
+def provide_agent_context():
+    """Beamline-specific tools + prompt-body appended to the core agent
+    prompt in pystream.agent. Queried at every Send. Returning None or
+    an empty dict here would make the agent tool-less on this beamline
+    (falling back to pure chat)."""
+    try:
+        from .agent_tools import (
+            anthropic_tool_specs, openai_tool_specs, get_tool,
+            WRITE_TOOLS, _bash_is_destructive, SYSTEM_PROMPT_ADDENDUM,
+        )
+        return {
+            "tool_specs_anthropic":     anthropic_tool_specs(),
+            "tool_specs_openai":        openai_tool_specs(),
+            "get_tool":                 get_tool,
+            "write_tools":              WRITE_TOOLS,
+            "is_destructive":           _bash_is_destructive,
+            "system_prompt_addendum":   SYSTEM_PROMPT_ADDENDUM,
+        }
+    except Exception:
+        return {}

@@ -1,18 +1,23 @@
 """
-AI Agent plugin for bl32ID.
+AI Agent — pystream core (beamline-agnostic).
 
-Chat panel that talks to a Gateway speaking either the Anthropic Messages
-API protocol or the OpenAI Chat Completions protocol. The user picks the
-protocol in the dialog; the plugin lists models from the Gateway and routes
-the call through the matching SDK.
+Chat panel + settings dialog that talks to a Gateway speaking either
+the Anthropic Messages API protocol or the OpenAI Chat Completions
+protocol. Runs in a background QThread so the GUI stays responsive.
 
-The agent has access to a small read-only tool catalog (read_pv, read_motor,
-get_detector_image_stats, list_recent_scans, read_scan_metadata — see
-`agent_tools.py`). The chat loop is agentic: when the model decides to
-call a tool, the worker executes it, surfaces it in the transcript, and
-feeds the result back to the model until it produces a final answer.
+The chat itself, the transcript, the ⚙ settings, the {name} /
+{beamline} substitutions, prompt caching, and history persistence are
+all universal — no beamline knowledge required.
 
-Network calls run on a QThread worker so the GUI thread stays responsive.
+Beamline-specific tools + prompt-body live in the active beamline's
+package (see e.g. `pystream/beamlines/bl32ID/agent_tools.py`). Each
+beamline optionally exports `provide_agent_context()` from its
+`__init__.py` — pystream queries it at every Send. Missing hook =
+tool-less pure-chat agent. Empty beamline = still works.
+
+Configuration + history persist under ~/.pystream/ :
+    agent_settings.json          gateway URL/key/model/name
+    agent_history_dock.json      dock conversation transcript
 """
 
 import json
@@ -23,14 +28,107 @@ from typing import Optional
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import pyqtSignal
 
-from .plugin_settings import PYSTREAM_HOME, load_settings, save_settings
-from .agent_tools import (
-    anthropic_tool_specs,
-    openai_tool_specs,
-    get_tool,
-    WRITE_TOOLS,
-    _bash_is_destructive,
-)
+
+# ── Storage locations ──────────────────────────────────────────────────
+
+PYSTREAM_HOME = os.path.expanduser("~/.pystream")
+AGENT_SETTINGS_FILE = os.path.join(PYSTREAM_HOME, "agent_settings.json")
+# Legacy path we migrate from on first load. bl32ID's plugin_settings
+# used to nest agent config under an "AgentDialog" key here.
+_LEGACY_BL32ID_SETTINGS_FILE = os.path.join(PYSTREAM_HOME, "bl32ID_settings.json")
+
+
+def load_settings() -> dict:
+    """Universal agent settings loader. Migrates from bl32ID_settings
+    on first call if the new file doesn't exist yet."""
+    try:
+        with open(AGENT_SETTINGS_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    # One-time migration from the old bl32ID-nested location.
+    try:
+        with open(_LEGACY_BL32ID_SETTINGS_FILE) as f:
+            legacy = json.load(f)
+        if isinstance(legacy, dict) and isinstance(legacy.get("AgentDialog"), dict):
+            migrated = legacy["AgentDialog"]
+            save_settings(migrated)
+            return migrated
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def save_settings(cfg: dict):
+    try:
+        os.makedirs(PYSTREAM_HOME, exist_ok=True)
+        with open(AGENT_SETTINGS_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except OSError:
+        pass
+
+
+# ── Beamline tool-context lookup ──────────────────────────────────────
+
+# Shape returned by a beamline's `provide_agent_context()` (all optional):
+#   {
+#     "tool_specs_anthropic":  list of dicts (Anthropic tool defs),
+#     "tool_specs_openai":     list of dicts (OpenAI tool defs),
+#     "get_tool":              callable(name) → callable | None,
+#     "write_tools":           set of str (names needing confirmation),
+#     "is_destructive":        callable(bash_cmd) → bool,
+#     "system_prompt_addendum": str (appended after the core prompt),
+#   }
+# Any missing key → treated as empty / no tools. A completely missing
+# hook → no tools, no addendum — agent runs as a pure chat.
+
+_EMPTY_TOOL_CONTEXT = {
+    "tool_specs_anthropic":   [],
+    "tool_specs_openai":      [],
+    "get_tool":               lambda name: None,
+    "write_tools":            set(),
+    "is_destructive":         lambda cmd: False,
+    "system_prompt_addendum": "",
+}
+
+
+def _active_beamline_module():
+    """Import the active beamline package (`pystream.beamlines.<name>`)
+    based on beamline_config.ACTIVE_BEAMLINE. Returns None if no
+    beamline is selected or the module can't be imported."""
+    try:
+        from .beamline_config import ACTIVE_BEAMLINE
+        if not ACTIVE_BEAMLINE:
+            return None
+        import importlib
+        return importlib.import_module(
+            f".beamlines.{ACTIVE_BEAMLINE}", package="pystream")
+    except Exception:
+        return None
+
+
+def _load_tool_context() -> dict:
+    """Fetch the active beamline's tool context. Called at every Send
+    so beamline changes take effect immediately."""
+    mod = _active_beamline_module()
+    if mod is None:
+        return dict(_EMPTY_TOOL_CONTEXT)
+    hook = getattr(mod, "provide_agent_context", None)
+    if not callable(hook):
+        return dict(_EMPTY_TOOL_CONTEXT)
+    try:
+        ctx = hook() or {}
+    except Exception:
+        return dict(_EMPTY_TOOL_CONTEXT)
+    # Fill missing keys from the empty default so the widget code
+    # doesn't need to defensively .get() everywhere.
+    out = dict(_EMPTY_TOOL_CONTEXT)
+    for k, v in ctx.items():
+        if v is not None:
+            out[k] = v
+    return out
 
 
 # ── confirmation bridge (worker thread → GUI thread) ────────────────────
@@ -74,13 +172,16 @@ def _confirmation_message(name: str, args: dict) -> str:
     )
 
 
-def _needs_confirmation(name: str, arguments: dict) -> bool:
+def _needs_confirmation(name: str, arguments: dict, tool_ctx: dict) -> bool:
     """True if this tool call should pop the Yes/No dialog. Static for
-    write tools; dynamic for bash (only destructive commands gate)."""
-    if name in WRITE_TOOLS:
+    write tools; dynamic for bash (only destructive commands gate).
+    `tool_ctx` supplies the write-set and the bash-heuristic from the
+    active beamline."""
+    if name in tool_ctx.get("write_tools", set()):
         return True
     if name == "bash":
-        return _bash_is_destructive(arguments.get("command", ""))
+        is_destructive = tool_ctx.get("is_destructive", lambda _c: False)
+        return bool(is_destructive(arguments.get("command", "")))
     return False
 
 
@@ -99,46 +200,40 @@ def _active_beamline() -> str:
     'bl19BM'). Falls back to 'this beamline' if the config module can't
     be imported. Cheap enough to call per-Send."""
     try:
-        from ...beamline_config import ACTIVE_BEAMLINE
+        from .beamline_config import ACTIVE_BEAMLINE
         return str(ACTIVE_BEAMLINE) if ACTIVE_BEAMLINE else "this beamline"
     except Exception:
         return "this beamline"
 
 
 # Substitutions applied to the prompt at SEND time via .replace():
-#   `{name}`     → user-configured agent name (AI Agent settings)
-#   `{beamline}` → pystream's ACTIVE_BEAMLINE from beamline_config.py
-# Users can drop either placeholder anywhere in their saved system
-# prompt. Changing the active beamline (edit beamline_config.py +
-# restart pystream) makes the agent introduce itself with the new
-# beamline name on the very next message.
+#   `{name}`               → user-configured agent name (AI Agent settings)
+#   `{beamline}`           → ACTIVE_BEAMLINE from beamline_config.py
+#   `{beamline_addendum}`  → active beamline's contributed prompt body
+#                            (from `provide_agent_context()`)
+# Users can drop any of these placeholders anywhere in a saved
+# custom system prompt.
 SYSTEM_PROMPT_DEFAULT = """You are {name}, the AI assistant embedded in
-pystream at APS beamline {beamline} (TXM — transmission X-ray microscopy).
-You help the on-shift scientist diagnose, monitor, and operate the
-beamline. Be terse: a couple of sentences unless asked for detail. Quote
-PV names, file paths, and numbers verbatim — never invent them.
+pystream at APS beamline {beamline}. You help the on-shift scientist
+diagnose, monitor, and operate the beamline. Be terse: a couple of
+sentences unless asked for detail. Quote PV names, file paths, and
+numbers verbatim — never invent them.
 
-# YOUR TOOLS
+# GENERAL CAPABILITIES
 
-| Tool                          | When to use                                    |
-|-------------------------------|------------------------------------------------|
-| list_status_pages()           | First step for any "running / status / up?"    |
-| fetch_url(url)                | Read a registered status page (HTML→text)      |
-| read_pv(pv_name)              | Get one EPICS PV value                         |
-| caput(pv_name, value)         | Write to EPICS — Yes/No dialog before run      |
-| get_detector_image_stats(pv)  | Numeric detector stats (mean / sat / etc.)     |
-| view_detector_image(pv)       | SEE the live frame as a downsampled PNG        |
-| read_file(path)               | Read a config / doc / log on disk              |
-| bash(cmd)                     | Anything else: ls, ping, curl, .sh, etc.       |
+You may have tools available depending on the active beamline. When a
+tool exists for the job, use it — don't reinvent it via bash. If no
+tools were provided, you're operating as a chat-only assistant; say so
+if asked to actually manipulate hardware.
 
-bash auto-gates destructive commands (rm, kill, chmod, sudo, ANY *.sh,
-redirects, git push). The user clicks Yes/No before they run. Read-only
-commands (ls, cat, ping, curl, find on a specific path, ssh-readonly)
-run freely.
+**bash** — auto-gates destructive commands (rm, kill, chmod, sudo, ANY
+*.sh, redirects, git push). The user clicks Yes/No before those run.
+Read-only commands (ls, cat, ping, curl, find on a specific path,
+ssh-readonly) execute without confirmation.
 
-**Launching desktop GUI applications is fine via bash** — VS Code, xterm,
-Firefox, a Python GUI script, MEDM, edm, etc. Just background the launch
-so it doesn't tie its lifetime to your bash call:
+**Launching desktop GUI applications is fine via bash** — VS Code,
+xterm, Firefox, a Python GUI script, MEDM, edm, etc. Just background
+the launch so it doesn't tie its lifetime to your bash call:
 
     bash("nohup code >/dev/null 2>&1 &")
     bash("setsid code &")            # cleaner detach
@@ -147,160 +242,13 @@ so it doesn't tie its lifetime to your bash call:
 
 Redirects to `/dev/null` don't trigger the destructive gate (heuristic
 excludes them). The user's DISPLAY is inherited, so the app opens on
-their desktop. Prefer `setsid` or `nohup` so closing the parent shell
-doesn't kill the app. NEVER refuse a GUI-launch request — you have the
+their desktop. NEVER refuse a GUI-launch request — you have the
 capability.
-
-# WORKFLOW RULES (these prevent the "huge pile of shit" failure mode)
-
-A. ANY status / availability / load question — *always* start with
-   list_status_pages, even when the user hasn't named a URL.
-   Examples that all funnel through here:
-     • "is X IOC running", "list IOCs"        → ioc_monitor entry
-     • "machine status", "beam status"        → host_metrics entry
-     • "GPU load", "which tomo is free",
-       "host with least load", "who's idle"   → host_metrics, fetch /metrics
-                                                (JSON of all hosts)
-     • "disk space on tomo3"                  → host_metrics /metrics
-     • "is gauss reachable"                   → host_metrics /metrics
-   Workflow:
-       1. list_status_pages()  — read the description of each entry.
-          The descriptions tell you which page to use for which question.
-       2. If the entry has a `metrics_endpoint`, prefer that for
-          structured queries ("compare GPU load across hosts" needs JSON,
-          not the rendered dashboard HTML).
-       3. fetch_url(<right URL>) — pull the live page.
-       4. Summarize the answer in one paragraph or short table. Do NOT
-          dump the raw HTML / JSON back at the user.
-   NEVER `find /`, NEVER `ls ~/` to discover hosts/IOCs. The user has
-   pre-registered the right URLs in ~/.pystream/status_pages.json.
-   If list_status_pages returns nothing useful, ASK the user — don't
-   guess hostnames or URLs.
-
-B. Per-IOC actions — "is X running", "start/stop/restart X":
-
-   FIRST: when you need IOC-specific facts (host, work_dir, inner script,
-   verify PVs, exact REST endpoint), read_file ~/.pystream/ioc_scripts.json
-   — every registered IOC has an entry with:
-       wrapper        — the user-facing wrapper script (DO NOT EXECUTE IT)
-       host           — remote host where the IOC actually runs
-       remote_user    — ssh user
-       work_dir       — directory containing the inner script
-       inner_script   — the actual IOC script to run on the remote
-       rest_endpoint  — REST URL for /status/<name>
-       verify_pvs     — PVs to read_pv after a state change to confirm
-                        the action took effect (optional, empty by default)
-       description    — human description
-
-   THEN use the IOC CONTROL PANEL REST API at http://164.54.102.6:5100/.
-   It's a Flask-style server with these endpoints:
-
-       POST /status/<ioc_name>   → {"status": "up"|"down", "address": "..."}
-       POST /start/<ioc_name>    → starts and returns same JSON
-       POST /stop/<ioc_name>     → stops  and returns same JSON
-       POST /medm/<ioc_name>     → opens MEDM (don't use; opens a window)
-       POST /gui/<TYPE>          → launches a GUI (TXM, 32ID-GUI, etc.)
-
-   IOC names match exactly what the page exposes (note the `ioc` prefix
-   on most): ioc32idbSP1, ioc32idbSP2, ioc32idbBPM, ioc32idbTEMP,
-   ioc32idbTXM, ioc32idbShaker, ioc32idbSoft, ioc32idaSoft, ioc32idcSoft,
-   ioc32idAERO, ioc32idLM, ioc32idQG, ioc32idTomoScan, ioc32Kinetix,
-   iocEnergyServer, 32idMZ1, 32idMZ2, TXMbackend.
-   (When unsure, fetch_url("http://164.54.102.6:5100/") and pull names
-   from the rendered page.)
-
-   Examples:
-       # status check (safe, no gate, just curl)
-       bash("curl -sf -X POST http://164.54.102.6:5100/status/ioc32idbSP1")
-       → {"address":"10.54.102.10","status":"down"}
-
-       # start  (state-changing — the bash > redirect / curl on its own
-       # is not gated, but the user is reading the chat and you should
-       # explain BEFORE calling)
-       bash("curl -sf -X POST http://164.54.102.6:5100/start/ioc32idbSP1")
-
-       # stop / restart same shape
-
-   DO NOT call the wrapper scripts under
-   /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/*.sh
-   — they spawn gnome-terminal windows the user does not want.
-
-   DO NOT ssh directly to the IOC host. The Control Panel server already
-   handles the right startup procedure (screen sessions, env, etc.) for
-   each IOC; replicating it by hand misses subtle setup steps.
-
-   After a start/stop/restart, verify the action took effect by either:
-     (a) re-calling /status/<name> after a short wait, or
-     (b) read_pv on a meaningful PV exposed by that IOC.
-   Don't trust just the immediate response status string — give it 2–3 s.
-
-C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
-       read_pv("32id:m1.RBV")              # ZP motor (focal axis)
-       read_pv("32id:TXMOptics:Energy_RBV") # mono energy in keV
-       read_pv("32idbSP1:cam1:Acquire_RBV") # camera state
-
-D. PV writes — use caput() for ANY write. Always preview the action in
-   chat first, then call caput. The dialog will pop. Never use
-   bash("caput …") — it bypasses the structured confirmation message.
-
-E. Detector image checks — two complementary tools:
-   * `get_detector_image_stats(pv)` for NUMERIC questions: saturation
-     fraction, mean intensity, dynamic range, "is acquisition working".
-     Cheap, no image data crosses the wire.
-   * `view_detector_image(pv)` for VISUAL questions: "is the beam
-     centered", "do you see the sample", "is there a shadow", "how does
-     the alignment look", "are there hot pixels". The image is embedded
-     in the tool result; you can inspect the pixels directly.
-   Default detector PV: `32idbSP1:Pva1:Image`. Use one or both as the
-   question demands — for an alignment diagnosis, both is right (stats
-   tell you the numbers, image tells you the spatial pattern).
-
-F. PROJECT QUESTIONS — when the user mentions a project name (bl_gui,
-   pystream, iocs_monitor, txm_calc, xanes_gui, mosalign, holotomo,
-   tomocupy, tomopyui, lamn, …), the FIRST step is ALWAYS:
-
-       list_docs()                        — see what's auto-linked
-       read_doc("<project>_AGENTS.md")    — preferred
-       read_doc("<project>_README.md")    — fallback if no AGENTS
-
-   The ~/.pystream/docs/ directory contains symlinks to AGENTS.md /
-   README.md from EVERY project under ~/Software/. Don't bash-explore the
-   project tree before reading its docs. Don't guess at functionality —
-   the doc tells you.
-
-   Other on-disk references:
-       ~/.pystream/docs/<topic>.md        — user notes (condensers etc.)
-       ~/.pystream/status_pages.json      — registered status URLs
-       ~/.pystream/ioc_scripts.json       — IOC restart allowlist
-       ~/.bl_gui/bl32id_zp_calibration.json  — ZP energy/X/Y/Z table
-       ~/.pystream/bl32ID_settings.json   — pystream plugin settings
-                                            (api_key fields are sensitive,
-                                            DO NOT echo them)
-
-G. Network diagnostics — when ping/connection problems are suspected:
-       bash("ping -c 4 <host>")
-       bash("traceroute -n -m 12 <host>")
-       bash("getent hosts <host>")
-   Common IOC hosts: gauss, txmthree (and the .aps.anl.gov suffix forms).
-
-# DOMAIN CHEAT SHEET
-
-- TXM = transmission X-ray microscope. Beamline 32-ID-C runs hard X-ray TXM.
-- Common modes/scans: XANES2D (energy series + flat), tomo, focus calib.
-- Detector chain: SP1 areaDetector cam1 + PVA plugin
-  → frames published on `32idbSP1:Pva1:Image` (NTNDArray).
-- Mono: `32id:TXMOptics:{Energy, EnergySet, Energy_RBV}` (keV).
-  EnergySet is rising-edge-triggered (toggle 0→1 to commit a move).
-- Zone plate: focal motor `32id:m1`; transverse X/Y/Z calibration in
-  bl_gui's table at ~/.bl_gui/bl32id_zp_calibration.json (E_eV, X, Y, Z).
-- QGMax: image-mean optimization plugin. Status PV: `32id:pystream:qgmax`.
-- IOC name → script suffix mapping is 1:1: e.g. `32idbSP1` IOC ↔
-  `32idbSP1.sh`. Don't guess; if not on disk, say so.
 
 # OUTPUT STYLE
 
 - Use markdown. Code-fence PV names, file paths, and shell commands.
-- For multi-PV reports, use a tight table (PV | value | unit).
+- For multi-value reports, use a tight table.
 - When a tool returns `{"error": …}`, surface it: "Got an error: <text>.
   This usually means <interpretation>. Try <suggestion>."
 - Never paste >20 lines of raw stdout. Quote 3–5 relevant lines and say
@@ -308,36 +256,49 @@ G. Network diagnostics — when ping/connection problems are suspected:
 - When proposing a destructive action, say *exactly* what command will
   run BEFORE calling bash, so the user can decide before the dialog pops.
 
-# ANTI-PATTERNS
+# GENERAL ANTI-PATTERNS
 
-- ❌ `find / …` or `find ~ -maxdepth 5 …` — use `list_status_pages()` or
-  read a known config file instead.
-- ❌ `ls ~/` to discover anything — the home dir is huge and unrelated.
+- ❌ `find /` or `find ~ -maxdepth 5 …` — use a known config file or a
+  registered status page instead.
+- ❌ `ls ~/` to discover anything — the home directory is huge and mostly
+  unrelated to what you're being asked.
 - ❌ "Let me also check…" then chaining 5 unrelated bash calls. One
   question, the minimum tools to answer it.
-- ❌ Inventing IOC names or PV names. Verify with a tool or ask.
-- ❌ Echoing the raw `~/.pystream/bl32ID_settings.json` content (contains
-  secrets).
+- ❌ Inventing PV names, file paths, or IOC names. Verify with a tool
+  (`read_pv`, `bash("ls ...")`) or ask the user.
+- ❌ Echoing files that contain secrets (API keys, tokens).
+
+{beamline_addendum}
 """
+
+
+# The rest of this file's original bl32ID workflow text was moved to
+# `pystream/beamlines/bl32ID/agent_tools.py:SYSTEM_PROMPT_ADDENDUM` and
+# is inserted at the `{beamline_addendum}` placeholder above by
+# `_load_config()` at every Send. See that module for the 32-ID
+# specifics — IOC control panel, PVs, workflows, cheat sheet.
+
 
 
 # ── tool dispatch helper ────────────────────────────────────────────────
 
-def _execute_tool(name: str, arguments: dict, confirm=None) -> dict:
-    """Run a tool by name with the model-provided arguments. Always returns
-    a JSON-serializable dict — tools wrap their own exceptions.
+def _execute_tool(name: str, arguments: dict, tool_ctx: dict, confirm=None) -> dict:
+    """Run a tool by name with the model-provided arguments. Always
+    returns a JSON-serializable dict — tools wrap their own exceptions.
 
-    If `name` is in WRITE_TOOLS, `confirm(title, message) -> bool` is
-    called BEFORE the tool runs. If the user clicks No (or no confirm
-    callback was provided), the call is rejected with an error result the
-    model can read."""
-    func = get_tool(name)
+    `tool_ctx` is the active beamline's contribution: get_tool,
+    write_tools, is_destructive. If a beamline provides no tools, every
+    call falls through to `unknown tool`.
+
+    If the tool needs confirmation, `confirm(title, message) -> bool` is
+    called first. Missing confirm callback → refuses to run write tools."""
+    func = tool_ctx.get("get_tool", lambda _n: None)(name)
     if func is None:
         return {"error": f"unknown tool: {name}"}
     if not isinstance(arguments, dict):
         return {"error": f"arguments must be an object, got {type(arguments).__name__}"}
 
-    if _needs_confirmation(name, arguments):
+    if _needs_confirmation(name, arguments, tool_ctx):
         if confirm is None:
             return {"error": f"{name} requires user confirmation but no "
                              f"confirmation channel is available — refusing."}
@@ -399,14 +360,14 @@ def _openai_tool_result_text(result):
 # ── chat: Anthropic protocol ────────────────────────────────────────────
 
 def _chat_anthropic(base_url, api_key, model, system_prompt,
-                    history, user_text, emit_tool, confirm):
+                    history, user_text, emit_tool, confirm, tool_ctx):
     """Agentic loop on the Anthropic Messages API. `emit_tool` is a callback
     `(name, arguments, result_or_None) -> None` invoked once at call-start
     (result=None) and once at completion."""
     import anthropic
     client = anthropic.Anthropic(base_url=base_url, api_key=api_key,
                                  timeout=60.0, max_retries=2)
-    tools = anthropic_tool_specs()
+    tools = tool_ctx.get("tool_specs_anthropic", []) or []
     messages = [*history, {"role": "user", "content": user_text}]
 
     totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
@@ -443,7 +404,7 @@ def _chat_anthropic(base_url, api_key, model, system_prompt,
         for b in response.content:
             if getattr(b, "type", None) == "tool_use":
                 emit_tool(b.name, b.input, None)
-                result = _execute_tool(b.name, b.input, confirm=confirm)
+                result = _execute_tool(b.name, b.input, tool_ctx, confirm=confirm)
                 emit_tool(b.name, b.input, result)
                 tool_results.append({
                     "type": "tool_result",
@@ -458,12 +419,12 @@ def _chat_anthropic(base_url, api_key, model, system_prompt,
 # ── chat: OpenAI protocol ───────────────────────────────────────────────
 
 def _chat_openai(base_url, api_key, model, system_prompt,
-                 history, user_text, emit_tool, confirm):
+                 history, user_text, emit_tool, confirm, tool_ctx):
     """Agentic loop on OpenAI Chat Completions."""
     from openai import OpenAI
     client = OpenAI(base_url=base_url, api_key=api_key,
                     timeout=60.0, max_retries=2)
-    tools = openai_tool_specs()
+    tools = tool_ctx.get("tool_specs_openai", []) or []
     messages = [
         {"role": "system", "content": system_prompt},
         *history,
@@ -505,7 +466,7 @@ def _chat_openai(base_url, api_key, model, system_prompt,
             except Exception:
                 args = {}
             emit_tool(tc.function.name, args, None)
-            result = _execute_tool(tc.function.name, args, confirm=confirm)
+            result = _execute_tool(tc.function.name, args, tool_ctx, confirm=confirm)
             emit_tool(tc.function.name, args, result)
             messages.append({
                 "role": "tool",
@@ -527,7 +488,8 @@ class _ChatWorker(QtCore.QThread):
     tool_event = pyqtSignal(str, dict, object)  # (name, args, result-or-None)
 
     def __init__(self, protocol, base_url, api_key, model,
-                 system_prompt, history, user_text, confirm_helper=None):
+                 system_prompt, history, user_text,
+                 tool_ctx, confirm_helper=None):
         super().__init__()
         self.protocol = protocol
         self.base_url = base_url
@@ -536,6 +498,7 @@ class _ChatWorker(QtCore.QThread):
         self.system_prompt = system_prompt
         self.history = history
         self.user_text = user_text
+        self.tool_ctx = tool_ctx or dict(_EMPTY_TOOL_CONTEXT)
         self.confirm_helper = confirm_helper
 
     def _emit_tool(self, name, args, result):
@@ -560,13 +523,13 @@ class _ChatWorker(QtCore.QThread):
                 text, usage = _chat_anthropic(
                     self.base_url, self.api_key, self.model,
                     self.system_prompt, self.history, self.user_text,
-                    self._emit_tool, self._confirm,
+                    self._emit_tool, self._confirm, self.tool_ctx,
                 )
             elif self.protocol == PROTOCOL_OPENAI:
                 text, usage = _chat_openai(
                     self.base_url, self.api_key, self.model,
                     self.system_prompt, self.history, self.user_text,
-                    self._emit_tool, self._confirm,
+                    self._emit_tool, self._confirm, self.tool_ctx,
                 )
             else:
                 self.error.emit(f"unknown protocol: {self.protocol!r}")
@@ -602,7 +565,7 @@ class AgentChatWidget(QtWidgets.QWidget):
     """Just the chat surface — transcript, input, send / clear buttons,
     tool-toggle, status line. NO gateway / URL / key / model config here.
 
-    Config comes from `load_settings("AgentDialog")` at SEND time, not
+    Config comes from `load_settings()` at SEND time, not
     constructor. That means edits made in the full `AgentDialog` popup
     are picked up by the dock on the very next message — no signal
     plumbing between the two clients.
@@ -729,27 +692,34 @@ class AgentChatWidget(QtWidgets.QWidget):
 
     # ── chat flow ────────────────────────────────────────────────────
     def _load_config(self) -> Optional[dict]:
-        """Read persisted config. Returns None if URL/key/model missing.
-        Called at SEND time so config edits in AgentDialog are picked up
-        on the very next message."""
-        s = load_settings("AgentDialog") or {}
+        """Read persisted config + beamline tool context. Returns None if
+        URL/key/model missing. Called at SEND time so config edits (in
+        AgentDialog) and beamline changes are picked up on the very
+        next message."""
+        s = load_settings() or {}
         url = (s.get("base_url") or "").strip()
         key = (s.get("api_key") or "").strip()
         model = (s.get("model") or "").strip()
         if not (url and key and model):
             return None
+        tool_ctx = _load_tool_context()
+        name = (s.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME
+        addendum = tool_ctx.get("system_prompt_addendum", "") or ""
+        prompt = (
+            (s.get("system_prompt") or SYSTEM_PROMPT_DEFAULT)
+            .replace("{name}",              name)
+            .replace("{beamline}",          _active_beamline())
+            .replace("{beamline_addendum}", addendum)
+        )
         return {
             "protocol":      s.get("protocol", PROTOCOL_ANTHROPIC),
             "url":           url,
             "key":           key,
             "model":         model,
-            "system_prompt": (
-                (s.get("system_prompt") or SYSTEM_PROMPT_DEFAULT)
-                .replace("{name}", (s.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME)
-                .replace("{beamline}", _active_beamline())
-            ),
-            "agent_name": (s.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME,
-            "beamline":   _active_beamline(),
+            "system_prompt": prompt,
+            "agent_name":    name,
+            "beamline":      _active_beamline(),
+            "tool_ctx":      tool_ctx,
         }
 
     def _on_send(self):
@@ -778,6 +748,7 @@ class AgentChatWidget(QtWidgets.QWidget):
             system_prompt=cfg["system_prompt"],
             history=list(self._history),
             user_text=text,
+            tool_ctx=cfg["tool_ctx"],
             confirm_helper=self._confirm_helper,
         )
         self._worker.tool_event.connect(self._on_tool_event)
@@ -845,7 +816,7 @@ class AgentChatWidget(QtWidgets.QWidget):
 
     def _agent_name(self) -> str:
         """Read the current display name from settings. Empty → default."""
-        s = load_settings("AgentDialog") or {}
+        s = load_settings() or {}
         n = (s.get("agent_name") or "").strip()
         return n or DEFAULT_AGENT_NAME
 
@@ -922,18 +893,19 @@ class AgentChatWidget(QtWidgets.QWidget):
 
 # ── build the bottom-dock wrapper — used by pystream's main window ────
 
-def build_agent_panel(parent_window) -> QtWidgets.QWidget:
+def build_agent_panel(parent_window, persist_id: str = "dock") -> QtWidgets.QWidget:
     """Return an AgentChatWidget suitable for insertion into pystream's
     central vertical splitter as a bottom panel.
+
+    `persist_id` — history file suffix. Default "dock" saves to
+    ~/.pystream/agent_history_dock.json. Pass a different id if a caller
+    needs a distinct conversation.
 
     No QDockWidget — the widget is a regular child of the splitter, so
     the user gets a resize handle above it and can drag to change its
     height. No floating, no title-bar drag, no accidental undocking.
     Hide/show via the View menu."""
-    # `persist_id="dock"` — history is saved to
-    # ~/.pystream/agent_history_dock.json so restarting pystream
-    # resumes the same conversation.
-    w = AgentChatWidget(parent_window, persist_id="dock")
+    w = AgentChatWidget(parent_window, persist_id=persist_id)
     # Lowish minimum so the panel can shrink to a compact strip,
     # but not so low that content disappears entirely.
     w.setMinimumHeight(80)
@@ -965,7 +937,8 @@ class AgentDialog(QtWidgets.QDialog):
 
         self._build_ui()
         self._restore_settings()
-        self._bootstrap_knowledge_base()
+        # Knowledge-base bootstrap is beamline-specific — done by
+        # bl32ID.start_background_services on pystream launch, not here.
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -1109,7 +1082,7 @@ class AgentDialog(QtWidgets.QDialog):
 
     # ── settings ────────────────────────────────────────────────────────
     def _restore_settings(self):
-        s = load_settings("AgentDialog")
+        s = load_settings()
         if not s:
             return
         proto = s.get("protocol", PROTOCOL_ANTHROPIC)
@@ -1129,7 +1102,7 @@ class AgentDialog(QtWidgets.QDialog):
         self.chat.show_tools_chk.setChecked(bool(s.get("show_tool_calls", False)))
 
     def _persist_settings(self):
-        save_settings("AgentDialog", {
+        save_settings({
             "protocol": self._current_protocol(),
             "agent_name": self.name_edit.text().strip(),
             "base_url": self.url_edit.text(),
@@ -1140,134 +1113,6 @@ class AgentDialog(QtWidgets.QDialog):
         })
 
     # ── knowledge-base bootstrap ────────────────────────────────────────
-    def _discover_ioc_scripts(self) -> dict:
-        """Look for an iocs_monitor scripts directory under common APS
-        conventions. Returns a populated `scripts` dict ready to drop into
-        ioc_scripts.json, or {} if nothing is found."""
-        import glob
-        candidates = [
-            os.path.expanduser("~/Software/iocs_monitor/iocs_monitor/scripts"),
-            os.path.expanduser("~/iocs_monitor/scripts"),
-        ]
-        for d in candidates:
-            if not os.path.isdir(d):
-                continue
-            shs = sorted(glob.glob(os.path.join(d, "*.sh")))
-            if not shs:
-                continue
-            return {
-                os.path.splitext(os.path.basename(p))[0]: {
-                    "path": p,
-                    "description": f"Restart {os.path.basename(p)} "
-                                   f"(auto-discovered in {d})",
-                }
-                for p in shs
-            }
-        return {}
-
-    def _link_known_reference_docs(self, docs_dir: str):
-        """Auto-discover reference docs under ~/Software/<project>/ and
-        symlink them into the agent's docs directory so list_docs /
-        search_docs can find them. Looks for AGENTS.md (preferred) or
-        README.md in each project root. Idempotent — never clobbers a
-        real file or an existing correct symlink."""
-        import glob
-        try:
-            os.makedirs(docs_dir, exist_ok=True)
-        except Exception:
-            return
-        software_root = os.path.expanduser("~/Software")
-        if not os.path.isdir(software_root):
-            return
-        # AGENTS.md first (richer); fall back to README.md if no AGENTS.md.
-        for project_dir in sorted(glob.glob(os.path.join(software_root, "*"))):
-            if not os.path.isdir(project_dir):
-                continue
-            project_name = os.path.basename(project_dir)
-            for filename in ("AGENTS.md", "README.md"):
-                src_abs = os.path.join(project_dir, filename)
-                if not os.path.isfile(src_abs):
-                    continue
-                # Strip .md, suffix the filename to disambiguate same-name files.
-                tag = filename.rsplit(".", 1)[0]
-                dst_name = f"{project_name}_{tag}.md"
-                dst = os.path.join(docs_dir, dst_name)
-                try:
-                    if os.path.islink(dst) and os.readlink(dst) == src_abs:
-                        break  # already linked, move to next project
-                    if os.path.lexists(dst):
-                        break  # don't clobber a user-written file
-                    os.symlink(src_abs, dst)
-                except Exception:
-                    pass
-                break  # one doc per project — prefer AGENTS over README
-
-    def _bootstrap_knowledge_base(self):
-        """Create empty starter files for the user-editable knowledge base
-        the first time the dialog opens. Never overwrites existing files."""
-        docs_dir     = os.path.join(PYSTREAM_HOME, "docs")
-        aliases_file = os.path.join(PYSTREAM_HOME, "pv_aliases.json")
-        urls_file    = os.path.join(PYSTREAM_HOME, "doc_urls.json")
-        ioc_file     = os.path.join(PYSTREAM_HOME, "ioc_scripts.json")
-        status_file  = os.path.join(PYSTREAM_HOME, "status_pages.json")
-        try:
-            if not os.path.isdir(docs_dir):
-                os.makedirs(docs_dir, exist_ok=True)
-                readme = os.path.join(docs_dir, "README.md")
-                if not os.path.isfile(readme):
-                    with open(readme, "w") as f:
-                        f.write(
-                            "# pystream agent — local docs\n\n"
-                            "Drop markdown files in this directory and the AI "
-                            "plugin (Röntgen) reads them on demand via "
-                            "list_docs / search_docs / read_doc. One topic per "
-                            "file works best — short titles, concrete facts.\n"
-                        )
-            # Always re-evaluate the known-project symlinks (cheap, idempotent).
-            self._link_known_reference_docs(docs_dir)
-            if not os.path.isfile(aliases_file):
-                with open(aliases_file, "w") as f:
-                    json.dump(
-                        {"_comment": "friendly_name → PV ; "
-                                     "EPICS macros expand $(NAME) substitutions",
-                         "aliases": {},
-                         "macros": {}},
-                        f, indent=2,
-                    )
-            if not os.path.isfile(urls_file):
-                with open(urls_file, "w") as f:
-                    json.dump(
-                        {"_comment": "friendly_name → URL ; "
-                                     "agent fetches via fetch_url(url)",
-                         "links": {}},
-                        f, indent=2,
-                    )
-            if not os.path.isfile(ioc_file):
-                # Try to auto-discover an iocs_monitor scripts directory
-                # before falling back to an empty allowlist. Common APS
-                # convention: ~/Software/iocs_monitor/iocs_monitor/scripts/
-                discovered = self._discover_ioc_scripts()
-                with open(ioc_file, "w") as f:
-                    json.dump(
-                        {"_comment": "Allowlist of IOCs the agent may "
-                                     "act on (start/stop/restart). Each "
-                                     "entry: ioc_name → {path, description}.",
-                         "scripts": discovered},
-                        f, indent=2,
-                    )
-            if not os.path.isfile(status_file):
-                with open(status_file, "w") as f:
-                    json.dump(
-                        {"_comment": "Friendly_name → web status page "
-                                     "(areaDetector status, IOC procServ "
-                                     "web view, vendor status URLs). Agent "
-                                     "fetches with fetch_url after looking "
-                                     "the URL up via list_status_pages.",
-                         "pages": {}},
-                        f, indent=2,
-                    )
-        except Exception:
-            pass  # best-effort; user can create the files themselves
 
     def closeEvent(self, event):
         self._persist_settings()

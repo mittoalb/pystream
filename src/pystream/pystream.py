@@ -494,6 +494,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # that were added during _build_ui.
         self._central_splitter.insertWidget(0, viewer_widget)
         self.setCentralWidget(self._central_splitter)
+        # Core AI Agent panel — beamline-agnostic. Every pystream
+        # session gets this at the bottom regardless of which beamline
+        # (or none) is active. Tools + prompt body come from the active
+        # beamline's `provide_agent_context()` hook at every Send.
+        try:
+            from .agent import build_agent_panel
+            self._add_bottom_panel(build_agent_panel(self, persist_id="dock"),
+                                   "AI Agent")
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning(f"failed to add AI Agent panel: {e}")
         # Give the splitter panes explicit STRETCH FACTORS (used when
         # the window is resized) AND EXPLICIT INITIAL SIZES (so the
         # drag handle has a definite starting point rather than
