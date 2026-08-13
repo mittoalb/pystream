@@ -11,5 +11,7 @@ detectors.
 quickstart
 plugins/index
 beamlines/index
+ai_backends
+simulator
 api
 ```

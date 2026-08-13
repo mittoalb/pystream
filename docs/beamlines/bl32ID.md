@@ -3,6 +3,22 @@
 APS beamline 32-ID tools for TXM tomography, XANES imaging, and beam
 optimization.
 
+## Toolbar layout
+
+Plugins are grouped into dropdown menus in the toolbar. Class attribute
+`GROUP = "…"` on each plugin decides which menu it lands in; order comes
+from `__all__` in [bl32ID/__init__.py](../../src/pystream/beamlines/bl32ID/__init__.py).
+
+| Menu | Plugins |
+|---|---|
+| **Alignment ▾** | Mosalign, CoR, AlignPart, QGMax |
+| **Detector ▾** | Detector |
+| **Scans ▾** | XANES, XANES 2D, DataMap, aTomo |
+| **Viewers ▾** | XANES 2D Viewer |
+| **Calculators ▾** | TXM Optics, X-ray Tools |
+| **Test ▾** | AutoROT, AutoCenter, Autofocus *(under development)* |
+| **Tools ▾** | BL GUI, AI (TXMBot) |
+
 ## Plugins
 
 ### Detector Control
@@ -10,11 +26,30 @@ optimization.
 Sets camera binning and applies a crop ROI drawn on the live image. Use
 *Enable ROI Drawing* to draw, then *Apply ROI to Detector*.
 
-### SoftBPM
+### CoR (Center of Rotation)
 
-Watches beam-normalized image intensity and, when it drops past a
-threshold, nudges two motors to recover it. Run with *Test Mode* on first
-to verify before enabling motor moves.
+One-button 0°/180° cross-correlation to find the rotation axis. Grabs
++averages N frames at the current angle, `caput`s the rotation motor to
+θ+180°, grabs again, mirrors the second image horizontally, cross-
+correlates with sub-pixel refinement, and reports the CoR column both as
+an absolute pixel and as an offset from image-center. Rotation motor is
+guaranteed to return to θ₀ via a `finally` block, even on abort. All
+tuning knobs (rot PV, Δ°, settle time, averaging) are hardcoded module
+constants — one-line edit to retune.
+
+### AlignPart (Particle → CoR alignment)
+
+Click a particle in the live viewer → the plugin measures CoR (rotate
+±180° internally, same algorithm as CoR), then iteratively drives topx /
+topz sample-stage motors until the clicked feature sits on the rotation
+axis at the vertical center. Segmentation cascade: **SAM2** (if
+configured — see [ai_backends](../ai_backends.md)) → **region-grow from
+snapped seed** (ImageJ magic-wand style: snaps click to nearest local
+extremum, floods within noise-adjusted tolerance) → **Otsu** as last
+resort. Draws a magenta crosshair + bbox rectangle + boundary outline
+on the detected blob so you see what was segmented. Motor safety: rotation
+returns to θ₀ in a `finally`; topx/topz stay where the last iteration
+left them.
 
 ### QGMax
 
@@ -43,16 +78,23 @@ Requests from the XANES GUIs use a small JSON file at
 automatically on pystream launch) picks them up whether or not the QGMax
 dialog is open.
 
-### AutoCenter
+### AutoCenter *(Test group — under development)*
 
 Detects a pinhole, condenser, or zone plate in the live image and moves
 X/Y motors to bring it to the target. *Detect* shows the overlay,
 *Center* moves once, *Auto Center* iterates until within tolerance.
+For the actual rotation-axis workflow use **CoR** + **AlignPart** above.
 
-### AutoROT
+### AutoROT *(Test group — under development)*
 
 Estimates the vertical rotation axis from variance across a buffer of
-recent images and overlays it on the viewer.
+recent images and overlays it on the viewer. Different algorithm from
+**CoR** — variance-minimization across many angles rather than
+0°/180° cross-correlation.
+
+### Autofocus *(Test group — under development)*
+
+Launcher for the standalone autofocus routine.
 
 ### TXM Optics
 
@@ -63,6 +105,14 @@ the calculator's effective pixel size to `32id:TXMOptics:ImagePixelSize`.
 
 2D motor scan with image stitching and tomoscan integration. See
 [Mosalign](../plugins/mosalign.md).
+
+### aTomo
+
+Launcher for the standalone [atomo](https://github.com/mittoalb/atomo)
+adaptive-exposure tomography GUI. atomo runs as a headless soft-IOC
+daemon (`atomo-ioc`) whose PVs mirror tomoscan's, so pystream's QGMax
+auto-mode drives it unchanged. The launcher spawns `atomo-gui` as a
+subprocess — the GUI is a thin CA client onto the daemon.
 
 ### DataMap
 
