@@ -27,6 +27,7 @@ html_logo = "./_static/logo_gray.png"
 
 
 myst_enable_extensions = ["colon_fence", "deflist"]
+myst_heading_anchors = 3
 
 # -- Options for Texinfo output -------------------------------------------
 # http://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html#confval-autodoc_mock_imports
