@@ -28,6 +28,7 @@ import numpy as np
 import pvaccess as pva
 
 from PyQt5 import QtWidgets, QtCore
+from PyQt5.QtCore import QSettings
 
 # Disable matplotlib in pyqtgraph to avoid C++ library conflicts
 os.environ['PYQTGRAPH_QT_LIB'] = 'PyQt5'
@@ -455,8 +456,62 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.scalebar_manager = None
         self.scalebar_dialog = None
 
+        # Central vertical splitter — create BEFORE _build_ui() so that
+        # any code path invoked during UI build (e.g. the beamlines bar
+        # builder calling provide_bottom_panels) can safely call
+        # _add_bottom_panel(). The top pane (the viewer) is added AFTER
+        # _build_ui() returns.
+        self._central_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._central_splitter.setObjectName("pystream_central_splitter")
+        self._central_splitter.setChildrenCollapsible(False)
+        # Qt's default vertical splitter handle can be 1 px — invisible
+        # and impossible to grab. Force a visible/grabbable strip AND
+        # style it distinctly so users see where to drag. Overrides
+        # any stylesheet rule.
+        self._central_splitter.setHandleWidth(6)
+        self._central_splitter.setStyleSheet("""
+            QSplitter::handle:vertical {
+                background-color: #4a4a4a;
+                border-top:    1px solid #2d2d2d;
+                border-bottom: 1px solid #2d2d2d;
+            }
+            QSplitter::handle:vertical:hover {
+                background-color: #2980b9;
+            }
+        """)
+        # Tracks bottom panels so View menu can toggle visibility.
+        self._bottom_panels: list = []
+
         viewer_widget = self._build_ui()
-        self.setCentralWidget(viewer_widget)
+        # The viewer's aggregated minimumSizeHint (accumulated from the
+        # left sidebar's many groupboxes + histogram) can be enormous
+        # — often taller than the window itself. That leaves the
+        # vertical splitter with NO room to redistribute space to
+        # bottom panels, and the drag handle is visually stuck.
+        # Override with a sane min so the splitter can actually resize.
+        viewer_widget.setMinimumHeight(300)
+        # Insert the viewer as the FIRST pane, above any bottom panels
+        # that were added during _build_ui.
+        self._central_splitter.insertWidget(0, viewer_widget)
+        self.setCentralWidget(self._central_splitter)
+        # Give the splitter panes explicit STRETCH FACTORS (used when
+        # the window is resized) AND EXPLICIT INITIAL SIZES (so the
+        # drag handle has a definite starting point rather than
+        # inheriting sizeHints from the massive nested viewer).
+        # Without setSizes, the splitter can appear "stuck" — Qt gives
+        # the top pane its full sizeHint and the bottom pane whatever's
+        # left, which is often exactly its minimum, and the handle
+        # visually has nowhere to move.
+        n = self._central_splitter.count()
+        if n >= 2:
+            self._central_splitter.setStretchFactor(0, 3)
+            for i in range(1, n):
+                self._central_splitter.setStretchFactor(i, 1)
+            total = max(600, self.height() or 720)
+            top    = int(total * 0.72)
+            bottom = int(total * 0.28)
+            sizes = [top] + [bottom // (n - 1)] * (n - 1)
+            self._central_splitter.setSizes(sizes)
 
         self.roi_manager = ROIManager(self.image_view, self.lbl_roi_info, logger=LOGGER)
         self.chk_roi.stateChanged.connect(self.roi_manager.toggle)
@@ -778,6 +833,30 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 except Exception as e:
                     if LOGGER:
                         LOGGER.warning(f"start_background_services({active_beamline}) failed: {e}")
+
+            # Let the beamline register bottom panels — QWidgets that
+            # get added to the central vertical splitter beneath the
+            # viewer, with a draggable handle so the user can resize
+            # them. Each panel is (widget, title) — the title feeds
+            # the View menu toggle. Unlike QDockWidget, these are true
+            # children of the central widget — no drag/float/detach.
+            provide_panels = getattr(beamline_module, "provide_bottom_panels", None)
+            if callable(provide_panels):
+                try:
+                    panels = provide_panels(self) or []
+                except Exception as e:
+                    panels = []
+                    if LOGGER:
+                        LOGGER.warning(f"provide_bottom_panels({active_beamline}) failed: {e}")
+                for widget, title in panels:
+                    try:
+                        self._add_bottom_panel(widget, title)
+                    except Exception as e:
+                        if LOGGER:
+                            LOGGER.warning(f"failed to add bottom panel '{title}': {e}")
+                # Restore any saved splitter geometry AFTER all panels
+                # are added so the state matches the current widget set.
+                self._restore_window_state()
 
             # Get all exported dialog classes
             if hasattr(beamline_module, '__all__'):
@@ -2060,6 +2139,60 @@ class PvViewerApp(QtWidgets.QMainWindow):
         viewer_dialog.raise_()
         viewer_dialog.activateWindow()
 
+    # ── Beamline-provided bottom panels + View menu + layout persist ──
+    def _add_bottom_panel(self, widget, title: str):
+        """Add `widget` as a new pane at the bottom of the central
+        vertical splitter, with a draggable handle above it. Register a
+        checkable View-menu entry that hides/shows the panel."""
+        self._central_splitter.addWidget(widget)
+        # Give the top pane (the viewer) all the excess space — the
+        # new panel gets its sizeHint's worth by default. User can
+        # drag the handle to redistribute.
+        # Panels don't stretch; only the viewer does.
+        idx = self._central_splitter.indexOf(widget)
+        if idx >= 0:
+            self._central_splitter.setStretchFactor(idx, 0)
+        # View menu toggle
+        act = QtWidgets.QAction(title, self)
+        act.setCheckable(True)
+        act.setChecked(True)
+        act.toggled.connect(widget.setVisible)
+        self._register_view_menu_action(act)
+        self._bottom_panels.append((widget, title, act))
+
+    def _register_view_menu_action(self, action):
+        """Add an action to the View menu, creating the menu lazily."""
+        if not hasattr(self, '_view_menu') or self._view_menu is None:
+            self._view_menu = self.menuBar().addMenu("View")
+        self._view_menu.addAction(action)
+
+    def _save_window_state(self):
+        """Persist main-window geometry + central splitter sizes to
+        ~/.config/APS/pystream.conf via QSettings."""
+        try:
+            settings = QSettings("APS", "pystream")
+            settings.setValue("mainwindow/geometry", self.saveGeometry())
+            settings.setValue("mainwindow/central_splitter",
+                              self._central_splitter.saveState())
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning(f"failed to save window state: {e}")
+
+    def _restore_window_state(self):
+        """Restore geometry + central splitter sizes. Called AFTER all
+        bottom panels are added so the splitter has the right pane count."""
+        try:
+            settings = QSettings("APS", "pystream")
+            geom = settings.value("mainwindow/geometry")
+            split_state = settings.value("mainwindow/central_splitter")
+            if geom:
+                self.restoreGeometry(geom)
+            if split_state:
+                self._central_splitter.restoreState(split_state)
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning(f"failed to restore window state: {e}")
+
     def closeEvent(self, event):
         # Stop recording if active
         if self.recording:
@@ -2091,7 +2224,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if self.pump_timer:
             self.pump_timer.stop()
 
-        # Save window state
+        # Save window state — legacy JSON config + Qt-native QSettings
+        # (the latter also records dock positions and visibility).
         try:
             if not self.isMaximized():
                 geom = self.geometry()
@@ -2103,6 +2237,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             if LOGGER:
                 LOGGER.error("[Config] Failed to save config on close")
                 log_exception(LOGGER, e)
+        self._save_window_state()
 
         # Disconnect PV subscription
         try:

@@ -17,7 +17,25 @@ MANIFEST
 # Environment / IDE / cache
 # -----------------------------
 .env
+.env.*
 .venv
+
+# -----------------------------
+# Never-commit — user credentials + local pystream settings
+# -----------------------------
+# The real files live in $HOME/.pystream/ (never in the repo), but these
+# patterns protect against accidental copies inside the repo.
+bl32ID_settings.json
+bl19BM_settings.json
+*_settings.json
+ai_backends.json
+qgmax_request.json
+qgmax_response.json
+api_key*
+credentials*
+*.pem
+*.key
+secrets/
 venv/
 env/
 ENV/

@@ -91,8 +91,29 @@ PROTOCOL_OPENAI = "openai"
 MAX_AGENT_ITERATIONS = 10
 
 
-SYSTEM_PROMPT_DEFAULT = """You are TXMBot, the AI assistant embedded in
-pystream at APS beamline 32-ID-C (TXM — transmission X-ray microscopy).
+DEFAULT_AGENT_NAME = "Röntgen"
+
+
+def _active_beamline() -> str:
+    """Read pystream's currently-active beamline name (e.g. 'bl32ID',
+    'bl19BM'). Falls back to 'this beamline' if the config module can't
+    be imported. Cheap enough to call per-Send."""
+    try:
+        from ...beamline_config import ACTIVE_BEAMLINE
+        return str(ACTIVE_BEAMLINE) if ACTIVE_BEAMLINE else "this beamline"
+    except Exception:
+        return "this beamline"
+
+
+# Substitutions applied to the prompt at SEND time via .replace():
+#   `{name}`     → user-configured agent name (AI Agent settings)
+#   `{beamline}` → pystream's ACTIVE_BEAMLINE from beamline_config.py
+# Users can drop either placeholder anywhere in their saved system
+# prompt. Changing the active beamline (edit beamline_config.py +
+# restart pystream) makes the agent introduce itself with the new
+# beamline name on the very next message.
+SYSTEM_PROMPT_DEFAULT = """You are {name}, the AI assistant embedded in
+pystream at APS beamline {beamline} (TXM — transmission X-ray microscopy).
 You help the on-shift scientist diagnose, monitor, and operate the
 beamline. Be terse: a couple of sentences unless asked for detail. Quote
 PV names, file paths, and numbers verbatim — never invent them.
@@ -114,6 +135,21 @@ bash auto-gates destructive commands (rm, kill, chmod, sudo, ANY *.sh,
 redirects, git push). The user clicks Yes/No before they run. Read-only
 commands (ls, cat, ping, curl, find on a specific path, ssh-readonly)
 run freely.
+
+**Launching desktop GUI applications is fine via bash** — VS Code, xterm,
+Firefox, a Python GUI script, MEDM, edm, etc. Just background the launch
+so it doesn't tie its lifetime to your bash call:
+
+    bash("nohup code >/dev/null 2>&1 &")
+    bash("setsid code &")            # cleaner detach
+    bash("xterm -e 'ls -la' &")
+    bash("firefox https://... &")
+
+Redirects to `/dev/null` don't trigger the destructive gate (heuristic
+excludes them). The user's DISPLAY is inherited, so the app opens on
+their desktop. Prefer `setsid` or `nohup` so closing the parent shell
+doesn't kill the app. NEVER refuse a GUI-launch request — you have the
+capability.
 
 # WORKFLOW RULES (these prevent the "huge pile of shit" failure mode)
 
@@ -560,9 +596,296 @@ def _list_models(protocol, base_url, api_key, *, timeout=10.0):
 
 # ── dialog ──────────────────────────────────────────────────────────────
 
+# ── shared chat surface (used by both the popup and the bottom dock) ──
+
+class AgentChatWidget(QtWidgets.QWidget):
+    """Just the chat surface — transcript, input, send / clear buttons,
+    tool-toggle, status line. NO gateway / URL / key / model config here.
+
+    Config comes from `load_settings("AgentDialog")` at SEND time, not
+    constructor. That means edits made in the full `AgentDialog` popup
+    are picked up by the dock on the very next message — no signal
+    plumbing between the two clients.
+
+    If config is missing at send time, the widget shows a "not
+    configured" line + a Configure… link that opens the full
+    `AgentDialog` popup."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._history: list[dict] = []
+        self._worker: Optional[_ChatWorker] = None
+        self._pending_user_text: str = ""
+        # Lives on the GUI thread; workers route confirmation prompts
+        # through it. Parenting to `self` keeps its lifetime tied to
+        # the widget.
+        self._confirm_helper = _ConfirmHelper(self)
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+
+        # Chat transcript
+        self.transcript = QtWidgets.QTextBrowser()
+        self.transcript.setOpenExternalLinks(True)
+        self.transcript.setStyleSheet(
+            "QTextBrowser { background-color: #1e1e1e; color: #e0e0e0; "
+            "font-family: 'DejaVu Sans Mono', monospace; font-size: 10pt; }"
+        )
+        lay.addWidget(self.transcript, stretch=1)
+
+        # Input row
+        irow = QtWidgets.QHBoxLayout()
+        self.input_edit = QtWidgets.QLineEdit()
+        self.input_edit.setPlaceholderText("Type a question and press Enter…")
+        self.input_edit.returnPressed.connect(self._on_send)
+        irow.addWidget(self.input_edit)
+        self.send_btn = QtWidgets.QPushButton("Send")
+        self.send_btn.clicked.connect(self._on_send)
+        irow.addWidget(self.send_btn)
+        self.clear_btn = QtWidgets.QPushButton("Clear")
+        self.clear_btn.setToolTip("Clear conversation history")
+        self.clear_btn.clicked.connect(self._on_clear)
+        irow.addWidget(self.clear_btn)
+        # Settings button — opens the full AgentDialog popup where the
+        # gateway URL / API key / model / system prompt live. Reuses
+        # pystream's singleton instance if one is already open, so both
+        # entry points (this button + the toolbar "AI") share one dialog.
+        self.settings_btn = QtWidgets.QPushButton("⚙ Settings")
+        self.settings_btn.setToolTip(
+            "Open the full AI Agent dialog to configure the gateway "
+            "URL, API key, model, and system prompt.")
+        self.settings_btn.clicked.connect(self._on_settings_click)
+        irow.addWidget(self.settings_btn)
+        lay.addLayout(irow)
+
+        # Tool-verbosity toggle
+        self.show_tools_chk = QtWidgets.QCheckBox("Show tool calls")
+        self.show_tools_chk.setChecked(False)
+        self.show_tools_chk.setToolTip(
+            "Toggle whether each tool the agent calls is shown in the "
+            "transcript. Off = clean conversation. On = full audit trail.")
+        lay.addWidget(self.show_tools_chk)
+
+        # Status line
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setStyleSheet("color: #888; font-size: 9pt;")
+        lay.addWidget(self.status_label)
+
+    # ── chat flow ────────────────────────────────────────────────────
+    def _load_config(self) -> Optional[dict]:
+        """Read persisted config. Returns None if URL/key/model missing.
+        Called at SEND time so config edits in AgentDialog are picked up
+        on the very next message."""
+        s = load_settings("AgentDialog") or {}
+        url = (s.get("base_url") or "").strip()
+        key = (s.get("api_key") or "").strip()
+        model = (s.get("model") or "").strip()
+        if not (url and key and model):
+            return None
+        return {
+            "protocol":      s.get("protocol", PROTOCOL_ANTHROPIC),
+            "url":           url,
+            "key":           key,
+            "model":         model,
+            "system_prompt": (
+                (s.get("system_prompt") or SYSTEM_PROMPT_DEFAULT)
+                .replace("{name}", (s.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME)
+                .replace("{beamline}", _active_beamline())
+            ),
+            "agent_name": (s.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME,
+            "beamline":   _active_beamline(),
+        }
+
+    def _on_send(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        text = self.input_edit.text().strip()
+        if not text:
+            return
+        cfg = self._load_config()
+        if cfg is None:
+            self._append_transcript("error",
+                "Not configured. Open the AI Agent popup "
+                "(Tools ▾ → AI) and set Gateway URL, API key, and model.")
+            self.status_label.setText("not configured")
+            return
+
+        self._append_transcript("user", text)
+        self.input_edit.clear()
+        self.send_btn.setEnabled(False)
+        self.status_label.setText("…thinking")
+        self._pending_user_text = text
+
+        self._worker = _ChatWorker(
+            protocol=cfg["protocol"],
+            base_url=cfg["url"], api_key=cfg["key"], model=cfg["model"],
+            system_prompt=cfg["system_prompt"],
+            history=list(self._history),
+            user_text=text,
+            confirm_helper=self._confirm_helper,
+        )
+        self._worker.tool_event.connect(self._on_tool_event)
+        self._worker.done.connect(self._on_worker_done)
+        self._worker.error.connect(self._on_worker_error)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.start()
+
+    def _on_tool_event(self, name, args, result):
+        if not self.show_tools_chk.isChecked():
+            return
+        if result is None:
+            self._append_tool_call(name, args)
+        else:
+            self._append_tool_result(name, result)
+
+    def _on_worker_done(self, assistant_text, usage):
+        self._history.append({"role": "user", "content": self._pending_user_text})
+        self._history.append({"role": "assistant", "content": assistant_text})
+        self._append_transcript("assistant", assistant_text)
+        cr = usage.get("cache_read", 0)
+        cw = usage.get("cache_write", 0)
+        cache_str = ""
+        if cr:
+            cache_str = f", cache hit {cr}"
+        elif cw:
+            cache_str = f", cache write {cw}"
+        self.status_label.setText(
+            f"in {usage.get('input', 0)}{cache_str}, "
+            f"out {usage.get('output', 0)} tokens"
+        )
+
+    def _on_worker_error(self, msg):
+        self._append_transcript("error", msg)
+        self.status_label.setText("error")
+
+    def _on_worker_finished(self):
+        self.send_btn.setEnabled(True)
+
+    def _on_clear(self):
+        self._history = []
+        self.transcript.clear()
+        self.status_label.setText("history cleared")
+
+    # ── transcript rendering ─────────────────────────────────────────
+    def _append_transcript(self, role, text):
+        text_html = self._escape(text).replace("\n", "<br>")
+        if role == "user":
+            html = f"<p><b style='color:#7fbf7f;'>You:</b> {text_html}</p>"
+        elif role == "assistant":
+            name = self._escape(self._agent_name())
+            html = f"<p><b style='color:#88aaee;'>{name}:</b> {text_html}</p>"
+        else:
+            html = f"<p><b style='color:#e07070;'>Error:</b> {text_html}</p>"
+        self.transcript.append(html)
+
+    def _agent_name(self) -> str:
+        """Read the current display name from settings. Empty → default."""
+        s = load_settings("AgentDialog") or {}
+        n = (s.get("agent_name") or "").strip()
+        return n or DEFAULT_AGENT_NAME
+
+    def _append_tool_call(self, name, args):
+        try:
+            args_str = json.dumps(args, default=str)
+        except Exception:
+            args_str = repr(args)
+        self.transcript.append(
+            f"<p style='color:#aaa; margin-left: 12px;'>"
+            f"⏵ <b>{self._escape(name)}</b>({self._escape(args_str)})</p>"
+        )
+
+    def _append_tool_result(self, name, result):
+        display = result
+        if isinstance(result, dict) and result.get("image_base64"):
+            display = {k: v for k, v in result.items() if k != "image_base64"}
+            display["_image"] = (
+                f"<{display.get('media_type', 'image')}, "
+                f"{display.get('png_kb', '?')} KB, embedded for vision>"
+            )
+        try:
+            res_str = json.dumps(display, default=str)
+        except Exception:
+            res_str = repr(display)
+        if len(res_str) > 600:
+            res_str = res_str[:600] + " …"
+        is_error = isinstance(result, dict) and "error" in result
+        color = "#e07070" if is_error else "#777"
+        self.transcript.append(
+            f"<p style='color:{color}; margin-left: 24px;'>"
+            f"  ↳ {self._escape(res_str)}</p>"
+        )
+
+    @staticmethod
+    def _escape(text):
+        return (str(text).replace("&", "&amp;")
+                          .replace("<", "&lt;")
+                          .replace(">", "&gt;"))
+
+    def wait_for_worker(self, timeout_ms: int = 2000):
+        """For clean shutdown from the enclosing dialog / dock."""
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(timeout_ms)
+
+    def _on_settings_click(self):
+        """Open the full AgentDialog (settings + chat popup). Uses
+        pystream's singleton instance if one exists (created by the
+        toolbar "AI" button), so both entry points share one dialog
+        and one persistent config state."""
+        # If this widget IS already inside an AgentDialog (i.e. the
+        # popup — not the bottom dock), just make sure the dialog is
+        # visible/focused instead of opening a second copy.
+        top = self.window()
+        if isinstance(top, AgentDialog):
+            top.raise_()
+            top.activateWindow()
+            return
+
+        # Find the pystream main window (typically our top-level).
+        main_window = top
+        attr = 'agentdialog_instance'
+        inst = getattr(main_window, attr, None)
+        if inst is None or not isinstance(inst, AgentDialog):
+            inst = AgentDialog(parent=main_window)
+            try:
+                setattr(main_window, attr, inst)
+            except Exception:
+                pass
+        inst.show()
+        inst.raise_()
+        inst.activateWindow()
+
+
+# ── build the bottom-dock wrapper — used by pystream's main window ────
+
+def build_agent_panel(parent_window) -> QtWidgets.QWidget:
+    """Return an AgentChatWidget suitable for insertion into pystream's
+    central vertical splitter as a bottom panel.
+
+    No QDockWidget — the widget is a regular child of the splitter, so
+    the user gets a resize handle above it and can drag to change its
+    height. No floating, no title-bar drag, no accidental undocking.
+    Hide/show via the View menu."""
+    w = AgentChatWidget(parent_window)
+    # Lowish minimum so the panel can shrink to a compact strip,
+    # but not so low that content disappears entirely.
+    w.setMinimumHeight(80)
+    # Preferred size policy on both axes so the splitter can hand it
+    # more or less space as the user drags the handle. Without an
+    # explicit Expanding vertical policy, some Qt styles let the
+    # widget refuse to grow past its sizeHint.
+    w.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                    QtWidgets.QSizePolicy.Expanding)
+    return w
+
+
+# ── full popup dialog: settings above + shared chat widget below ──────
+
 class AgentDialog(QtWidgets.QDialog):
-    """Chat panel with read-only beamline tools. Singleton — open once in
-    pystream and leave it; settings persist across sessions."""
+    """Chat + gateway/URL/key/model settings. Singleton — open once,
+    settings persist across sessions. The chat surface is the same
+    `AgentChatWidget` embedded in the bottom dock."""
 
     BUTTON_TEXT = "AI"
     GROUP       = "Tools"
@@ -573,12 +896,6 @@ class AgentDialog(QtWidgets.QDialog):
         self.logger = logger
         self.setWindowTitle("AI Agent")
         self.resize(720, 640)
-
-        self._history: list[dict] = []
-        self._worker: Optional[_ChatWorker] = None
-        self._pending_user_text: str = ""
-        # Lives on the GUI thread; workers route confirmation prompts through it.
-        self._confirm_helper = _ConfirmHelper(self)
 
         self._build_ui()
         self._restore_settings()
@@ -596,6 +913,17 @@ class AgentDialog(QtWidgets.QDialog):
         self.protocol_combo.addItem("OpenAI Chat Completions", PROTOCOL_OPENAI)
         self.protocol_combo.currentIndexChanged.connect(self._on_protocol_changed)
         sl.addRow("Protocol:", self.protocol_combo)
+
+        # Agent's display name — shown as the transcript prefix and
+        # substituted into every `{name}` placeholder in the system
+        # prompt. Default is DEFAULT_AGENT_NAME (Röntgen). Free-form.
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setPlaceholderText(DEFAULT_AGENT_NAME)
+        self.name_edit.setToolTip(
+            f"Agent's display name. Default '{DEFAULT_AGENT_NAME}'. "
+            "Shows up as the transcript prefix and replaces every "
+            "{name} placeholder in the system prompt.")
+        sl.addRow("Agent name:", self.name_edit)
 
         self.url_edit = QtWidgets.QLineEdit()
         sl.addRow("Base URL:", self.url_edit)
@@ -653,44 +981,11 @@ class AgentDialog(QtWidgets.QDialog):
         sys_box.toggled.connect(self.reset_prompt_btn.setVisible)
         lay.addWidget(sys_box)
 
-        # Chat transcript
-        self.transcript = QtWidgets.QTextBrowser()
-        self.transcript.setOpenExternalLinks(True)
-        self.transcript.setStyleSheet(
-            "QTextBrowser { background-color: #1e1e1e; color: #e0e0e0; "
-            "font-family: 'DejaVu Sans Mono', monospace; font-size: 10pt; }"
-        )
-        lay.addWidget(self.transcript, stretch=1)
-
-        # Input row
-        irow = QtWidgets.QHBoxLayout()
-        self.input_edit = QtWidgets.QLineEdit()
-        self.input_edit.setPlaceholderText("Type a question and press Enter…")
-        self.input_edit.returnPressed.connect(self._on_send)
-        irow.addWidget(self.input_edit)
-        self.send_btn = QtWidgets.QPushButton("Send")
-        self.send_btn.clicked.connect(self._on_send)
-        irow.addWidget(self.send_btn)
-        self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.clear_btn.setToolTip("Clear conversation history")
-        self.clear_btn.clicked.connect(self._on_clear)
-        irow.addWidget(self.clear_btn)
-        lay.addLayout(irow)
-
-        # Verbosity toggle — when off, tool calls don't render in the
-        # transcript (cleaner UI). When on, every ⏵ tool() / ↳ result line
-        # appears so you can audit what the agent is doing.
-        self.show_tools_chk = QtWidgets.QCheckBox("Show tool calls")
-        self.show_tools_chk.setChecked(False)
-        self.show_tools_chk.setToolTip(
-            "Toggle whether each tool the agent calls is shown in the "
-            "transcript. Off = clean conversation. On = full audit trail.")
-        lay.addWidget(self.show_tools_chk)
-
-        # Status bar
-        self.status_label = QtWidgets.QLabel("")
-        self.status_label.setStyleSheet("color: #888; font-size: 9pt;")
-        lay.addWidget(self.status_label)
+        # Shared chat surface — same widget class the bottom dock uses.
+        # Persist config edits so the dock (which re-reads settings at
+        # send-time) picks up any changes made here.
+        self.chat = AgentChatWidget(self)
+        lay.addWidget(self.chat, stretch=1)
 
         self._on_protocol_changed()
 
@@ -746,126 +1041,6 @@ class AgentDialog(QtWidgets.QDialog):
             "color: #c66;" if error else "color: #6a6;"
         )
 
-    # ── chat flow ───────────────────────────────────────────────────────
-    def _on_send(self):
-        if self._worker is not None and self._worker.isRunning():
-            return
-        text = self.input_edit.text().strip()
-        if not text:
-            return
-        url = self.url_edit.text().strip()
-        key = self.key_edit.text().strip()
-        model = self.model_combo.currentText().strip()
-        if not (url and key and model):
-            self.status_label.setText("Set URL, API key, and model first.")
-            return
-
-        self._append_transcript("user", text)
-        self.input_edit.clear()
-        self.send_btn.setEnabled(False)
-        self.status_label.setText("…thinking")
-        self._pending_user_text = text
-
-        self._worker = _ChatWorker(
-            protocol=self._current_protocol(),
-            base_url=url, api_key=key, model=model,
-            system_prompt=self.system_edit.toPlainText(),
-            history=list(self._history),
-            user_text=text,
-            confirm_helper=self._confirm_helper,
-        )
-        self._worker.tool_event.connect(self._on_tool_event)
-        self._worker.done.connect(self._on_worker_done)
-        self._worker.error.connect(self._on_worker_error)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
-
-    def _on_tool_event(self, name, args, result):
-        if not self.show_tools_chk.isChecked():
-            return  # quiet mode — don't render tool calls in the transcript
-        if result is None:
-            self._append_tool_call(name, args)
-        else:
-            self._append_tool_result(name, result)
-
-    def _on_worker_done(self, assistant_text, usage):
-        self._history.append({"role": "user", "content": self._pending_user_text})
-        self._history.append({"role": "assistant", "content": assistant_text})
-        self._append_transcript("assistant", assistant_text)
-        cr = usage.get("cache_read", 0)
-        cw = usage.get("cache_write", 0)
-        cache_str = ""
-        if cr:
-            cache_str = f", cache hit {cr}"
-        elif cw:
-            cache_str = f", cache write {cw}"
-        self.status_label.setText(
-            f"in {usage.get('input', 0)}{cache_str}, "
-            f"out {usage.get('output', 0)} tokens"
-        )
-
-    def _on_worker_error(self, msg):
-        self._append_transcript("error", msg)
-        self.status_label.setText("error")
-
-    def _on_worker_finished(self):
-        self.send_btn.setEnabled(True)
-
-    def _on_clear(self):
-        self._history = []
-        self.transcript.clear()
-        self.status_label.setText("history cleared")
-
-    # ── transcript rendering ────────────────────────────────────────────
-    def _append_transcript(self, role, text):
-        text_html = self._escape(text).replace("\n", "<br>")
-        if role == "user":
-            html = f"<p><b style='color:#7fbf7f;'>You:</b> {text_html}</p>"
-        elif role == "assistant":
-            html = f"<p><b style='color:#88aaee;'>TXMBot:</b> {text_html}</p>"
-        else:
-            html = f"<p><b style='color:#e07070;'>Error:</b> {text_html}</p>"
-        self.transcript.append(html)
-
-    def _append_tool_call(self, name, args):
-        try:
-            args_str = json.dumps(args, default=str)
-        except Exception:
-            args_str = repr(args)
-        self.transcript.append(
-            f"<p style='color:#aaa; margin-left: 12px;'>"
-            f"⏵ <b>{self._escape(name)}</b>({self._escape(args_str)})</p>"
-        )
-
-    def _append_tool_result(self, name, result):
-        # Don't blast a 200 KB base64 PNG into the transcript — replace it
-        # with a marker so the user sees "image returned" instead.
-        display = result
-        if isinstance(result, dict) and result.get("image_base64"):
-            display = {k: v for k, v in result.items() if k != "image_base64"}
-            display["_image"] = (
-                f"<{display.get('media_type', 'image')}, "
-                f"{display.get('png_kb', '?')} KB, embedded for vision>"
-            )
-        try:
-            res_str = json.dumps(display, default=str)
-        except Exception:
-            res_str = repr(display)
-        if len(res_str) > 600:
-            res_str = res_str[:600] + " …"
-        is_error = isinstance(result, dict) and "error" in result
-        color = "#e07070" if is_error else "#777"
-        self.transcript.append(
-            f"<p style='color:{color}; margin-left: 24px;'>"
-            f"  ↳ {self._escape(res_str)}</p>"
-        )
-
-    @staticmethod
-    def _escape(text):
-        return (str(text).replace("&", "&amp;")
-                          .replace("<", "&lt;")
-                          .replace(">", "&gt;"))
-
     # ── settings ────────────────────────────────────────────────────────
     def _restore_settings(self):
         s = load_settings("AgentDialog")
@@ -875,6 +1050,7 @@ class AgentDialog(QtWidgets.QDialog):
         idx = self.protocol_combo.findData(proto)
         if idx >= 0:
             self.protocol_combo.setCurrentIndex(idx)
+        self.name_edit.setText(s.get("agent_name", ""))
         self.url_edit.setText(s.get("base_url", ""))
         self.key_edit.setText(s.get("api_key", ""))
         sp = s.get("system_prompt")
@@ -884,16 +1060,17 @@ class AgentDialog(QtWidgets.QDialog):
         if last_model:
             self.model_combo.addItem(last_model)
             self.model_combo.setCurrentText(last_model)
-        self.show_tools_chk.setChecked(bool(s.get("show_tool_calls", False)))
+        self.chat.show_tools_chk.setChecked(bool(s.get("show_tool_calls", False)))
 
     def _persist_settings(self):
         save_settings("AgentDialog", {
             "protocol": self._current_protocol(),
+            "agent_name": self.name_edit.text().strip(),
             "base_url": self.url_edit.text(),
             "api_key": self.key_edit.text(),
             "system_prompt": self.system_edit.toPlainText(),
             "model": self.model_combo.currentText(),
-            "show_tool_calls": self.show_tools_chk.isChecked(),
+            "show_tool_calls": self.chat.show_tools_chk.isChecked(),
         })
 
     # ── knowledge-base bootstrap ────────────────────────────────────────
@@ -976,7 +1153,7 @@ class AgentDialog(QtWidgets.QDialog):
                         f.write(
                             "# pystream agent — local docs\n\n"
                             "Drop markdown files in this directory and the AI "
-                            "plugin (TXMBot) reads them on demand via "
+                            "plugin (Röntgen) reads them on demand via "
                             "list_docs / search_docs / read_doc. One topic per "
                             "file works best — short titles, concrete facts.\n"
                         )
@@ -1028,6 +1205,6 @@ class AgentDialog(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         self._persist_settings()
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.wait(2000)
+        # Chat's worker is owned by AgentChatWidget now.
+        self.chat.wait_for_worker(2000)
         super().closeEvent(event)

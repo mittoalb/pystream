@@ -17,7 +17,7 @@ from `__all__` in [bl32ID/__init__.py](../../src/pystream/beamlines/bl32ID/__ini
 | **Viewers ▾** | XANES 2D Viewer |
 | **Calculators ▾** | TXM Optics, X-ray Tools |
 | **Test ▾** | AutoROT, AutoCenter, Autofocus *(under development)* |
-| **Tools ▾** | BL GUI, AI (TXMBot) |
+| **Tools ▾** | BL GUI, AI (Röntgen) |
 
 ## Plugins
 
@@ -127,10 +127,12 @@ user-defined motor positions table.
   row. Expand the matching section to edit its parameters.
 - *Run Selected Row* runs one point; *Run All* runs them in order.
 
-### TXMBot (AI)
+### Röntgen (AI)
 
 LLM chat assistant with read-only beamline introspection and gated
-IOC-recovery actions. See [TXMBot](txmbot.md).
+IOC-recovery actions. See [Röntgen](txmbot.md).
+
+Named after Wilhelm Conrad Röntgen, who discovered X-rays in 1895.
 
 ### XANES GUI
 
