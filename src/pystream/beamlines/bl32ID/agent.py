@@ -611,16 +611,70 @@ class AgentChatWidget(QtWidgets.QWidget):
     configured" line + a Configure… link that opens the full
     `AgentDialog` popup."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, persist_id: Optional[str] = None):
+        """`persist_id` — if given, the chat's transcript + history are
+        saved to `~/.pystream/agent_history_<persist_id>.json` and
+        restored on next construction. The dock passes `"dock"` so
+        conversations survive pystream restarts; the popup passes
+        nothing so it starts fresh each open."""
         super().__init__(parent)
         self._history: list[dict] = []
         self._worker: Optional[_ChatWorker] = None
         self._pending_user_text: str = ""
+        self._persist_id = persist_id
         # Lives on the GUI thread; workers route confirmation prompts
         # through it. Parenting to `self` keeps its lifetime tied to
         # the widget.
         self._confirm_helper = _ConfirmHelper(self)
         self._build_ui()
+        self._restore_history()
+
+    # ── History persistence ─────────────────────────────────────────
+    _HISTORY_MAX_TURNS = 100   # user+assistant pairs; caps unbounded growth
+
+    def _history_path(self) -> Optional[str]:
+        if not self._persist_id:
+            return None
+        return os.path.join(PYSTREAM_HOME,
+                            f"agent_history_{self._persist_id}.json")
+
+    def _restore_history(self):
+        """Read saved (transcript, history) if persistence is enabled.
+        Silent on missing / corrupt files — we start fresh in that case."""
+        path = self._history_path()
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            self._history = list(data.get("history") or [])
+            html = data.get("transcript_html") or ""
+            if html:
+                self.transcript.setHtml(html)
+                self.status_label.setText(
+                    f"restored {len(self._history)//2} turn(s) from previous session")
+        except Exception:
+            self._history = []
+
+    def _save_history(self):
+        """Persist current transcript + history. Called after every
+        successful assistant reply. Cap to _HISTORY_MAX_TURNS so files
+        don't grow unbounded."""
+        path = self._history_path()
+        if not path:
+            return
+        try:
+            os.makedirs(PYSTREAM_HOME, exist_ok=True)
+            # Trim oldest turns; each turn is 2 messages (user + assistant)
+            keep = self._HISTORY_MAX_TURNS * 2
+            trimmed = self._history[-keep:] if len(self._history) > keep else self._history
+            with open(path, "w") as f:
+                json.dump({
+                    "history":         trimmed,
+                    "transcript_html": self.transcript.toHtml(),
+                }, f, indent=2)
+        except Exception:
+            pass
 
     def _build_ui(self):
         lay = QtWidgets.QVBoxLayout(self)
@@ -744,6 +798,8 @@ class AgentChatWidget(QtWidgets.QWidget):
         self._history.append({"role": "user", "content": self._pending_user_text})
         self._history.append({"role": "assistant", "content": assistant_text})
         self._append_transcript("assistant", assistant_text)
+        # Persist so a pystream restart resumes this conversation.
+        self._save_history()
         cr = usage.get("cache_read", 0)
         cw = usage.get("cache_write", 0)
         cache_str = ""
@@ -767,6 +823,13 @@ class AgentChatWidget(QtWidgets.QWidget):
         self._history = []
         self.transcript.clear()
         self.status_label.setText("history cleared")
+        # Wipe the persisted file too, so the next launch starts fresh.
+        path = self._history_path()
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
     # ── transcript rendering ─────────────────────────────────────────
     def _append_transcript(self, role, text):
@@ -867,7 +930,10 @@ def build_agent_panel(parent_window) -> QtWidgets.QWidget:
     the user gets a resize handle above it and can drag to change its
     height. No floating, no title-bar drag, no accidental undocking.
     Hide/show via the View menu."""
-    w = AgentChatWidget(parent_window)
+    # `persist_id="dock"` — history is saved to
+    # ~/.pystream/agent_history_dock.json so restarting pystream
+    # resumes the same conversation.
+    w = AgentChatWidget(parent_window, persist_id="dock")
     # Lowish minimum so the panel can shrink to a compact strip,
     # but not so low that content disappears entirely.
     w.setMinimumHeight(80)
