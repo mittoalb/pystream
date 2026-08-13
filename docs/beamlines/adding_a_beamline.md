@@ -86,8 +86,12 @@ used by bl32ID:
 - `"Detector"` — detector setup
 - `"Viewers"` — offline data viewers
 - `"Calculators"` — reference calculators
-- `"Tools"` — misc (BL GUI, AI agent)
+- `"Tools"` — misc (BL GUI)
 - `"Test"` — under-development plugins
+
+The **AI Agent** does not use `GROUP` — it's a core bottom-panel widget,
+not a beamline plugin. Beamlines contribute tools + prompt body to it
+through the optional `provide_agent_context()` hook (see below).
 
 `HANDLER_TYPE`:
 
@@ -95,3 +99,13 @@ used by bl32ID:
 - `'launcher'` — instantiate + close each time (for fire-and-forget
   subprocess spawners)
 - `'multi-instance'` — new instance each click
+
+## Optional beamline hooks
+
+Beamline `__init__.py` can expose these at module level; pystream calls
+them if present, otherwise silently skips:
+
+| Hook | When called | What it does |
+|---|---|---|
+| `start_background_services(parent_window)` | Once, after main window is built | Start watchers, seed knowledge bases, etc. bl32ID uses it for QGMax's request-file listener and the agent knowledge-base bootstrap. |
+| `provide_agent_context()` | On every AI Send | Return a dict of tool specs, dispatcher, write-tool set, destructive-command classifier, and prompt-body addendum. Omit for pure-chat AI on this beamline. See [Röntgen](txmbot.md#beamline-specific-tools-and-prompt). |

@@ -35,6 +35,10 @@ Common flags: `--max-fps`, `--display-bin`, `--proc-config`,
   beamline (see [Beamlines](beamlines/index.md)).
 - **Side panel**: crosshair, ROI, ellipse, line profile, scale bar,
   metrics, console — see [Plugins](plugins/index.md).
+- **AI Agent bottom panel**: chat with an LLM assistant that can read
+  live beamline state and (on bl32ID) run allowlisted IOC scripts.
+  Configure protocol, URL, API key, model, and agent name via the
+  panel's ⚙ Settings. See [Röntgen](beamlines/txmbot.md).
 - **Recording**: Browse to pick an output dir, set a filename prefix,
   click **⏺ Record**. Frames go to RAM and are written as TIFFs by a
   background writer pool; click again to stop.
@@ -71,4 +75,8 @@ Drop the file under `processors/` and reference it from the JSON.
 ## Config
 
 Viewer state (last PV, etc.) lives in `~/.pystream/viewer_config.json`.
-Beamline plugin settings live in `~/.pystream/bl32ID_settings.json`.
+Beamline plugin settings live in `~/.pystream/<beamline>_settings.json`
+(e.g. `bl32ID_settings.json`). AI Agent config lives in
+`~/.pystream/agent_settings.json` and its conversation history in
+`~/.pystream/agent_history_dock.json`. API keys stay local — nothing
+under `~/.pystream/` is tracked by git.

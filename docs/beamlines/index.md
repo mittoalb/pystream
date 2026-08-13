@@ -28,6 +28,14 @@ dialog (singleton-style, per each plugin's `HANDLER_TYPE`).
 Click **Beamlines** in the top toolbar to show the beamlines bar, then
 pick a plugin from any dropdown.
 
+## Core features (present regardless of beamline)
+
+- **AI Agent** — chat panel always docked at the bottom of the main
+  window. Beamlines optionally contribute tools + prompt-body via
+  `provide_agent_context()`. bl32ID contributes its full 32-ID tool
+  catalog; bl19BM (empty scaffold) leaves the agent in pure-chat mode.
+  See [Röntgen](txmbot.md).
+
 ## Built-in beamlines
 
 - [bl32ID](bl32ID.md) — APS 32-ID TXM imaging + tomography. Full plugin

@@ -17,7 +17,12 @@ from `__all__` in [bl32ID/__init__.py](../../src/pystream/beamlines/bl32ID/__ini
 | **Viewers ▾** | XANES 2D Viewer |
 | **Calculators ▾** | TXM Optics, X-ray Tools |
 | **Test ▾** | AutoROT, AutoCenter, Autofocus *(under development)* |
-| **Tools ▾** | BL GUI, AI (Röntgen) |
+| **Tools ▾** | BL GUI |
+
+The **AI Agent (Röntgen)** is not in a toolbar dropdown — it lives as a
+permanent bottom panel provided by pystream core. bl32ID contributes
+its tool catalog + prompt body via `provide_agent_context()`. See
+[Röntgen](txmbot.md).
 
 ## Plugins
 
@@ -129,10 +134,16 @@ user-defined motor positions table.
 
 ### Röntgen (AI)
 
-LLM chat assistant with read-only beamline introspection and gated
-IOC-recovery actions. See [Röntgen](txmbot.md).
+Core pystream feature — always visible as a bottom panel, not a bl32ID
+toolbar entry. bl32ID contributes its 32-ID-specific tools (`read_pv`,
+`list_status_pages`, IOC scripts, XANES2D metadata, …) and prompt body
+via `provide_agent_context()` in [bl32ID/__init__.py](../../src/pystream/beamlines/bl32ID/__init__.py).
+Actual tool implementations live in [agent_tools.py](../../src/pystream/beamlines/bl32ID/agent_tools.py).
 
-Named after Wilhelm Conrad Röntgen, who discovered X-rays in 1895.
+Full agent docs: [Röntgen](txmbot.md).
+
+Default agent name honors Wilhelm Conrad Röntgen, who discovered X-rays
+in 1895 — editable in the ⚙ Settings dialog.
 
 ### XANES GUI
 
@@ -206,7 +217,10 @@ conda install -n pystream -c conda-forge xraylib
 
 Plugin state is saved to `~/.pystream/bl32ID_settings.json` on close and
 restored on next open. The directory `~/.pystream/` also holds the
-QGMax request/response files and the X-ray Tools density cache.
+QGMax request/response files, the X-ray Tools density cache, the AI
+agent's `agent_settings.json` + `agent_history_dock.json`, and the
+knowledge-base `docs/` symlinks / `ioc_scripts.json` /
+`status_pages.json` seeded by [agent_tools.py](../../src/pystream/beamlines/bl32ID/agent_tools.py).
 
 ## Adding a new plugin
 
