@@ -1274,3 +1274,231 @@ def openai_tool_specs() -> list[dict]:
             "parameters": t["schema"],
         },
     } for t in TOOLS]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# System-prompt addendum — inserted at `{beamline_addendum}` in the core
+# pystream/agent.py prompt when this beamline is active. Contains 32-ID-
+# specific tools, PVs, IOC control panel, and workflow rules that only
+# make sense on this beamline.
+# ═══════════════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT_ADDENDUM = """
+# 32-ID TXM TOOLS
+
+| Tool                          | When to use                                    |
+|-------------------------------|------------------------------------------------|
+| list_status_pages()           | First step for any "running / status / up?"    |
+| fetch_url(url)                | Read a registered status page (HTML→text)      |
+| read_pv(pv_name)              | Get one EPICS PV value                         |
+| caput(pv_name, value)         | Write to EPICS — Yes/No dialog before run      |
+| get_detector_image_stats(pv)  | Numeric detector stats (mean / sat / etc.)     |
+| view_detector_image(pv)       | SEE the live frame as a downsampled PNG        |
+| read_file(path)               | Read a config / doc / log on disk              |
+| bash(cmd)                     | Anything else: ls, ping, curl, .sh, etc.       |
+
+# 32-ID WORKFLOW RULES
+
+A. ANY status / availability / load question — *always* start with
+   list_status_pages, even when the user hasn't named a URL.
+   Examples: "is X IOC running", "GPU load", "beam status", "disk space
+   on tomo3", "is gauss reachable".
+   Workflow:
+       1. list_status_pages()  — read each entry's description.
+       2. If the entry has a `metrics_endpoint`, prefer that for
+          structured queries (needs JSON, not rendered HTML).
+       3. fetch_url(<right URL>) — pull the live page.
+       4. Summarize the answer in one paragraph or short table.
+   NEVER `find /`, NEVER `ls ~/` to discover hosts/IOCs. The user has
+   pre-registered the right URLs in ~/.pystream/status_pages.json.
+
+B. Per-IOC actions — "is X running", "start/stop/restart X":
+   FIRST read_file ~/.pystream/ioc_scripts.json for the IOC's entry
+   (wrapper / host / work_dir / inner_script / rest_endpoint / verify_pvs).
+   THEN use the IOC CONTROL PANEL REST API at http://164.54.102.6:5100/:
+       POST /status/<ioc_name>   → {"status": "up"|"down", "address": "..."}
+       POST /start/<ioc_name>    → starts and returns same JSON
+       POST /stop/<ioc_name>     → stops  and returns same JSON
+       POST /medm/<ioc_name>     → opens MEDM (don't use; opens a window)
+       POST /gui/<TYPE>          → launches a GUI (TXM, 32ID-GUI, etc.)
+   IOC names: ioc32idbSP1, ioc32idbSP2, ioc32idbBPM, ioc32idbTEMP,
+   ioc32idbTXM, ioc32idbShaker, ioc32idbSoft, ioc32idaSoft, ioc32idcSoft,
+   ioc32idAERO, ioc32idLM, ioc32idQG, ioc32idTomoScan, ioc32Kinetix,
+   iocEnergyServer, 32idMZ1, 32idMZ2, TXMbackend.
+   DO NOT call wrapper scripts under
+   /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/*.sh
+   — they spawn gnome-terminal windows the user doesn't want.
+   DO NOT ssh directly to the IOC host — the Control Panel server handles
+   startup procedure (screen sessions, env) that a manual ssh misses.
+   After start/stop/restart, verify via /status/<name> after 2–3 s OR
+   read_pv on a meaningful PV exposed by that IOC.
+
+C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
+       read_pv("32id:m1.RBV")              # ZP motor (focal axis)
+       read_pv("32id:TXMOptics:Energy_RBV") # mono energy in keV
+       read_pv("32idbSP1:cam1:Acquire_RBV") # camera state
+
+D. PV writes — use caput() for ANY write. Preview the action in chat
+   first; the dialog will pop. Never use bash("caput …") — it bypasses
+   the structured confirmation.
+
+E. Detector image checks — two complementary tools:
+   * `get_detector_image_stats(pv)` for NUMERIC questions (saturation,
+     mean intensity, "is acquisition working"). Cheap, no image on wire.
+   * `view_detector_image(pv)` for VISUAL questions ("is beam centered",
+     "do you see the sample", "hot pixels"). Image embedded in the
+     result; you can inspect pixels directly.
+   Default detector PV: `32idbSP1:Pva1:Image`.
+
+F. PROJECT QUESTIONS — when the user mentions a project name (bl_gui,
+   pystream, iocs_monitor, txm_calc, xanes_gui, mosalign, holotomo,
+   tomocupy, tomopyui, lamn, …), the FIRST step is ALWAYS:
+       list_docs()                        — see what's auto-linked
+       read_doc("<project>_AGENTS.md")    — preferred
+       read_doc("<project>_README.md")    — fallback
+   The ~/.pystream/docs/ directory contains symlinks to AGENTS.md /
+   README.md from EVERY project under ~/Software/.
+
+   Other on-disk references:
+       ~/.pystream/docs/<topic>.md           — user notes (condensers etc.)
+       ~/.pystream/status_pages.json         — registered status URLs
+       ~/.pystream/ioc_scripts.json          — IOC restart allowlist
+       ~/.bl_gui/bl32id_zp_calibration.json  — ZP energy/X/Y/Z table
+       ~/.pystream/agent_settings.json       — pystream agent settings
+                                              (api_key is sensitive, DO NOT echo)
+
+G. Network diagnostics — bash("ping -c 4 <host>"), bash("traceroute -n
+   -m 12 <host>"), bash("getent hosts <host>"). Common IOC hosts:
+   gauss, txmthree (+.aps.anl.gov suffix forms).
+
+# 32-ID DOMAIN CHEAT SHEET
+
+- TXM = transmission X-ray microscope. Beamline 32-ID-C runs hard X-ray TXM.
+- Common modes/scans: XANES2D (energy series + flat), tomo, focus calib.
+- Detector chain: SP1 areaDetector cam1 + PVA plugin → frames on
+  `32idbSP1:Pva1:Image` (NTNDArray).
+- Mono: `32id:TXMOptics:{Energy, EnergySet, Energy_RBV}` (keV).
+  EnergySet is rising-edge-triggered (toggle 0→1 to commit a move).
+- Zone plate: focal motor `32id:m1`; transverse X/Y/Z calibration in
+  bl_gui's table at ~/.bl_gui/bl32id_zp_calibration.json.
+- QGMax: image-mean optimization plugin. Status PV: `32id:pystream:qgmax`.
+- IOC name → script suffix 1:1: `32idbSP1` IOC ↔ `32idbSP1.sh`.
+
+# 32-ID ANTI-PATTERNS (in addition to the core ones)
+
+- ❌ Wrapper scripts (they spawn gnome-terminal). Use the Control Panel.
+- ❌ Direct ssh to IOC hosts. Use the Control Panel.
+- ❌ Inventing IOC / PV names. Verify with a tool or ask.
+- ❌ Echoing ~/.pystream/agent_settings.json (contains api_key).
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Knowledge-base bootstrap — the 32-ID-flavored helper the old
+# AgentDialog ran on construction. Called by bl32ID.__init__:
+# start_background_services(pystream_main) at launch, so the user-editable
+# knowledge base is populated once when pystream starts against this
+# beamline.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _discover_ioc_scripts() -> dict:
+    """Look for an iocs_monitor scripts directory under common APS
+    conventions. Returns a populated `scripts` dict ready to drop into
+    ioc_scripts.json, or {} if nothing is found."""
+    import glob, os
+    candidates = [
+        os.path.expanduser("~/Software/iocs_monitor/iocs_monitor/scripts"),
+        os.path.expanduser("~/iocs_monitor/scripts"),
+    ]
+    for d in candidates:
+        if not os.path.isdir(d):
+            continue
+        shs = sorted(glob.glob(os.path.join(d, "*.sh")))
+        if not shs:
+            continue
+        return {
+            os.path.splitext(os.path.basename(p))[0]: {
+                "path": p,
+                "description": f"Restart {os.path.basename(p)} "
+                               f"(auto-discovered in {d})",
+            } for p in shs
+        }
+    return {}
+
+
+def _link_known_reference_docs(docs_dir: str):
+    """Auto-symlink AGENTS.md / README.md from every project under
+    ~/Software/ into the agent's docs directory so list_docs /
+    read_doc find them. Idempotent."""
+    import glob, os
+    try:
+        os.makedirs(docs_dir, exist_ok=True)
+    except Exception:
+        return
+    software_root = os.path.expanduser("~/Software")
+    if not os.path.isdir(software_root):
+        return
+    for project_dir in sorted(glob.glob(os.path.join(software_root, "*"))):
+        if not os.path.isdir(project_dir):
+            continue
+        project_name = os.path.basename(project_dir)
+        for filename in ("AGENTS.md", "README.md"):
+            src_abs = os.path.join(project_dir, filename)
+            if not os.path.isfile(src_abs):
+                continue
+            tag = filename.rsplit(".", 1)[0]
+            dst = os.path.join(docs_dir, f"{project_name}_{tag}.md")
+            try:
+                if os.path.islink(dst) and os.readlink(dst) == src_abs:
+                    break
+                if os.path.lexists(dst):
+                    break
+                os.symlink(src_abs, dst)
+            except Exception:
+                pass
+            break  # prefer AGENTS over README
+
+
+def bootstrap_knowledge_base():
+    """Create empty starter files for the user-editable knowledge base
+    the first time bl32ID is active. Never overwrites existing files.
+    Called by bl32ID.start_background_services at pystream launch."""
+    import json as _json, os
+    from .plugin_settings import PYSTREAM_HOME as _HOME
+    docs_dir     = os.path.join(_HOME, "docs")
+    aliases_file = os.path.join(_HOME, "pv_aliases.json")
+    urls_file    = os.path.join(_HOME, "doc_urls.json")
+    ioc_file     = os.path.join(_HOME, "ioc_scripts.json")
+    status_file  = os.path.join(_HOME, "status_pages.json")
+    try:
+        if not os.path.isdir(docs_dir):
+            os.makedirs(docs_dir, exist_ok=True)
+            readme = os.path.join(docs_dir, "README.md")
+            if not os.path.isfile(readme):
+                with open(readme, "w") as f:
+                    f.write(
+                        "# pystream agent — local docs\n\n"
+                        "Drop markdown files in this directory and the AI "
+                        "agent reads them on demand via list_docs / "
+                        "search_docs / read_doc. One topic per file works "
+                        "best — short titles, concrete facts.\n"
+                    )
+        _link_known_reference_docs(docs_dir)
+        if not os.path.isfile(aliases_file):
+            with open(aliases_file, "w") as f:
+                _json.dump({"_comment": "friendly_name → PV",
+                            "aliases": {}, "macros": {}}, f, indent=2)
+        if not os.path.isfile(urls_file):
+            with open(urls_file, "w") as f:
+                _json.dump({"_comment": "friendly_name → URL",
+                            "links": {}}, f, indent=2)
+        if not os.path.isfile(ioc_file):
+            with open(ioc_file, "w") as f:
+                _json.dump({"_comment": "IOC control allowlist",
+                            "scripts": _discover_ioc_scripts()}, f, indent=2)
+        if not os.path.isfile(status_file):
+            with open(status_file, "w") as f:
+                _json.dump({"_comment": "Friendly_name → status page URL",
+                            "pages": {}}, f, indent=2)
+    except Exception:
+        pass  # best-effort; user can create the files themselves
