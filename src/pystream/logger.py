@@ -33,23 +33,34 @@ def setup_custom_logger(name: str = "NTNDAViewer", lfname: str = None, stream_to
 
 
 class ColoredLogFormatter(logging.Formatter):
-    __BLUE = '\033[94m'
-    __GREEN = '\033[92m'
-    __RED = '\033[91m'
-    __RED_BG = '\033[41m'
-    __YELLOW = '\033[33m'
-    __ENDC = '\033[0m'
+    """Terminal-color log formatter.
+
+    Only WARNING and above get colored — INFO stays the terminal's
+    default foreground so a scroll-back of routine startup messages
+    doesn't turn into a solid green block. WARNING/ERROR/CRITICAL still
+    pop so the user actually notices them."""
+
+    __DIM     = '\033[2m'
+    __CYAN    = '\033[36m'
+    __YELLOW  = '\033[33m'
+    __RED     = '\033[91m'
+    __RED_BG  = '\033[41m'
+    __BOLD    = '\033[1m'
+    __ENDC    = '\033[0m'
 
     def _format_message_level(self, message, level):
+        # INFO in cyan (readable, not green, doesn't collide with the
+        # terminal default); warnings/errors in yellow/red so they still
+        # pop against the sea of cyan info lines.
         colors = {
-            'info': self.__GREEN,
-            'warning': self.__YELLOW,
-            'error': self.__RED,
-            'critical': self.__RED_BG,
+            'debug':    self.__DIM,
+            'info':     self.__CYAN,
+            'warning':  self.__YELLOW,
+            'error':    self.__RED,
+            'critical': self.__BOLD + self.__RED_BG,
         }
-        if level.lower() in colors:
-            message = f"{colors[level.lower()]}{message}{self.__ENDC}"
-        return message
+        code = colors.get(level.lower())
+        return f"{code}{message}{self.__ENDC}" if code else message
 
     def formatMessage(self, record):
         record.message = self._format_message_level(record.getMessage(), record.levelname)

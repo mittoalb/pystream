@@ -1121,7 +1121,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         info_layout = QtWidgets.QVBoxLayout()
         self.lbl_info = QtWidgets.QLabel("No image")
         self.lbl_info.setWordWrap(True)
-        self.lbl_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; font-size: 10px; }")
+        self.lbl_info.setStyleSheet("QLabel { background-color: #1a1a1a; color: #e0e0e0; padding: 6px; border: 1px solid #333; font-size: 10px; }")
         info_layout.addWidget(self.lbl_info)
         info_group.setLayout(info_layout)
         left_layout.addWidget(info_group)
@@ -1131,7 +1131,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.lbl_roi_info = QtWidgets.QLabel("No ROI selected")
         self.lbl_roi_info.setWordWrap(True)
         self.lbl_roi_info.setStyleSheet(
-                "QLabel { background-color: #1a1a1a; padding: 6px; "
+                "QLabel { background-color: #1a1a1a; color: #e0e0e0; padding: 6px; "
                 "border: 1px solid #333; font-family: monospace; font-size: 9px; }"
         )
         roi_layout.addWidget(self.lbl_roi_info)
@@ -1143,7 +1143,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.lbl_ellipse_info = QtWidgets.QLabel("No ellipse ROI selected")
         self.lbl_ellipse_info.setWordWrap(True)
         self.lbl_ellipse_info.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; padding: 6px; "
+            "QLabel { background-color: #1a1a1a; color: #e0e0e0; padding: 6px; "
             "border: 1px solid #333; font-family: monospace; font-size: 9px; }"
         )
         ellipse_layout.addWidget(self.lbl_ellipse_info)
@@ -1155,7 +1155,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         line_layout = QtWidgets.QVBoxLayout()
         self.lbl_line_info = QtWidgets.QLabel("No line selected")
         self.lbl_line_info.setWordWrap(True)
-        self.lbl_line_info.setStyleSheet("font-size: 9px;")
+        self.lbl_line_info.setStyleSheet("color: #e0e0e0; font-size: 9px;")
         line_layout.addWidget(self.lbl_line_info)
         line_group.setLayout(line_layout)
         left_layout.addWidget(line_group)
@@ -1165,7 +1165,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         cursor_layout = QtWidgets.QVBoxLayout()
         self.lbl_cursor_info = QtWidgets.QLabel("Move mouse over image")
         self.lbl_cursor_info.setWordWrap(True)
-        self.lbl_cursor_info.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; font-family: monospace; font-size: 9px; }")
+        self.lbl_cursor_info.setStyleSheet("QLabel { background-color: #1a1a1a; color: #e0e0e0; padding: 6px; border: 1px solid #333; font-family: monospace; font-size: 9px; }")
         cursor_layout.addWidget(self.lbl_cursor_info)
         cursor_group.setLayout(cursor_layout)
         left_layout.addWidget(cursor_group)
@@ -1175,7 +1175,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         crosshair_layout = QtWidgets.QVBoxLayout()
         self.lbl_crosshair = QtWidgets.QLabel("Disabled")
         self.lbl_crosshair.setWordWrap(True)
-        self.lbl_crosshair.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 6px; border: 1px solid #333; font-family: monospace; font-size: 9px; }")
+        self.lbl_crosshair.setStyleSheet("QLabel { background-color: #1a1a1a; color: #e0e0e0; padding: 6px; border: 1px solid #333; font-family: monospace; font-size: 9px; }")
         crosshair_layout.addWidget(self.lbl_crosshair)
         crosshair_group.setLayout(crosshair_layout)
         left_layout.addWidget(crosshair_group)
@@ -1238,7 +1238,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
             "Click 'Record' to begin"
         )
         self.lbl_record_status.setWordWrap(True)
-        self.lbl_record_status.setStyleSheet("QLabel { background-color: #1a1a1a; padding: 4px; border: 1px solid #333; font-size: 9px; }")
+        self.lbl_record_status.setStyleSheet("QLabel { background-color: #1a1a1a; color: #e0e0e0; padding: 4px; border: 1px solid #333; font-size: 9px; }")
         record_layout.addWidget(self.lbl_record_status)
         
         record_group.setLayout(record_layout)
