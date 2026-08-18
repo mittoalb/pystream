@@ -47,6 +47,21 @@ def start_background_services(parent_window):
         pass
 
 
+def provide_task_templates():
+    """{task_display_name: {"motors": [{"label","pv"}, ...],
+                             "context": <str>}}
+    consumed by pystream's Task Recorder. Task list + motor PVs +
+    curated context strings live in bl32ID/task_templates.py, mirroring
+    the beamline's txmOptics.substitutions file. Returns {} on any
+    import failure so the recorder cleanly falls back to free-text
+    mode."""
+    try:
+        from .task_templates import task_template_map
+        return task_template_map()
+    except Exception:
+        return {}
+
+
 def provide_agent_context():
     """Beamline-specific tools + prompt-body appended to the core agent
     prompt in pystream.agent. Queried at every Send. Returning None or

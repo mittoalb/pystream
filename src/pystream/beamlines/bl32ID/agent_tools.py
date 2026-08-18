@@ -17,6 +17,7 @@ model can recover gracefully and the conversation continues.
 """
 
 import glob
+import json
 import os
 import time
 from typing import Any, Callable
@@ -1086,6 +1087,9 @@ def tool_read_scan_metadata(path: str) -> dict:
 
 
 # ── catalog ─────────────────────────────────────────────────────────────
+# Note: list_task_recordings / read_task_recording are now core tools
+# provided by pystream/agent_core_tools.py — they work on every beamline
+# (and even with no beamline). They are NOT registered here.
 
 # Each entry: name, description (visible to the model), JSON-schema for
 # inputs, the Python callable. Keep descriptions concrete — that's how the
@@ -1297,6 +1301,12 @@ SYSTEM_PROMPT_ADDENDUM = """
 | read_file(path)               | Read a config / doc / log on disk              |
 | bash(cmd)                     | Anything else: ls, ping, curl, .sh, etc.       |
 
+Task-recording tools (`list_task_recordings`, `read_task_recording`)
+are core, not 32-ID-specific — they're always in your catalog. See
+the "Task recordings" section of the core prompt for the general
+workflow, and the 32-ID specifics below for the alignment task order
+this beamline uses.
+
 # 32-ID WORKFLOW RULES
 
 A. ANY status / availability / load question — *always* start with
@@ -1390,6 +1400,27 @@ G. Network diagnostics — bash("ping -c 4 <host>"), bash("traceroute -n
 - ❌ Direct ssh to IOC hosts. Use the Control Panel.
 - ❌ Inventing IOC / PV names. Verify with a tool or ask.
 - ❌ Echoing ~/.pystream/agent_settings.json (contains api_key).
+
+# 32-ID ALIGNMENT WORKFLOW (element order + slugs)
+
+Six elements are aligned individually, in this order, then one final
+joint refinement pass over all of them:
+
+    1. Detector                — focus & rotation      (slug: detector)
+    2. Zone Plate              — position & focus      (slug: zone_plate)
+    3. Phase Ring              — position              (slug: phase_ring)
+    4. Condenser               — position & angles     (slug: condenser)
+    5. Pinhole                 — position              (slug: pinhole)
+    6. Beam Stop               — position              (slug: beam_stop)
+    7. Final Joint Refinement  — all 15 axes together  (slug: final_joint_refinement)
+
+Use these slugs when calling `read_task_recording(task_slug)`.
+The general workflow (always list first, load latest session, follow
+the exact motor sequence) is in the core prompt above — no need to
+restate it. If the user names a task that isn't in this list,
+still call `list_task_recordings()` first — the free-text mode of
+the recorder means anything might be there (Sample alignment, custom
+elements, one-off diagnostics, …).
 """
 
 

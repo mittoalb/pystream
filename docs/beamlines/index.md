@@ -35,6 +35,13 @@ pick a plugin from any dropdown.
   `provide_agent_context()`. bl32ID contributes its full 32-ID tool
   catalog; bl19BM (empty scaffold) leaves the agent in pure-chat mode.
   See [Röntgen](txmbot.md).
+- **Task Recorder** — top-toolbar button that captures motor moves +
+  detector frames as procedural demonstrations. Load and replay past
+  sessions with `caput -c`, or publish a good session as a named tool
+  for one-click future runs. Beamlines contribute their task/motor
+  map via `provide_task_templates()`; otherwise a free-text mode is
+  available. The AI agent also reads every recording. See
+  [Task Recorder](../plugins/task_recorder.md).
 
 ## Built-in beamlines
 

@@ -110,25 +110,56 @@ def _active_beamline_module():
 
 
 def _load_tool_context() -> dict:
-    """Fetch the active beamline's tool context. Called at every Send
-    so beamline changes take effect immediately."""
+    """Fetch the effective tool context for a Send. Always includes the
+    core, beamline-agnostic tools from `agent_core_tools`; merges the
+    active beamline's `provide_agent_context()` on top when present.
+
+    Merge semantics:
+      - tool_specs_* : core specs + beamline specs (both visible to model)
+      - get_tool     : beamline first, core fallback (beamline can
+                       override a core tool of the same name)
+      - write_tools  : union (any tool either side flags is confirmed)
+      - is_destructive: OR (either check trips the confirmation gate)
+      - system_prompt_addendum: core text + beamline text, in that order
+    """
+    from .agent_core_tools import core_tool_context
+
+    core = core_tool_context()
+
+    bl = dict(_EMPTY_TOOL_CONTEXT)
     mod = _active_beamline_module()
-    if mod is None:
-        return dict(_EMPTY_TOOL_CONTEXT)
-    hook = getattr(mod, "provide_agent_context", None)
-    if not callable(hook):
-        return dict(_EMPTY_TOOL_CONTEXT)
-    try:
-        ctx = hook() or {}
-    except Exception:
-        return dict(_EMPTY_TOOL_CONTEXT)
-    # Fill missing keys from the empty default so the widget code
-    # doesn't need to defensively .get() everywhere.
-    out = dict(_EMPTY_TOOL_CONTEXT)
-    for k, v in ctx.items():
-        if v is not None:
-            out[k] = v
-    return out
+    if mod is not None:
+        hook = getattr(mod, "provide_agent_context", None)
+        if callable(hook):
+            try:
+                ctx = hook() or {}
+                for k, v in ctx.items():
+                    if v is not None:
+                        bl[k] = v
+            except Exception:
+                pass  # beamline hook failed — fall back to empty overlay
+
+    core_get = core["get_tool"]
+    bl_get   = bl["get_tool"]
+    core_dst = core["is_destructive"]
+    bl_dst   = bl["is_destructive"]
+
+    addendum_parts = [
+        (core["system_prompt_addendum"] or "").strip(),
+        (bl["system_prompt_addendum"] or "").strip(),
+    ]
+    merged_addendum = "\n\n".join(p for p in addendum_parts if p)
+
+    return {
+        "tool_specs_anthropic": list(core["tool_specs_anthropic"])
+                                + list(bl["tool_specs_anthropic"]),
+        "tool_specs_openai":    list(core["tool_specs_openai"])
+                                + list(bl["tool_specs_openai"]),
+        "get_tool":             lambda name: bl_get(name) or core_get(name),
+        "write_tools":          set(core["write_tools"]) | set(bl["write_tools"]),
+        "is_destructive":       lambda cmd: bool(bl_dst(cmd)) or bool(core_dst(cmd)),
+        "system_prompt_addendum": merged_addendum,
+    }
 
 
 # ── confirmation bridge (worker thread → GUI thread) ────────────────────

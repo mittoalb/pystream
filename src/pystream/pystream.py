@@ -776,6 +776,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_viewer.clicked.connect(self._open_viewer)
         top_layout.addWidget(btn_viewer)
 
+        btn_task_rec = QtWidgets.QPushButton("🎥 Task Rec")
+        btn_task_rec.setMaximumWidth(180)
+        btn_task_rec.setToolTip(
+            "Record beamline task procedures for the AI agent and for "
+            "one-click replay (alignment, sample positioning, scan "
+            "setup, anything with a motor sequence)")
+        btn_task_rec.clicked.connect(self._open_task_recorder)
+        top_layout.addWidget(btn_task_rec)
+
         top_layout.addStretch()
         
         # Status labels
@@ -2149,6 +2158,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         viewer_dialog.show()
         viewer_dialog.raise_()
         viewer_dialog.activateWindow()
+
+    def _open_task_recorder(self):
+        """Open (or focus) the singleton Task Recorder dialog."""
+        from .task_recorder import TaskRecorderDialog
+        dlg = getattr(self, "_task_recorder_dialog", None)
+        if dlg is None or not dlg.isVisible():
+            dlg = TaskRecorderDialog(parent=self, logger=LOGGER)
+            self._task_recorder_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     # ── Beamline-provided bottom panels + View menu + layout persist ──
     def _add_bottom_panel(self, widget, title: str):

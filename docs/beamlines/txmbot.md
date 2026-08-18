@@ -70,6 +70,13 @@ When `ACTIVE_BEAMLINE = 'bl32ID'`, the agent gets:
 - List recent XANES2D HDF5 master files and read their metadata.
 - Restart an IOC by running a user-registered script — **gated by a
   Yes/No dialog** that the model cannot bypass.
+The **task-recording tools** (`list_task_recordings` and
+`read_task_recording`) that let the agent read demonstrations are
+NOT contributed here — they're core, always in Röntgen's catalog on
+every beamline. See [Task Recorder](../plugins/task_recorder.md).
+bl32ID's contribution is just the 32-ID-specific workflow addendum
+(task order + slugs) so the agent knows which slugs to look up for
+this beamline.
 
 Every tool call shows up in the transcript so you can audit what
 produced any number the agent quotes. Contributions live in

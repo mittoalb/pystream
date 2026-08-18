@@ -11,6 +11,9 @@ data.
 - [Python Console](console.md) — run Python on the live image.
 - [Image Metrics](metrics.md) — live image-quality metrics.
 - [Mosaic Alignment](mosalign.md) — 2D motor scan with stitched preview.
+- [Task Recorder](task_recorder.md) — capture any beamline procedure
+  (alignment, sample positioning, scan setup) for one-click replay
+  and for the AI agent to read.
 
 ## Adding a plugin
 
@@ -34,4 +37,5 @@ scalebar
 console
 metrics
 mosalign
+task_recorder
 ```
