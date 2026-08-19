@@ -179,6 +179,39 @@ class _ConfirmHelper(QtCore.QObject):
         return reply == QtWidgets.QMessageBox.Yes
 
 
+class _GuiActionHelper(QtCore.QObject):
+    """Lives on the GUI thread. Worker threads call its slots via
+    BlockingQueuedConnection to trigger GUI-side actions from a tool
+    call — currently just `open_hdf5_viewer(path)`, which pops
+    pystream's embedded HDF5 viewer with the given file preloaded."""
+
+    @QtCore.pyqtSlot(str, result=str)
+    def open_hdf5_viewer(self, path: str) -> str:
+        """Find the pystream main window, ask it to open the HDF5
+        viewer on `path`. Returns an empty string on success, or an
+        error message on failure. Runs on GUI thread — safe to touch
+        widgets here."""
+        try:
+            if not path:
+                return "empty path"
+            if not os.path.isfile(os.path.expanduser(path)):
+                return f"file does not exist: {path}"
+            # Walk up to the main window that owns _open_viewer
+            widget = self.parent()
+            main = None
+            while widget is not None:
+                if hasattr(widget, "_open_viewer"):
+                    main = widget
+                    break
+                widget = widget.parent()
+            if main is None:
+                return "pystream main window not reachable"
+            main._open_viewer(file_path=os.path.expanduser(path))
+            return ""
+        except Exception as ex:  # noqa: BLE001 — must return a string
+            return f"{type(ex).__name__}: {ex}"
+
+
 def _confirmation_message(name: str, args: dict) -> str:
     """Format a clear, scannable confirmation message per write tool."""
     if name == "bash":
@@ -556,10 +589,11 @@ class _ChatWorker(QtCore.QThread):
 
     def run(self):
         # Publish parent config into the module-local threadlocal so
-        # tools invoked from within this loop (notably `spawn_subagent`)
-        # can reuse the same LLM endpoint + reach the parent's
-        # emit_tool + confirm helpers. Cleared in `finally` so nested
-        # workers on the same thread don't inherit stale values.
+        # tools invoked from within this loop (notably `spawn_subagent`
+        # and `view_hdf5_file`) can reuse the same LLM endpoint + reach
+        # the parent's emit_tool + confirm + GUI-action helpers.
+        # Cleared in `finally` so nested workers on the same thread
+        # don't inherit stale values.
         from .subagents import WORKER_CTX
         WORKER_CTX.protocol   = self.protocol
         WORKER_CTX.base_url   = self.base_url
@@ -568,6 +602,7 @@ class _ChatWorker(QtCore.QThread):
         WORKER_CTX.tool_ctx   = self.tool_ctx
         WORKER_CTX.emit_tool  = self._emit_tool
         WORKER_CTX.confirm    = self._confirm
+        WORKER_CTX.gui_action = self._gui_action_helper
         try:
             if self.protocol == PROTOCOL_ANTHROPIC:
                 text, usage = _chat_anthropic(
@@ -591,7 +626,7 @@ class _ChatWorker(QtCore.QThread):
             self.error.emit(f"{type(ex).__name__}: {ex}")
         finally:
             for attr in ("protocol", "base_url", "api_key", "model",
-                         "tool_ctx", "emit_tool", "confirm"):
+                         "tool_ctx", "emit_tool", "confirm", "gui_action"):
                 if hasattr(WORKER_CTX, attr):
                     delattr(WORKER_CTX, attr)
 
@@ -658,6 +693,9 @@ class AgentChatWidget(QtWidgets.QWidget):
         # through it. Parenting to `self` keeps its lifetime tied to
         # the widget.
         self._confirm_helper = _ConfirmHelper(self)
+        # GUI action bridge — lets tool functions ask the GUI thread
+        # to open the embedded HDF5 viewer for a file path.
+        self._gui_action_helper = _GuiActionHelper(self)
         self._build_ui()
         self._restore_history()
 

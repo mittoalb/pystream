@@ -279,7 +279,76 @@ def _spawn_subagent_dispatch(kind: str, task: str) -> dict:
     return tool_spawn_subagent(kind, task)
 
 
+def tool_view_hdf5_file(path: str) -> dict:
+    """Open pystream's embedded HDF5 viewer on a file on disk.
+    Auto-detects raw-tomo vs reconstruction layout; for reconstruction
+    files (tomogui/tomocupy `_rec.h5`, plain 3D stacks) the viewer
+    shows slices directly. Returns after the dialog is on-screen —
+    the viewer stays open for the user to interact with; this tool
+    doesn't wait for them to close it."""
+    if not path or not path.strip():
+        return {"error": "path is required"}
+    path = os.path.expanduser(path.strip())
+    if not os.path.isfile(path):
+        return {"error": f"file does not exist: {path}"}
+    try:
+        from .subagents import WORKER_CTX
+        gui_helper = getattr(WORKER_CTX, "gui_action", None)
+        if gui_helper is None:
+            return {"error": "GUI helper unavailable — was this tool "
+                             "called outside a pystream chat turn?"}
+        # Marshal onto the GUI thread. Blocking so we return only after
+        # the viewer is actually up (or has reported an error).
+        from PyQt5 import QtCore
+        result = QtCore.QMetaObject.invokeMethod(
+            gui_helper, "open_hdf5_viewer",
+            QtCore.Qt.BlockingQueuedConnection,
+            QtCore.Q_RETURN_ARG(str),
+            QtCore.Q_ARG(str, path),
+        )
+        if result:
+            return {"error": result, "path": path}
+        return {
+            "ok": True,
+            "path": path,
+            "message": (f"HDF5 viewer opened on {path}. The user can now "
+                        f"scroll slices, adjust contrast, view metadata."),
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "path": path}
+
+
 CORE_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "view_hdf5_file",
+        "description": (
+            "Open pystream's embedded HDF5 viewer on a file path. Use "
+            "this whenever the user asks you to 'show' / 'view' / "
+            "'display' / 'look at' an HDF5 file — reconstruction "
+            "output (`_rec.h5`), a source projection stack, or any "
+            "3D HDF5 volume. The viewer auto-detects raw-tomo layout "
+            "(exchange/data + exchange/data_white) vs reconstruction "
+            "layout (exchange/data alone, or exchange/recon, or plain "
+            "/data) and swaps modes accordingly. Returns immediately "
+            "after the dialog appears; the user interacts with it "
+            "directly. Do NOT combine with `bash python -c ...` slice "
+            "extraction — this tool IS your slice viewer."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Absolute or ~/-relative path to "
+                         "the .h5 / .hdf5 file. Must exist on the LOCAL "
+                         "filesystem the pystream GUI is running on — for "
+                         "files on a remote host, scp/rsync them here "
+                         "first (or use the tomogui-cli view --out - "
+                         "pipe pattern documented in tomogui.md)."},
+            },
+            "required": ["path"],
+        },
+        "func": tool_view_hdf5_file,
+    },
     {
         "name": "spawn_subagent",
         "description": (

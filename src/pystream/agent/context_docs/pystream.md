@@ -36,6 +36,7 @@ doc is describing the maximum-possible set, not your specific set.
 
 | Tool | Purpose |
 |---|---|
+| `view_hdf5_file(path)` | **Opens pystream's embedded HDF5 viewer** on a local file. Use for ANY "show me" / "view" / "display" / "look at" request on an HDF5 file — reconstruction output (`_rec.h5`), source projection stacks, plain 3D volumes. The viewer auto-detects raw-tomo vs recon layout. **This IS your HDF5 image display; do NOT hand-roll `python -c "import h5py..."`, and do NOT tell the user you can't view HDF5 files.** File must be on the local filesystem — for remote files, scp/rsync locally first. |
 | `spawn_subagent(kind, task)` | Delegate a specialized task to a purpose-built sub-agent. Currently supports `kind="reconstruction"` (drives tomogui-cli). See `~/.pystream/docs/tomogui.md` for the reconstruction sub-agent's contract. |
 | `save_learned_note(topic, content, tool="general")` | Persist a durable note to `_learned.md` in the pystream source tree so the user can `git diff` + commit + push. Call when you discover something worth remembering across sessions. |
 | `list_task_recordings()` | Enumerate every recorded beamline task in `~/.pystream/task_recordings/` — alignment procedures, sample positioning, scan setup, etc. Call FIRST when the user asks how to perform any repeatable beamline procedure. |

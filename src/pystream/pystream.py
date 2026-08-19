@@ -2185,13 +2185,24 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 LOGGER.error("Failed saving frame to %s", path)
                 log_exception(LOGGER, e)
 
-    def _open_viewer(self):
-        """Open a standalone viewer window"""
+    def _open_viewer(self, file_path: str = None):
+        """Open a standalone viewer window. If `file_path` is given, the
+        viewer opens with that HDF5 file already loaded — used by the
+        agent's `view_hdf5_file` tool to pop the viewer for a specific
+        recon output without a manual File-Open."""
         from .plugins.viewer import HDF5ImageDividerDialog
         viewer_dialog = HDF5ImageDividerDialog(parent=self)
+        if file_path:
+            try:
+                viewer_dialog._load_specific_file(file_path)
+            except Exception as e:
+                if LOGGER:
+                    LOGGER.warning("viewer preload failed for %s: %s",
+                                   file_path, e)
         viewer_dialog.show()
         viewer_dialog.raise_()
         viewer_dialog.activateWindow()
+        return viewer_dialog
 
     def _open_task_recorder(self):
         """Open (or focus) the singleton Task Recorder dialog."""
