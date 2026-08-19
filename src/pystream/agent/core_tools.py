@@ -272,7 +272,51 @@ def tool_read_task_recording(task_slug: str,
 
 # ── catalog ─────────────────────────────────────────────────────────────
 
+def _spawn_subagent_dispatch(kind: str, task: str) -> dict:
+    """Late-bound wrapper: imports the impl at call time so we don't
+    force a subagents-module import at package init."""
+    from .subagents import tool_spawn_subagent
+    return tool_spawn_subagent(kind, task)
+
+
 CORE_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "spawn_subagent",
+        "description": (
+            "Delegate a specialized task to a purpose-built sub-agent "
+            "with its own system prompt + narrow tool set + fresh chat "
+            "context. Use this whenever the user's ask maps onto a "
+            "documented specialty (tomographic reconstruction via "
+            "tomogui, and — as they're added — sample alignment, XANES "
+            "setup, etc.). YOU are the orchestrator; you don't do the "
+            "specialist work yourself. Available `kind` values live in "
+            "`~/.pystream/docs/*.md` — currently 'reconstruction' for "
+            "tomogui-cli work. Runs synchronously and returns the sub-"
+            "agent's final summary; that summary is what you present "
+            "back to the user. If the sub-agent errors out or hits its "
+            "iteration cap, its error string comes back in the result "
+            "— quote it to the user and STOP; do NOT try to redo the "
+            "work yourself."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string",
+                         "description": "Sub-agent preset name — "
+                         "e.g. 'reconstruction'. Determines the system "
+                         "prompt + tool set."},
+                "task": {"type": "string",
+                         "description": "Full task description from the "
+                         "user (or your reformulation of it). Pass "
+                         "concrete details: machine, host, file paths, "
+                         "GPU number, whether AI COR is wanted, etc. "
+                         "The sub-agent has NO access to your chat "
+                         "history — everything it needs must be in here."},
+            },
+            "required": ["kind", "task"],
+        },
+        "func": _spawn_subagent_dispatch,
+    },
     {
         "name": "save_learned_note",
         "description": (
@@ -364,6 +408,39 @@ def _core_get_tool(name: str) -> Callable | None:
 # ── system-prompt addendum — beamline-agnostic alignment guidance ──────
 
 CORE_SYSTEM_PROMPT_ADDENDUM = """
+# YOU ARE THE ORCHESTRATOR — DELEGATE, DON'T DO
+
+You (Röntgen) are the pystream chat orchestrator. For specialized
+workflows, DELEGATE to a purpose-built sub-agent via `spawn_subagent`
+instead of doing the work yourself. Sub-agents have their own system
+prompts (baked from the matching doc under `~/.pystream/docs/`) and a
+narrow tool set — they run to completion and return a summary you
+present to the user.
+
+Currently available `kind` values:
+
+- **reconstruction** — tomogui-cli / tomocupy work on beamline GPU
+  nodes. Use for ANY user ask that involves "reconstruct", "run a
+  recon", "try / full recon", "AI COR", "tomogui", or a `.h5`
+  projection file + machine name. Pass the user's task VERBATIM
+  (plus any details you've clarified) so the sub-agent has the full
+  picture — it has NO access to your chat history.
+
+Rule of thumb: if the user asks something and you find yourself
+about to `read_file("~/.pystream/docs/tomogui.md")` and then run
+`ssh tomo2 …`, STOP — call `spawn_subagent("reconstruction", task)`
+instead. That's one tool round for you; the sub-agent handles the
+rest and returns a summary.
+
+Do NOT `spawn_subagent` for things that ARE your job — general
+Q&A, reading PVs, listing status pages, chatting with the user,
+publishing tools. Only delegate work that maps onto a registered
+kind.
+
+If a `spawn_subagent` result has an `error` field, quote it to the
+user and STOP. Don't re-attempt as yourself; the sub-agent
+already tried with the specialist prompt.
+
 # TOOL BUDGET DISCIPLINE
 
 You get ~10 tool rounds per turn. Spend them on ACTION, not

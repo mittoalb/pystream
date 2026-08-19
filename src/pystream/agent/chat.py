@@ -555,6 +555,19 @@ class _ChatWorker(QtCore.QThread):
         return bool(result)
 
     def run(self):
+        # Publish parent config into the module-local threadlocal so
+        # tools invoked from within this loop (notably `spawn_subagent`)
+        # can reuse the same LLM endpoint + reach the parent's
+        # emit_tool + confirm helpers. Cleared in `finally` so nested
+        # workers on the same thread don't inherit stale values.
+        from .subagents import WORKER_CTX
+        WORKER_CTX.protocol   = self.protocol
+        WORKER_CTX.base_url   = self.base_url
+        WORKER_CTX.api_key    = self.api_key
+        WORKER_CTX.model      = self.model
+        WORKER_CTX.tool_ctx   = self.tool_ctx
+        WORKER_CTX.emit_tool  = self._emit_tool
+        WORKER_CTX.confirm    = self._confirm
         try:
             if self.protocol == PROTOCOL_ANTHROPIC:
                 text, usage = _chat_anthropic(
@@ -576,6 +589,11 @@ class _ChatWorker(QtCore.QThread):
             self.error.emit(f"SDK not installed: {ex}")
         except Exception as ex:
             self.error.emit(f"{type(ex).__name__}: {ex}")
+        finally:
+            for attr in ("protocol", "base_url", "api_key", "model",
+                         "tool_ctx", "emit_tool", "confirm"):
+                if hasattr(WORKER_CTX, attr):
+                    delattr(WORKER_CTX, attr)
 
 
 # ── helpers for listing models ──────────────────────────────────────────
