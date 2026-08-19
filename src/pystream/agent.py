@@ -623,6 +623,33 @@ class AgentChatWidget(QtWidgets.QWidget):
         self._build_ui()
         self._restore_history()
 
+        # Publish this widget's state to the shared agents registry so
+        # it shows up in the Agents panel. One publisher per widget
+        # instance — the dock's Röntgen and the popup's Röntgen appear
+        # as two rows if both are open. Long-lived; not a `with`.
+        try:
+            from .agent_status import AgentStatusPublisher
+            display_name = (load_settings().get("agent_name")
+                            or DEFAULT_AGENT_NAME)
+            suffix = f" ({persist_id})" if persist_id else ""
+            self._status_pub = AgentStatusPublisher(
+                name=f"{display_name}{suffix}",
+                kind="main",
+                ttl_s=120,   # generous — a long tool loop still counts as alive
+                linger_s=0,  # widget is long-lived; don't linger on close
+            )
+            self._status_pub.idle("waiting for message")
+            # Belt + suspenders on top of the module-level atexit hook:
+            # Qt tears down widgets via aboutToQuit BEFORE the atexit
+            # phase runs, so wire the cleanup there too. A clean-exit
+            # publisher writes state=done and prevents the amber
+            # "stale" cards from accumulating across restarts.
+            qapp = QtWidgets.QApplication.instance()
+            if qapp is not None:
+                qapp.aboutToQuit.connect(self._on_app_quit)
+        except Exception:
+            self._status_pub = None
+
     # ── History persistence ─────────────────────────────────────────
     _HISTORY_MAX_TURNS = 100   # user+assistant pairs; caps unbounded growth
 
@@ -788,7 +815,20 @@ class AgentChatWidget(QtWidgets.QWidget):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
+        # Publish "thinking" so the Agents panel shows this widget as
+        # active. Every tool call bumps the activity line further
+        # inside _on_tool_event.
+        if self._status_pub is not None:
+            self._status_pub.activity(
+                f"thinking: {text[:60]}" + ("…" if len(text) > 60 else ""))
+
     def _on_tool_event(self, name, args, result):
+        # Publish to the Agents panel regardless of the transcript
+        # verbosity toggle — the panel wants to know what tool is
+        # running even when the chat is set to compact mode.
+        if self._status_pub is not None:
+            phase = "calling" if result is None else "got result from"
+            self._status_pub.activity(f"{phase} tool: {name}")
         if not self.show_tools_chk.isChecked():
             return
         if result is None:
@@ -817,9 +857,23 @@ class AgentChatWidget(QtWidgets.QWidget):
     def _on_worker_error(self, msg):
         self._append_transcript("error", msg)
         self.status_label.setText("error")
+        if self._status_pub is not None:
+            self._status_pub.error(msg[:120])
 
     def _on_worker_finished(self):
         self.send_btn.setEnabled(True)
+        if self._status_pub is not None:
+            self._status_pub.idle("waiting for message")
+
+    def _on_app_quit(self):
+        """Called from QApplication.aboutToQuit — mark the record done
+        so the next launch doesn't see a stale amber card."""
+        pub = getattr(self, "_status_pub", None)
+        if pub is not None and not pub._closed:
+            try:
+                pub.finish("pystream closed")
+            except Exception:
+                pass
 
     def _on_clear(self):
         self._history = []

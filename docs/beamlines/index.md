@@ -42,6 +42,11 @@ pick a plugin from any dropdown.
   map via `provide_task_templates()`; otherwise a free-text mode is
   available. The AI agent also reads every recording. See
   [Task Recorder](../plugins/task_recorder.md).
+- **Agents Panel** — bottom-docked live view of every AI agent
+  running on the beamline, indented by parent-child relationships.
+  Any code that calls `AgentStatusPublisher` shows up here, including
+  cross-machine workers over shared NFS home. See
+  [Agents Panel](../plugins/agents_panel.md).
 
 ## Built-in beamlines
 

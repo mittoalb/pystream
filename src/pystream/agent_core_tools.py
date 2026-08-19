@@ -209,6 +209,30 @@ def _core_get_tool(name: str) -> Callable | None:
 # ── system-prompt addendum — beamline-agnostic alignment guidance ──────
 
 CORE_SYSTEM_PROMPT_ADDENDUM = """
+# PROJECT-SPECIFIC KNOWLEDGE — check ~/.pystream/docs/ first
+
+Every project the user has under `~/Software/` may ship an `AGENTS.md`
+file describing how AI agents should drive its functionality
+(especially headlessly, without opening its GUI). pystream auto-
+symlinks every such file into `~/.pystream/docs/<project>_AGENTS.md`
+on startup.
+
+Before invoking any tool that touches another project (tomogui,
+tomocupy, tomolog, bl_gui, xanes_gui, …), run:
+
+    bash: ls ~/.pystream/docs/*_AGENTS.md 2>/dev/null
+
+then `read_file(<the matching one>)` for the project in play. The
+AGENTS.md is authored by the project's maintainer and reflects
+current invocation patterns, env names, config-file locations, and
+known failure modes. Do not invent invocation patterns when a
+project-specific AGENTS.md exists — read it first.
+
+Common ones you'll see:
+- `~/.pystream/docs/tomogui_AGENTS.md` — headless tomographic
+  reconstruction via `tomocupy` under the `tomoguiAI` conda env.
+  Read this before running any reconstruction task.
+
 # TASK RECORDINGS — procedures captured by the scientist
 
 pystream includes a "Task Recorder" toolbar plugin that captures the

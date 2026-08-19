@@ -505,6 +505,22 @@ class PvViewerApp(QtWidgets.QMainWindow):
         except Exception as e:
             if LOGGER:
                 LOGGER.warning(f"failed to add AI Agent panel: {e}")
+        # Agents diagram lives in its own window — accessible from the
+        # top toolbar (`👥 Agents` button). Kept out of the bottom-dock
+        # stack because it's a monitor rather than a chat surface and
+        # the user asked for a separate window.
+
+        # Core agent-context bootstrap — symlink every ~/Software/*
+        # AGENTS.md into ~/.pystream/docs/ so Röntgen (and any spawned
+        # sub-agent) can read project-specific headless-operation
+        # guides via its existing read_file / bash: cat tools.
+        # Beamline-agnostic; runs regardless of ACTIVE_BEAMLINE.
+        try:
+            from .agent_context import bootstrap_agent_context_docs
+            bootstrap_agent_context_docs()
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning(f"agent-context bootstrap failed: {e}")
         # Give the splitter panes explicit STRETCH FACTORS (used when
         # the window is resized) AND EXPLICIT INITIAL SIZES (so the
         # drag handle has a definite starting point rather than
@@ -784,6 +800,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
             "setup, anything with a motor sequence)")
         btn_task_rec.clicked.connect(self._open_task_recorder)
         top_layout.addWidget(btn_task_rec)
+
+        btn_agents = QtWidgets.QPushButton("👥 Agents")
+        btn_agents.setMaximumWidth(140)
+        btn_agents.setToolTip(
+            "Live view of every AI agent running on the beamline "
+            "(pystream's Röntgen, spawned sub-agents, cross-machine "
+            "workers) with parent-child relationships")
+        btn_agents.clicked.connect(self._open_agents_dialog)
+        top_layout.addWidget(btn_agents)
 
         top_layout.addStretch()
         
@@ -2166,6 +2191,17 @@ class PvViewerApp(QtWidgets.QMainWindow):
         if dlg is None or not dlg.isVisible():
             dlg = TaskRecorderDialog(parent=self, logger=LOGGER)
             self._task_recorder_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _open_agents_dialog(self):
+        """Open (or focus) the singleton Agents dialog."""
+        from .agents_panel import AgentsDialog
+        dlg = getattr(self, "_agents_dialog", None)
+        if dlg is None or not dlg.isVisible():
+            dlg = AgentsDialog(parent=self)
+            self._agents_dialog = dlg
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()

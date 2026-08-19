@@ -14,6 +14,9 @@ data.
 - [Task Recorder](task_recorder.md) — capture any beamline procedure
   (alignment, sample positioning, scan setup) for one-click replay
   and for the AI agent to read.
+- [Agents Panel](agents_panel.md) — live "who's running" view of
+  every AI agent (pystream's Röntgen + spawned subagents +
+  cross-machine workers).
 
 ## Adding a plugin
 
@@ -38,4 +41,5 @@ console
 metrics
 mosalign
 task_recorder
+agents_panel
 ```
