@@ -182,33 +182,59 @@ class _ConfirmHelper(QtCore.QObject):
 class _GuiActionHelper(QtCore.QObject):
     """Lives on the GUI thread. Worker threads call its slots via
     BlockingQueuedConnection to trigger GUI-side actions from a tool
-    call — currently just `open_hdf5_viewer(path)`, which pops
-    pystream's embedded HDF5 viewer with the given file preloaded."""
+    call — opening the HDF5 viewer, listing / opening beamline
+    plugins."""
+
+    def _find_main(self):
+        """Walk up the parent chain to find the pystream main window
+        (identified by having `_open_viewer` / `_open_beamline_plugin`).
+        Returns None if unreachable."""
+        widget = self.parent()
+        while widget is not None:
+            if hasattr(widget, "_open_viewer") and hasattr(widget, "_open_beamline_plugin"):
+                return widget
+            widget = widget.parent()
+        return None
 
     @QtCore.pyqtSlot(str, result=str)
     def open_hdf5_viewer(self, path: str) -> str:
         """Find the pystream main window, ask it to open the HDF5
-        viewer on `path`. Returns an empty string on success, or an
-        error message on failure. Runs on GUI thread — safe to touch
-        widgets here."""
+        viewer on `path`. Returns "" on success, or an error message."""
         try:
             if not path:
                 return "empty path"
             if not os.path.isfile(os.path.expanduser(path)):
                 return f"file does not exist: {path}"
-            # Walk up to the main window that owns _open_viewer
-            widget = self.parent()
-            main = None
-            while widget is not None:
-                if hasattr(widget, "_open_viewer"):
-                    main = widget
-                    break
-                widget = widget.parent()
+            main = self._find_main()
             if main is None:
                 return "pystream main window not reachable"
             main._open_viewer(file_path=os.path.expanduser(path))
             return ""
         except Exception as ex:  # noqa: BLE001 — must return a string
+            return f"{type(ex).__name__}: {ex}"
+
+    @QtCore.pyqtSlot(result=str)
+    def list_beamline_plugins_json(self) -> str:
+        """Return a JSON string of the active beamline's plugin list."""
+        import json as _json
+        main = self._find_main()
+        if main is None:
+            return _json.dumps({"error": "pystream main window not reachable"})
+        try:
+            return _json.dumps({"plugins": main._list_beamline_plugins()})
+        except Exception as ex:
+            return _json.dumps({"error": f"{type(ex).__name__}: {ex}"})
+
+    @QtCore.pyqtSlot(str, result=str)
+    def open_beamline_plugin(self, name: str) -> str:
+        """Ask the main window to open a plugin by class-name or
+        BUTTON_TEXT. Returns "" on success or an error string."""
+        main = self._find_main()
+        if main is None:
+            return "pystream main window not reachable"
+        try:
+            return main._open_beamline_plugin(name)
+        except Exception as ex:
             return f"{type(ex).__name__}: {ex}"
 
 

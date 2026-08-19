@@ -1046,6 +1046,95 @@ class PvViewerApp(QtWidgets.QMainWindow):
             self.beamlines_bar.setVisible(not is_visible)
             self.btn_beamlines.setChecked(not is_visible)
 
+    # ── Agent-facing helpers: enumerate + open beamline plugins ─────
+    def _list_beamline_plugins(self) -> list:
+        """Return a list of dicts describing every plugin the active
+        beamline exposes via `__all__`. Used by the AI agent's
+        `list_beamline_plugins` tool so it knows what's available
+        without hard-coding names.
+
+        Each entry: {'class_name', 'button_text', 'group', 'handler_type',
+                     'doc'} — matches the class attributes plugins ship
+        with (`BUTTON_TEXT`, `GROUP`, `HANDLER_TYPE`) plus the first
+        line of the docstring for a short description.
+        """
+        try:
+            from . import beamline_config
+            import importlib
+            active = getattr(beamline_config, "ACTIVE_BEAMLINE", None)
+            if not active:
+                return []
+            module = importlib.import_module(
+                f".beamlines.{active}", package=__package__)
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning(f"list_beamline_plugins: cannot import beamline: {e}")
+            return []
+
+        classes = getattr(module, "__all__", None) or []
+        out = []
+        for name in classes:
+            cls = getattr(module, name, None)
+            if cls is None:
+                continue
+            doc = (cls.__doc__ or "").strip().splitlines()
+            doc_short = doc[0] if doc else ""
+            out.append({
+                "class_name":    name,
+                "button_text":   getattr(cls, "BUTTON_TEXT", name),
+                "group":         getattr(cls, "GROUP", ""),
+                "handler_type":  getattr(cls, "HANDLER_TYPE", "singleton"),
+                "doc":           doc_short,
+            })
+        return out
+
+    def _open_beamline_plugin(self, name: str) -> str:
+        """Open a plugin BY NAME (either its class name like
+        'CenterOfRotationDialog' or its `BUTTON_TEXT` like 'CoR' —
+        case-insensitive match on both). Returns "" on success or a
+        short error message. Called by the agent's
+        `open_beamline_plugin` tool via the GUI-action helper."""
+        try:
+            from . import beamline_config
+            import importlib
+            active = getattr(beamline_config, "ACTIVE_BEAMLINE", None)
+            if not active:
+                return "no active beamline"
+            module = importlib.import_module(
+                f".beamlines.{active}", package=__package__)
+        except Exception as e:
+            return f"cannot import beamline module: {e}"
+
+        want = (name or "").strip().lower()
+        if not want:
+            return "empty plugin name"
+
+        # Match by class name OR BUTTON_TEXT (case-insensitive).
+        classes = getattr(module, "__all__", None) or []
+        chosen = None
+        for cname in classes:
+            cls = getattr(module, cname, None)
+            if cls is None:
+                continue
+            if cname.lower() == want or \
+               str(getattr(cls, "BUTTON_TEXT", "")).lower() == want:
+                chosen = cname
+                break
+        if chosen is None:
+            avail = ", ".join(
+                f"{n} ({getattr(getattr(module, n, None), 'BUTTON_TEXT', n)})"
+                for n in classes)
+            return f"no plugin matching {name!r}. Available: {avail}"
+
+        handler = self._beamline_handler(chosen, module)
+        if handler is None:
+            return f"unknown HANDLER_TYPE on plugin {chosen}"
+        try:
+            handler()
+        except Exception as e:
+            return f"plugin {chosen} raised: {type(e).__name__}: {e}"
+        return ""
+
     def _create_control_panel(self):
         """Create collapsible control panel with all settings"""
         panel = QtWidgets.QWidget()

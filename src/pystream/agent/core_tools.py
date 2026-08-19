@@ -279,6 +279,59 @@ def _spawn_subagent_dispatch(kind: str, task: str) -> dict:
     return tool_spawn_subagent(kind, task)
 
 
+def tool_list_beamline_plugins() -> dict:
+    """List the plugins exposed by the currently-active beamline. Each
+    entry: {class_name, button_text, group, handler_type, doc}. Use
+    this before `open_beamline_plugin` when you're unsure whether a
+    plugin exists or what its exact name is. Populated from the
+    beamline's `__all__` list."""
+    try:
+        import json as _json
+        from .subagents import WORKER_CTX
+        from PyQt5 import QtCore
+        gui_helper = getattr(WORKER_CTX, "gui_action", None)
+        if gui_helper is None:
+            return {"error": "GUI helper unavailable (tool called outside a chat turn?)"}
+        payload = QtCore.QMetaObject.invokeMethod(
+            gui_helper, "list_beamline_plugins_json",
+            QtCore.Qt.BlockingQueuedConnection,
+            QtCore.Q_RETURN_ARG(str),
+        )
+        parsed = _json.loads(payload) if payload else {}
+        return parsed if isinstance(parsed, dict) else {"error": "invalid response"}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}"}
+
+
+def tool_open_beamline_plugin(name: str) -> dict:
+    """Open a beamline plugin (dialog / launcher) that appears in the
+    pystream toolbar. `name` matches the plugin's class name (e.g.
+    `CenterOfRotationDialog`) OR its `BUTTON_TEXT` (e.g. `CoR`),
+    case-insensitive. Returns after the dialog is on-screen. Use to
+    fulfill user requests like "open CoR", "launch QGMax", "run TXM
+    Optics"."""
+    if not name or not name.strip():
+        return {"error": "name is required"}
+    try:
+        from .subagents import WORKER_CTX
+        from PyQt5 import QtCore
+        gui_helper = getattr(WORKER_CTX, "gui_action", None)
+        if gui_helper is None:
+            return {"error": "GUI helper unavailable (tool called outside a chat turn?)"}
+        err = QtCore.QMetaObject.invokeMethod(
+            gui_helper, "open_beamline_plugin",
+            QtCore.Qt.BlockingQueuedConnection,
+            QtCore.Q_RETURN_ARG(str),
+            QtCore.Q_ARG(str, name.strip()),
+        )
+        if err:
+            return {"error": err, "name": name}
+        return {"ok": True, "name": name,
+                "message": f"Opened plugin {name!r} — the user can now interact with the dialog."}
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "name": name}
+
+
 def tool_view_hdf5_file(path: str) -> dict:
     """Open pystream's embedded HDF5 viewer on a file on disk.
     Auto-detects raw-tomo vs reconstruction layout; for reconstruction
@@ -319,6 +372,45 @@ def tool_view_hdf5_file(path: str) -> dict:
 
 
 CORE_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "list_beamline_plugins",
+        "description": (
+            "Enumerate every plugin the currently-active beamline "
+            "exposes (CoR, AlignPart, QGMax, TXM Optics, XANES GUIs, "
+            "aTomo, DataMap, etc. on bl32ID). Returns class names, "
+            "button labels, groups, handler types, and one-line docs. "
+            "Use before `open_beamline_plugin` when you don't remember "
+            "the exact name — or to answer 'what plugins are available' "
+            "questions without hallucinating."
+        ),
+        "schema": {"type": "object", "properties": {}, "required": []},
+        "func": tool_list_beamline_plugins,
+    },
+    {
+        "name": "open_beamline_plugin",
+        "description": (
+            "Open a beamline plugin dialog (or launcher) by class name "
+            "or button text. Case-insensitive match. Examples: "
+            "'CoR', 'CenterOfRotationDialog', 'QGMax', 'AlignPart', "
+            "'TXM Optics', 'aTomo'. Fulfills user asks like 'open CoR', "
+            "'launch QGMax', 'run TXM Optics'. Returns after the dialog "
+            "is on-screen — the user drives the dialog directly from "
+            "there. If the user names a plugin that doesn't exist on "
+            "the active beamline, the error tells you the available "
+            "set — quote that back to them; do NOT guess."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "Class name (e.g. 'QGMaxDialog') "
+                         "or button text (e.g. 'QGMax'). Match is "
+                         "case-insensitive."},
+            },
+            "required": ["name"],
+        },
+        "func": tool_open_beamline_plugin,
+    },
     {
         "name": "view_hdf5_file",
         "description": (
