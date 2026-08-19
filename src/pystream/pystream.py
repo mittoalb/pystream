@@ -516,7 +516,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # guides via its existing read_file / bash: cat tools.
         # Beamline-agnostic; runs regardless of ACTIVE_BEAMLINE.
         try:
-            from .agent_context import bootstrap_agent_context_docs
+            from .agent import bootstrap_agent_context_docs
             bootstrap_agent_context_docs()
         except Exception as e:
             if LOGGER:
@@ -809,6 +809,15 @@ class PvViewerApp(QtWidgets.QMainWindow):
             "workers) with parent-child relationships")
         btn_agents.clicked.connect(self._open_agents_dialog)
         top_layout.addWidget(btn_agents)
+
+        btn_console = QtWidgets.QPushButton("📜 Console")
+        btn_console.setMaximumWidth(140)
+        btn_console.setToolTip(
+            "Live wire trace of every command/tool the AI agent runs "
+            "and every response it gets back. Timestamped, colored, "
+            "dark theme. Open when debugging agent behavior.")
+        btn_console.clicked.connect(self._open_agent_console)
+        top_layout.addWidget(btn_console)
 
         top_layout.addStretch()
         
@@ -2197,11 +2206,27 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
     def _open_agents_dialog(self):
         """Open (or focus) the singleton Agents dialog."""
-        from .agents_panel import AgentsDialog
+        from .agent import AgentsDialog
         dlg = getattr(self, "_agents_dialog", None)
         if dlg is None or not dlg.isVisible():
             dlg = AgentsDialog(parent=self)
             self._agents_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _open_agent_console(self):
+        """Open (or focus) the singleton Agent Console dialog. Re-scans
+        the widget tree on every open so AI widgets that appeared after
+        the console was first created are still picked up."""
+        from .agent import AgentConsoleDialog
+        dlg = getattr(self, "_agent_console_dialog", None)
+        if dlg is None or not dlg.isVisible():
+            dlg = AgentConsoleDialog(parent=self)
+            self._agent_console_dialog = dlg
+        else:
+            # Already open — refresh in case new agents connected since
+            dlg._wire_to_agents()
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()

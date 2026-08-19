@@ -25,7 +25,7 @@ import logging
 import os
 from typing import Optional
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import pyqtSignal
 
 
@@ -99,7 +99,7 @@ def _active_beamline_module():
     based on beamline_config.ACTIVE_BEAMLINE. Returns None if no
     beamline is selected or the module can't be imported."""
     try:
-        from .beamline_config import ACTIVE_BEAMLINE
+        from ..beamline_config import ACTIVE_BEAMLINE
         if not ACTIVE_BEAMLINE:
             return None
         import importlib
@@ -122,7 +122,7 @@ def _load_tool_context() -> dict:
       - is_destructive: OR (either check trips the confirmation gate)
       - system_prompt_addendum: core text + beamline text, in that order
     """
-    from .agent_core_tools import core_tool_context
+    from .core_tools import core_tool_context
 
     core = core_tool_context()
 
@@ -220,6 +220,12 @@ PROTOCOL_ANTHROPIC = "anthropic"
 PROTOCOL_OPENAI = "openai"
 
 # Cap on agentic iterations per turn — protects against runaway tool loops.
+# Kept intentionally tight (10) because a well-structured task needs few
+# rounds: read the relevant AGENTS.md ONCE, run the CLI ONCE, inspect the
+# result ONCE. If the agent hits this cap it's burning rounds on
+# non-productive verification (repeated filesystem searches, redundant
+# --help calls, re-reading docs). The fix is a sharper prompt / AGENTS.md,
+# NOT a higher cap.
 MAX_AGENT_ITERATIONS = 10
 
 
@@ -231,7 +237,7 @@ def _active_beamline() -> str:
     'bl19BM'). Falls back to 'this beamline' if the config module can't
     be imported. Cheap enough to call per-Send."""
     try:
-        from .beamline_config import ACTIVE_BEAMLINE
+        from ..beamline_config import ACTIVE_BEAMLINE
         return str(ACTIVE_BEAMLINE) if ACTIVE_BEAMLINE else "this beamline"
     except Exception:
         return "this beamline"
@@ -593,6 +599,14 @@ def _list_models(protocol, base_url, api_key, *, timeout=10.0):
 # ── shared chat surface (used by both the popup and the bottom dock) ──
 
 class AgentChatWidget(QtWidgets.QWidget):
+    # Widget-level signals that outside listeners (e.g. AgentConsoleDialog)
+    # can connect to. The internal `_ChatWorker` re-emits into these each
+    # turn so consumers get a stable, per-widget wire regardless of which
+    # per-turn worker is doing the actual work.
+    tool_event   = pyqtSignal(str, dict, object)  # (name, args, result_or_None)
+    user_sent    = pyqtSignal(str)                # (raw user text)
+    assistant_replied = pyqtSignal(str, dict)     # (assistant text, usage dict)
+    error_raised = pyqtSignal(str)                # (error message)
     """Just the chat surface — transcript, input, send / clear buttons,
     tool-toggle, status line. NO gateway / URL / key / model config here.
 
@@ -613,8 +627,14 @@ class AgentChatWidget(QtWidgets.QWidget):
         nothing so it starts fresh each open."""
         super().__init__(parent)
         self._history: list[dict] = []
-        self._worker: Optional[_ChatWorker] = None
-        self._pending_user_text: str = ""
+        # Concurrent turns — Send button stays enabled; each Send spawns
+        # a new _ChatWorker onto its own QThread. We track live workers
+        # in a set so they stay owned (Qt would otherwise garbage-
+        # collect them mid-run) and so we can display an "N in flight"
+        # count. Multiple workers append to `_history` on completion,
+        # in COMPLETION order (not send order) — accepted trade-off for
+        # not blocking the user on a long tool loop.
+        self._workers: set = set()
         self._persist_id = persist_id
         # Lives on the GUI thread; workers route confirmation prompts
         # through it. Parenting to `self` keeps its lifetime tied to
@@ -628,7 +648,7 @@ class AgentChatWidget(QtWidgets.QWidget):
         # instance — the dock's Röntgen and the popup's Röntgen appear
         # as two rows if both are open. Long-lived; not a `with`.
         try:
-            from .agent_status import AgentStatusPublisher
+            from .status import AgentStatusPublisher
             display_name = (load_settings().get("agent_name")
                             or DEFAULT_AGENT_NAME)
             suffix = f" ({persist_id})" if persist_id else ""
@@ -661,7 +681,10 @@ class AgentChatWidget(QtWidgets.QWidget):
 
     def _restore_history(self):
         """Read saved (transcript, history) if persistence is enabled.
-        Silent on missing / corrupt files — we start fresh in that case."""
+        Silent on missing / corrupt files — we start fresh in that case.
+        After restore, scroll the transcript to the BOTTOM so the user
+        sees the latest message on launch — the previous behaviour left
+        the cursor at the top of a long history, which is disorienting."""
         path = self._history_path()
         if not path or not os.path.isfile(path):
             return
@@ -674,8 +697,26 @@ class AgentChatWidget(QtWidgets.QWidget):
                 self.transcript.setHtml(html)
                 self.status_label.setText(
                     f"restored {len(self._history)//2} turn(s) from previous session")
+                self._scroll_transcript_to_bottom()
         except Exception:
             self._history = []
+
+    def _scroll_transcript_to_bottom(self) -> None:
+        """Force the transcript view to the last message. Called after
+        restore + after every append. Uses `singleShot(0, …)` so the
+        scroll happens AFTER Qt lays out the freshly-set HTML (setting
+        HTML doesn't itself trigger a layout pass synchronously — a
+        direct scroll here would land at wherever the layout WAS)."""
+        def _pin():
+            sb = self.transcript.verticalScrollBar()
+            sb.setValue(sb.maximum())
+            # Also nudge the text cursor to the end so keyboard nav
+            # (Ctrl+End is redundant, but visual cursor position sits
+            # at the last character rather than the top).
+            cur = self.transcript.textCursor()
+            cur.movePosition(QtGui.QTextCursor.End)
+            self.transcript.setTextCursor(cur)
+        QtCore.QTimer.singleShot(0, _pin)
 
     def _save_history(self):
         """Persist current transcript + history. Called after every
@@ -781,8 +822,6 @@ class AgentChatWidget(QtWidgets.QWidget):
         }
 
     def _on_send(self):
-        if self._worker is not None and self._worker.isRunning():
-            return
         text = self.input_edit.text().strip()
         if not text:
             return
@@ -795,32 +834,47 @@ class AgentChatWidget(QtWidgets.QWidget):
             return
 
         self._append_transcript("user", text)
+        self.user_sent.emit(text)
         self.input_edit.clear()
-        self.send_btn.setEnabled(False)
-        self.status_label.setText("…thinking")
-        self._pending_user_text = text
+        # Send stays enabled — user can queue more messages while this
+        # one is running. Each Send spawns its own worker on its own
+        # QThread; they run in parallel.
 
-        self._worker = _ChatWorker(
+        worker = _ChatWorker(
             protocol=cfg["protocol"],
             base_url=cfg["url"], api_key=cfg["key"], model=cfg["model"],
             system_prompt=cfg["system_prompt"],
+            # Snapshot history AT SEND TIME. If a previous turn is
+            # still running, its future response isn't in this
+            # snapshot — accepted trade-off for allowing parallelism.
             history=list(self._history),
             user_text=text,
             tool_ctx=cfg["tool_ctx"],
             confirm_helper=self._confirm_helper,
         )
-        self._worker.tool_event.connect(self._on_tool_event)
-        self._worker.done.connect(self._on_worker_done)
-        self._worker.error.connect(self._on_worker_error)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
+        # Bind the user_text into the completion callback so multiple
+        # concurrent workers each append their OWN user message to
+        # history (not whatever _pending_user_text happens to be).
+        worker.tool_event.connect(self._on_tool_event)
+        worker.done.connect(
+            lambda a_text, usage, u=text: self._on_worker_done(u, a_text, usage))
+        worker.error.connect(self._on_worker_error)
+        worker.finished.connect(
+            lambda w=worker: self._on_worker_finished(w))
+        self._workers.add(worker)
+        worker.start()
+
+        self.status_label.setText(
+            f"…thinking ({len(self._workers)} in flight)")
 
         # Publish "thinking" so the Agents panel shows this widget as
         # active. Every tool call bumps the activity line further
         # inside _on_tool_event.
         if self._status_pub is not None:
+            n = len(self._workers)
+            suffix = f" [{n} in flight]" if n > 1 else ""
             self._status_pub.activity(
-                f"thinking: {text[:60]}" + ("…" if len(text) > 60 else ""))
+                f"thinking: {text[:60]}" + ("…" if len(text) > 60 else "") + suffix)
 
     def _on_tool_event(self, name, args, result):
         # Publish to the Agents panel regardless of the transcript
@@ -829,6 +883,14 @@ class AgentChatWidget(QtWidgets.QWidget):
         if self._status_pub is not None:
             phase = "calling" if result is None else "got result from"
             self._status_pub.activity(f"{phase} tool: {name}")
+        # Forward to any external listeners (Agent Console window etc.).
+        # Unconditional — the console is a separate surface and does its
+        # own filtering; the transcript's show_tools checkbox is only
+        # about the in-chat display.
+        try:
+            self.tool_event.emit(name, dict(args) if args else {}, result)
+        except Exception:
+            pass
         if not self.show_tools_chk.isChecked():
             return
         if result is None:
@@ -836,10 +898,18 @@ class AgentChatWidget(QtWidgets.QWidget):
         else:
             self._append_tool_result(name, result)
 
-    def _on_worker_done(self, assistant_text, usage):
-        self._history.append({"role": "user", "content": self._pending_user_text})
+    def _on_worker_done(self, user_text, assistant_text, usage):
+        # `user_text` is bound at Send time via lambda closure so the
+        # right user turn is paired with the right assistant turn even
+        # with multiple workers running in parallel and finishing out
+        # of order.
+        self._history.append({"role": "user", "content": user_text})
         self._history.append({"role": "assistant", "content": assistant_text})
         self._append_transcript("assistant", assistant_text)
+        try:
+            self.assistant_replied.emit(assistant_text, dict(usage) if usage else {})
+        except Exception:
+            pass
         # Persist so a pystream restart resumes this conversation.
         self._save_history()
         cr = usage.get("cache_read", 0)
@@ -857,13 +927,26 @@ class AgentChatWidget(QtWidgets.QWidget):
     def _on_worker_error(self, msg):
         self._append_transcript("error", msg)
         self.status_label.setText("error")
+        try:
+            self.error_raised.emit(msg)
+        except Exception:
+            pass
         if self._status_pub is not None:
             self._status_pub.error(msg[:120])
 
-    def _on_worker_finished(self):
-        self.send_btn.setEnabled(True)
-        if self._status_pub is not None:
-            self._status_pub.idle("waiting for message")
+    def _on_worker_finished(self, worker=None):
+        # Discard finished worker so Qt can GC it. Update the status
+        # label with the remaining in-flight count.
+        if worker is not None:
+            self._workers.discard(worker)
+        n = len(self._workers)
+        if n:
+            self.status_label.setText(f"…thinking ({n} in flight)")
+            if self._status_pub is not None:
+                self._status_pub.activity(f"{n} turn(s) in flight")
+        else:
+            if self._status_pub is not None:
+                self._status_pub.idle("waiting for message")
 
     def _on_app_quit(self):
         """Called from QApplication.aboutToQuit — mark the record done

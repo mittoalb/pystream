@@ -508,15 +508,24 @@ def tool_bash(command: str, timeout: float = 30.0) -> dict:
     code. Read-only commands run without confirmation; commands matching
     the destructive-pattern set (rm, kill, chmod, sudo, *.sh, redirects,
     git push, etc.) trigger the user's Yes/No dialog before executing.
-    Always run as the current user (no privilege escalation)."""
+    Always run as the current user (no privilege escalation).
+
+    `timeout` clamped to [1, 3600] seconds. Default 30 s is right for
+    `ls` / `caget` / `ping`; anything doing real work (ssh + conda run
+    + tomogui-cli batch, tomocupy recon, big rsync) MUST override to a
+    minutes-scale value or you'll get spurious timeouts."""
     if not command or not command.strip():
         return {"error": "command is required"}
+    try:
+        timeout = max(1.0, min(3600.0, float(timeout)))
+    except (TypeError, ValueError):
+        timeout = 30.0
     import subprocess
     try:
         result = subprocess.run(
             ["bash", "-c", command],
             capture_output=True, text=True,
-            timeout=float(timeout), shell=False,
+            timeout=timeout, shell=False,
         )
         return {
             "command": command,
@@ -1099,20 +1108,34 @@ TOOLS: list[dict[str, Any]] = [
         "name": "bash",
         "description": (
             "Run any shell command. The agent's general-purpose Swiss-army "
-            "knife — use this for ping/traceroute/dns lookups, listing "
-            "files, reading docs (cat / grep), running IOC restart scripts, "
-            "querying the iocs_monitor scripts directory, or anything else "
-            "that's a regular shell operation. Read-only commands run "
-            "freely; destructive ones (rm, mv, kill, chmod, sudo, *.sh "
-            "executions, redirects to files, git push) trigger a Yes/No "
-            "confirmation dialog. Returns {returncode, success, stdout, "
-            "stderr}."
+            "knife — use for ping/traceroute/dns, listing files, reading "
+            "docs (cat / grep), running IOC restart scripts, querying the "
+            "iocs_monitor scripts directory, or anything else that's a "
+            "regular shell operation. Read-only commands run freely; "
+            "destructive ones (rm, mv, kill, chmod, sudo, *.sh executions, "
+            "redirects to files, git push) trigger a Yes/No confirmation. "
+            "\n\n"
+            "**Timeout is critical**: default 30 s is fine for `ls` / "
+            "`ping` / `caget`; but any real work (SSH into another host, "
+            "conda run, tomogui-cli batch, tomocupy recon, big rsync, "
+            "long file scans) will run for MINUTES and must set `timeout` "
+            "explicitly. Common values: `120` for a quick remote check, "
+            "`600` (10 min) for a Try reconstruction, `1800` (30 min) for "
+            "a Full reconstruction batch, `3600` max. A timed-out command "
+            "is REPORTED as timeout — do NOT retry, ask the user; the "
+            "child may still be running. Returns {returncode, success, "
+            "stdout, stderr}."
         ),
         "schema": {
             "type": "object",
             "properties": {
                 "command": {"type": "string",
                             "description": "Shell command to run."},
+                "timeout": {"type": "number",
+                            "description": "Seconds to wait before killing "
+                            "the command. Default 30. Bump for SSH+conda+"
+                            "recon-batch or any minutes-long operation. "
+                            "Ceiling 3600 (1 hour)."},
             },
             "required": ["command"],
         },

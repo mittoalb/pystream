@@ -3,8 +3,7 @@
 These tools are ALWAYS available to the agent, regardless of which
 beamline is active (or whether any beamline is active at all). They
 operate on data in `~/.pystream/` that isn't tied to any specific
-facility — currently just the task-recordings store fed by
-pystream's Task Recorder.
+facility.
 
 Beamlines can still contribute their own tool catalog via
 `provide_agent_context()` (see bl32ID/agent_tools.py); those merge on
@@ -15,10 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from typing import Any, Callable
 
 try:
-    from .beamlines.bl32ID.plugin_settings import PYSTREAM_HOME  # type: ignore
+    from ..beamlines.bl32ID.plugin_settings import PYSTREAM_HOME  # type: ignore
 except Exception:
     PYSTREAM_HOME = os.path.expanduser("~/.pystream")
 
@@ -27,6 +27,67 @@ except Exception:
 # module, so we hardcode the path (kept in sync manually) and rely on
 # task_recorder's own one-time migration to move any legacy layout.
 TASK_RECORDINGS_ROOT = os.path.join(PYSTREAM_HOME, "task_recordings")
+
+# Personal-fallback location for learned notes when the pystream source
+# checkout isn't detected (fresh pip install on a different machine).
+# Notes there DO NOT get committed to git — the user will need to
+# manually copy anything useful into the source tree.
+LEARNED_NOTES_FALLBACK = os.path.join(PYSTREAM_HOME, "learned_notes.md")
+
+
+def _find_source_docs_dir() -> str | None:
+    """Return the source-tree `agent/context_docs/` path where the
+    agent should append learned notes so `git diff` picks them up.
+    Returns None only if no plausible checkout exists on this machine
+    (fresh pip install with no local clone).
+
+    Detection order:
+      1. Walk up from `pystream/__init__.py` — catches editable installs
+         (`pip install -e`) where the package lives inside the checkout.
+      2. Optional config override in `agent_settings.json["docs_write_root"]`
+         — advanced users can point elsewhere.
+      3. Convention: `~/Software/pystream/` if it has a `.git`. Matches
+         how the deploying user (and typically their teammates) already
+         organize source checkouts."""
+    # 1. Editable-install case
+    try:
+        import pystream
+        pkg = os.path.dirname(os.path.abspath(pystream.__file__))
+        d = pkg
+        for _ in range(6):
+            if os.path.isdir(os.path.join(d, ".git")):
+                candidate = os.path.join(d, "src", "pystream", "agent", "context_docs")
+                if os.path.isdir(candidate):
+                    return candidate
+                break
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+    except Exception:
+        pass
+
+    # 2. Explicit override from agent settings
+    try:
+        settings_path = os.path.join(PYSTREAM_HOME, "agent_settings.json")
+        if os.path.isfile(settings_path):
+            with open(settings_path) as f:
+                cfg = json.load(f)
+            override = cfg.get("docs_write_root") if isinstance(cfg, dict) else None
+            if override and os.path.isdir(override):
+                return override
+    except Exception:
+        pass
+
+    # 3. Convention: ~/Software/pystream (works for the user's team's
+    #    layout and doesn't accidentally match unrelated repos).
+    convention = os.path.expanduser(
+        "~/Software/pystream/src/pystream/agent/context_docs")
+    if (os.path.isdir(convention)
+            and os.path.isdir(os.path.expanduser("~/Software/pystream/.git"))):
+        return convention
+
+    return None
 
 
 # ── low-level helpers ───────────────────────────────────────────────────
@@ -97,6 +158,64 @@ def tool_list_task_recordings() -> dict:
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
+def tool_save_learned_note(topic: str, content: str,
+                            tool: str = "general") -> dict:
+    """Append a durable note to the agent's own knowledge file, for
+    future turns AND future users to benefit from. Called when the
+    agent discovers something worth remembering: a new CLI flag, a
+    corrected file path, a machine's shell quirk, a failure mode +
+    workaround, a PV that behaves differently than documented.
+
+    Writes to the pystream source tree if the checkout is detected
+    (`src/pystream/agent/context_docs/_learned.md`) so the user can
+    `git diff` + review + commit — that's the whole point. If we're
+    running from a regular pip install (no checkout), falls back to
+    `~/.pystream/learned_notes.md` (personal, per-machine) and reports
+    that in the return value so the user knows their notes stay local.
+
+    `tool` — short slug for what the note pertains to ("tomogui",
+    "bl_gui", "conda", "ssh", "general"). Used to group entries when
+    a human eventually promotes them into the curated per-tool docs.
+
+    Never call this to remember what the user already told you within
+    the same turn — history persistence handles that. Call ONLY for
+    findings you'd want yourself to know at the START of a fresh turn
+    that has no chat history."""
+    if not topic or not topic.strip():
+        return {"error": "topic is required"}
+    if not content or not content.strip():
+        return {"error": "content is required"}
+    src_dir = _find_source_docs_dir()
+    if src_dir:
+        path = os.path.join(src_dir, "_learned.md")
+        deploy = "source-tree (will show up in git diff — commit + push to share)"
+    else:
+        path = LEARNED_NOTES_FALLBACK
+        deploy = ("personal (no pystream source checkout detected — "
+                  "notes stay on this machine only; copy the useful ones "
+                  "into your source tree if you want to share)")
+    ts = datetime.now().isoformat(timespec="seconds")
+    entry = (f"\n## [{tool}] {topic.strip()}   ({ts})\n\n"
+             f"{content.strip()}\n\n---\n")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # If the file is new, add a friendly header so a human opening
+        # it for the first time knows what they're looking at.
+        is_new = not os.path.isfile(path)
+        with open(path, "a") as f:
+            if is_new:
+                f.write("# Agent-learned notes\n\n"
+                        "Auto-appended by the pystream AI agent via "
+                        "`save_learned_note`. Review, promote to a "
+                        "curated tool doc if useful, then delete the "
+                        "entry from here.\n\n")
+            f.write(entry)
+        return {"ok": True, "path": path, "bytes_added": len(entry),
+                "deployment": deploy}
+    except OSError as ex:
+        return {"error": f"cannot write {path}: {ex}"}
+
+
 def tool_read_task_recording(task_slug: str,
                               session_id: str = None) -> dict:
     """Return the full recorded action log for one task session.
@@ -155,6 +274,42 @@ def tool_read_task_recording(task_slug: str,
 
 CORE_TOOLS: list[dict[str, Any]] = [
     {
+        "name": "save_learned_note",
+        "description": (
+            "Append a durable note to the agent's own knowledge file "
+            "for future turns AND future users. Call when you discover "
+            "something worth remembering across sessions: a new CLI "
+            "flag, a corrected path, a shell quirk on a specific "
+            "machine, a failure workaround, or any insight about a tool "
+            "that isn't already in `~/.pystream/docs/<tool>.md`. "
+            "Writes to the pystream source tree if this is a dev "
+            "checkout so the user can git diff + commit — otherwise "
+            "to a personal file (still useful, just not auto-shared). "
+            "\n\n"
+            "DO NOT call for things the user already told you this "
+            "turn — chat history handles that. Call ONLY for findings "
+            "you'd want yourself to know when starting a FRESH turn "
+            "with no context. Skip trivia."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string",
+                          "description": "Short title, e.g. "
+                          "'tcsh login shell on tomo2 needs bash -lc'"},
+                "content": {"type": "string",
+                            "description": "The note body — markdown, "
+                            "multi-line ok. Explain WHY, not just what."},
+                "tool": {"type": "string",
+                         "description": "Short slug for grouping "
+                         "('tomogui', 'bl_gui', 'ssh', 'conda', 'general'). "
+                         "Default 'general'."},
+            },
+            "required": ["topic", "content"],
+        },
+        "func": tool_save_learned_note,
+    },
+    {
         "name": "list_task_recordings",
         "description": (
             "Enumerate recorded beamline-task demonstrations the "
@@ -209,29 +364,91 @@ def _core_get_tool(name: str) -> Callable | None:
 # ── system-prompt addendum — beamline-agnostic alignment guidance ──────
 
 CORE_SYSTEM_PROMPT_ADDENDUM = """
-# PROJECT-SPECIFIC KNOWLEDGE — check ~/.pystream/docs/ first
+# TOOL BUDGET DISCIPLINE
 
-Every project the user has under `~/Software/` may ship an `AGENTS.md`
-file describing how AI agents should drive its functionality
-(especially headlessly, without opening its GUI). pystream auto-
-symlinks every such file into `~/.pystream/docs/<project>_AGENTS.md`
-on startup.
+You get ~10 tool rounds per turn. Spend them on ACTION, not
+verification. Rules:
 
-Before invoking any tool that touches another project (tomogui,
-tomocupy, tomolog, bl_gui, xanes_gui, …), run:
+- Trust the user's paths, machine names, and files. Don't `ls` /
+  `cat` / `find` to confirm what they gave you. If it's wrong you'll
+  see the error and can report it back.
+- Do NOT test tools before using them (no `--help`, no `--version`,
+  no smoke-test commands "just to check"). Run the real command.
+- Do NOT re-read reference docs mid-turn. Read them once at the
+  start of the turn if relevant; don't re-fetch what's already in
+  your context.
+- If you're on tool round 5+ and haven't done the actual task yet,
+  you're on the wrong track — STOP and ask the user to clarify.
+- Prefer one composite command (a batch, a pipeline, a script) over
+  many small verifications. `tomogui-cli batch --phases ai,full`
+  beats calling `status`, `try`, `full` separately.
 
-    bash: ls ~/.pystream/docs/*_AGENTS.md 2>/dev/null
+# SAVING WHAT YOU LEARN
 
-then `read_file(<the matching one>)` for the project in play. The
-AGENTS.md is authored by the project's maintainer and reflects
-current invocation patterns, env names, config-file locations, and
-known failure modes. Do not invent invocation patterns when a
-project-specific AGENTS.md exists — read it first.
+When you discover something worth remembering across sessions — a
+CLI flag that isn't documented, a machine's shell quirk (`tomo2` uses
+tcsh, so `conda run` needs `bash -lc`), a workaround for a recurring
+failure, a corrected file path, an insight about how a tool actually
+behaves — call `save_learned_note(topic, content, tool="…")`. The
+note lands in the pystream source tree's `_learned.md` so the user
+can `git diff` + review + commit + push. Future turns AND other users
+who pull the repo benefit.
 
-Common ones you'll see:
-- `~/.pystream/docs/tomogui_AGENTS.md` — headless tomographic
-  reconstruction via `tomocupy` under the `tomoguiAI` conda env.
-  Read this before running any reconstruction task.
+Do NOT save:
+- Anything the user already told you this turn (history handles it)
+- Trivia or one-off observations that won't help a future turn
+- Sensitive info (API keys, credentials, IP addresses of internal
+  hosts you're not sure are OK to share)
+
+DO save:
+- Non-obvious workarounds you had to discover the hard way
+- CLI flags / paths / env names that aren't in the curated doc
+- Machine-specific quirks (shell, conda location, env name variants)
+- Failure signatures + how to identify + what to do
+
+Format: one topic per call. Content is markdown; be concrete. If the
+same topic already has a note (check `_learned.md` if unsure), add a
+new entry rather than replacing — the human decides what to merge.
+
+# PROJECT-SPECIFIC KNOWLEDGE — ~/.pystream/docs/
+
+pystream ships instruction files for driving related tools headlessly.
+They live at `~/.pystream/docs/<project>.md`, one per project, and
+are installed automatically with pystream (no per-machine setup).
+
+If the user's task involves another tool (tomogui / tomocupy /
+tomolog / bl_gui / xanes_gui / …), read the matching file ONCE at
+the start of the turn:
+
+    read_file("~/.pystream/docs/tomogui.md")     # for reconstruction
+    read_file("~/.pystream/docs/bl_gui.md")      # etc.
+
+Do NOT `ls ~/.pystream/docs/` first — go straight to `read_file`.
+The doc tells you exactly what command to run. Run it. Don't verify
+the prerequisites the doc names — trust the doc.
+
+# BASH TIMEOUT — the #1 iteration-burner
+
+The `bash` tool defaults to a **30-second** timeout. That's right for
+`ls` / `caget` / `ping`, but wrong for anything real. Every `bash`
+call that does one of these:
+
+- `ssh HOST '...'` into another machine
+- `conda run -n <env> <cmd>` if `<cmd>` isn't trivial
+- Any reconstruction, big rsync, long file scan
+
+...MUST pass an explicit `timeout` parameter, or the tool returns
+`{"error": "command timed out after 30s"}` while the remote work is
+still running — and you'll waste the rest of your budget "debugging"
+a phantom failure. Rule of thumb:
+
+- Quick remote check (`ssh HOST 'hostname'`) → `timeout=60`
+- Try reconstruction → `timeout=600`
+- Full reconstruction batch → `timeout=1800`
+- Long rsync / dataset copy → `timeout=3600` (ceiling)
+
+If a `bash` call DID time out, do NOT retry — the child may still be
+running remotely. Ask the user what to do.
 
 # TASK RECORDINGS — procedures captured by the scientist
 

@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from .agent_status import (
+from .status import (
     APS_AGENTS_DIR, AGENTS_FILE, DEFAULT_LINGER_S,
     load_registry, purge_stale_records,
 )

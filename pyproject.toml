@@ -52,4 +52,4 @@ where = ["src"]
 include = ["pystream*"]
 
 [tool.setuptools.package-data]
-pystream = ["pipelines/*.json"]
+pystream = ["pipelines/*.json", "agent/context_docs/*.md"]
