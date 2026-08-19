@@ -559,7 +559,7 @@ class _ChatWorker(QtCore.QThread):
 
     def __init__(self, protocol, base_url, api_key, model,
                  system_prompt, history, user_text,
-                 tool_ctx, confirm_helper=None):
+                 tool_ctx, confirm_helper=None, gui_action_helper=None):
         super().__init__()
         self.protocol = protocol
         self.base_url = base_url
@@ -570,6 +570,10 @@ class _ChatWorker(QtCore.QThread):
         self.user_text = user_text
         self.tool_ctx = tool_ctx or dict(_EMPTY_TOOL_CONTEXT)
         self.confirm_helper = confirm_helper
+        # Kept as `self._gui_action_helper` so the run() code that
+        # reads it doesn't need refactoring; also matches the widget
+        # attribute name to keep grep-ability.
+        self._gui_action_helper = gui_action_helper
 
     def _emit_tool(self, name, args, result):
         self.tool_event.emit(name, dict(args), result)
@@ -907,6 +911,7 @@ class AgentChatWidget(QtWidgets.QWidget):
             user_text=text,
             tool_ctx=cfg["tool_ctx"],
             confirm_helper=self._confirm_helper,
+            gui_action_helper=self._gui_action_helper,
         )
         # Bind the user_text into the completion callback so multiple
         # concurrent workers each append their OWN user message to
