@@ -489,20 +489,24 @@ new entry rather than replacing — the human decides what to merge.
 
 # PROJECT-SPECIFIC KNOWLEDGE — ~/.pystream/docs/
 
-pystream ships instruction files for driving related tools headlessly.
-They live at `~/.pystream/docs/<project>.md`, one per project, and
-are installed automatically with pystream (no per-machine setup).
+pystream ships instruction files under `~/.pystream/docs/<name>.md`
+that describe pystream itself AND every tool it drives. They ship
+inside the package (no per-machine setup).
 
-If the user's task involves another tool (tomogui / tomocupy /
-tomolog / bl_gui / xanes_gui / …), read the matching file ONCE at
-the start of the turn:
+**Read `~/.pystream/docs/pystream.md` ONCE at the start of any turn
+where the user is asking about pystream itself, its tools, its panels,
+or what YOU can do.** That file is your self-context — full tool
+catalog, sub-agent kinds, panels, workflows, anti-patterns.
 
-    read_file("~/.pystream/docs/tomogui.md")     # for reconstruction
-    read_file("~/.pystream/docs/bl_gui.md")      # etc.
+For other tools (tomogui / bl_gui / xanes_gui / …), the analogous
+per-tool docs are also there:
+
+    read_file("~/.pystream/docs/pystream.md")    # what YOU are, what tools you have
+    read_file("~/.pystream/docs/tomogui.md")     # reconstruction sub-agent prompt
 
 Do NOT `ls ~/.pystream/docs/` first — go straight to `read_file`.
-The doc tells you exactly what command to run. Run it. Don't verify
-the prerequisites the doc names — trust the doc.
+The doc tells you exactly what to do. Trust it. Don't verify the
+prerequisites it names — the doc's author already verified them.
 
 # BASH TIMEOUT — the #1 iteration-burner
 

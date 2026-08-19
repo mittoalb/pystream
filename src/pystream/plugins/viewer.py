@@ -780,9 +780,45 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             return
         self._load_specific_file(filename)
 
+    # Datasets we recognize as "the volume", tried in this order.
+    # First hit wins. Standard raw-tomo files use `exchange/data`;
+    # tomocupy / tomogui reconstruction output uses `exchange/data`
+    # too but sometimes `exchange/recon` or `reconstruction`; a plain
+    # HDF5 stack may just live at `/data`.
+    _DATA_DATASET_CANDIDATES = (
+        "exchange/data",
+        "exchange/recon",
+        "reconstruction",
+        "data",
+    )
+
+    @staticmethod
+    def _first_present_3d(hdf5_file, paths):
+        """Return the (path, dataset) of the first path in `paths` that
+        exists in the file AND is a 3+D dataset. None if no match."""
+        for p in paths:
+            if p in hdf5_file:
+                obj = hdf5_file[p]
+                if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 3:
+                    return p, obj
+        return None, None
+
     def _load_specific_file(self, filename: str):
         """Open `filename` as an HDF5 file and populate the viewer.
-        Shared by the file dialog, drag-and-drop, and any future
+        Auto-detects two modes:
+
+          * **Raw tomo** — `exchange/data` + `exchange/data_white` both
+            present. The viewer runs its original path: normalize
+            (data / white), let the user shift the white, etc.
+          * **Reconstruction / generic** — a recognized 3D dataset is
+            present but no white-field companion. The viewer switches
+            to slice-view mode: division is disabled, the white-shape
+            row shows "(no flats)", and the slider walks slices of
+            the volume directly. Handles tomogui / tomocupy `_rec.h5`
+            output (dataset `/exchange/data` or `/exchange/recon`)
+            plus any other standard HDF5 stack under `/data`.
+
+        Called by the file dialog, drag-and-drop, and any future
         programmatic caller."""
         if not filename:
             return
@@ -793,36 +829,46 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
 
             self.hdf5_file = h5py.File(filename, 'r')
 
-            if 'exchange/data' in self.hdf5_file and 'exchange/data_white' in self.hdf5_file:
-                self.data_dataset = self.hdf5_file['exchange/data']
-                self.data_white_dataset = self.hdf5_file['exchange/data_white']
-
-                self.file_path_label.setText(os.path.basename(filename))
-                self.file_path_label.setStyleSheet("color: white;")
-                self.file_path_label.setToolTip(filename)
-
-                self.data_shape_label.setText(str(self.data_dataset.shape))
-                self.white_shape_label.setText(str(self.data_white_dataset.shape))
-
-                num_images = self.data_dataset.shape[0]
-                self.num_images_label.setText(str(num_images))
-
-                self.image_slider.setMaximum(num_images - 1)
-                self.image_slider.setEnabled(True)
-
-                self._load_and_display_image(0)
-
-                self.metadata_viewer.load_metadata(self.hdf5_file)
-
-            else:
+            data_path, data_dset = self._first_present_3d(
+                self.hdf5_file, self._DATA_DATASET_CANDIDATES)
+            if data_dset is None:
                 QtWidgets.QMessageBox.warning(
-                    self, "Invalid File Structure",
-                    "File does not contain expected datasets:\n"
-                    "- /exchange/data\n"
-                    "- /exchange/data_white"
+                    self, "Unrecognized File Structure",
+                    "Couldn't find a 3D dataset at any of the known paths:\n"
+                    "  - " + "\n  - ".join(self._DATA_DATASET_CANDIDATES)
+                    + "\n\nUse the Metadata tab to inspect the file's tree."
                 )
-                self.hdf5_file.close()
-                self.hdf5_file = None
+                # Still show metadata so the user can figure out what's there.
+                self.metadata_viewer.load_metadata(self.hdf5_file)
+                return
+
+            self.data_dataset = data_dset
+
+            # White-field is optional. Present → raw-tomo mode (division
+            # enabled). Absent → recon / generic mode (slice viewer,
+            # division disabled).
+            if 'exchange/data_white' in self.hdf5_file:
+                self.data_white_dataset = self.hdf5_file['exchange/data_white']
+                self._enter_raw_mode()
+            else:
+                self.data_white_dataset = None
+                self._enter_recon_mode(dataset_path=data_path)
+
+            self.file_path_label.setText(os.path.basename(filename))
+            self.file_path_label.setStyleSheet("color: white;")
+            self.file_path_label.setToolTip(filename)
+
+            self.data_shape_label.setText(str(self.data_dataset.shape))
+
+            num_images = self.data_dataset.shape[0]
+            self.num_images_label.setText(str(num_images))
+
+            self.image_slider.setMaximum(num_images - 1)
+            self.image_slider.setEnabled(True)
+
+            self._load_and_display_image(0)
+
+            self.metadata_viewer.load_metadata(self.hdf5_file)
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(
@@ -831,6 +877,35 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             if self.hdf5_file is not None:
                 self.hdf5_file.close()
                 self.hdf5_file = None
+
+    # ── Mode switching (raw tomo vs recon / generic slice viewer) ──
+
+    def _enter_raw_mode(self):
+        """Restore full raw-tomo UI — division on, white-shape shown,
+        normalization checkbox active."""
+        self.is_recon_mode = False
+        self.white_shape_label.setText(str(self.data_white_dataset.shape))
+        self.normalization_checkbox.setEnabled(True)
+        self.normalization_checkbox.setChecked(True)
+        # White-field shifting only makes sense with a white present.
+        if hasattr(self, "shift_x_slider"):
+            self.shift_x_slider.setEnabled(True)
+        if hasattr(self, "shift_y_slider"):
+            self.shift_y_slider.setEnabled(True)
+
+    def _enter_recon_mode(self, dataset_path: str):
+        """Slice viewer for reconstruction / generic 3D volumes: no
+        white, no division, no white-shifting. Grey out anything that
+        needs a white-field to make sense."""
+        self.is_recon_mode = True
+        self.white_shape_label.setText(f"(no flats — slice view of /{dataset_path})")
+        self.normalization_enabled = False
+        self.normalization_checkbox.setChecked(False)
+        self.normalization_checkbox.setEnabled(False)
+        if hasattr(self, "shift_x_slider"):
+            self.shift_x_slider.setEnabled(False)
+        if hasattr(self, "shift_y_slider"):
+            self.shift_y_slider.setEnabled(False)
 
     # ── Drag-and-drop ────────────────────────────────────────────────
     @staticmethod
@@ -874,7 +949,9 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     def _load_and_display_image(self, index):
         """Load and display image at given index. When `self.avg_n > 0`
         loads the ±N-frame window and averages along axis 0 before the
-        data/white division."""
+        data/white division. In recon mode there's no white — the
+        current_white/shift/division steps are skipped entirely and
+        `current_data` is displayed as a raw slice."""
         if self.data_dataset is None:
             return
 
@@ -883,8 +960,8 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
             self.index_label.setText(str(index))
 
             n_frames_total = self.data_dataset.shape[0]
-            n_whites_total = self.data_white_dataset.shape[0]
 
+            # Load current_data (with optional ±N averaging).
             if self.avg_n > 0:
                 lo = max(0, index - self.avg_n)
                 hi = min(n_frames_total, index + self.avg_n + 1)
@@ -892,23 +969,30 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
                 self.current_data = np.array(
                     self.data_dataset[lo:hi], dtype=np.float32
                 ).mean(axis=0)
-                # White average: use the matching slab if available
-                # (per-projection whites), otherwise the single white
-                # closest to `index`.
-                if n_whites_total > 1:
-                    wlo = max(0, min(lo, n_whites_total - 1))
-                    whi = max(wlo + 1, min(hi, n_whites_total))
-                    self.current_white = np.array(
-                        self.data_white_dataset[wlo:whi], dtype=np.float32
-                    ).mean(axis=0)
-                else:
-                    self.current_white = np.array(
-                        self.data_white_dataset[0], dtype=np.float32)
             else:
                 self.current_data = np.array(self.data_dataset[index])
-                white_index = min(index, n_whites_total - 1)
-                self.current_white = np.array(
-                    self.data_white_dataset[white_index])
+
+            # White-field load — only in raw-tomo mode.
+            if getattr(self, "is_recon_mode", False) or self.data_white_dataset is None:
+                self.current_white = None
+            else:
+                n_whites_total = self.data_white_dataset.shape[0]
+                if self.avg_n > 0:
+                    lo = max(0, index - self.avg_n)
+                    hi = min(n_frames_total, index + self.avg_n + 1)
+                    if n_whites_total > 1:
+                        wlo = max(0, min(lo, n_whites_total - 1))
+                        whi = max(wlo + 1, min(hi, n_whites_total))
+                        self.current_white = np.array(
+                            self.data_white_dataset[wlo:whi], dtype=np.float32
+                        ).mean(axis=0)
+                    else:
+                        self.current_white = np.array(
+                            self.data_white_dataset[0], dtype=np.float32)
+                else:
+                    white_index = min(index, n_whites_total - 1)
+                    self.current_white = np.array(
+                        self.data_white_dataset[white_index])
 
             self._update_display()
 
@@ -919,12 +1003,13 @@ class HDF5ImageDividerDialog(QtWidgets.QDialog):
     
     def _update_display(self):
         """Update the image display with current shift, normalization,
-        and display-only filter settings."""
+        and display-only filter settings. Skips division entirely in
+        recon mode (no white-field to divide by)."""
         if self.current_data is None:
             return
 
         try:
-            if self.normalization_enabled:
+            if self.normalization_enabled and self.current_white is not None:
                 shifted_white = self._apply_shift(self.current_white, self.shift_x, self.shift_y)
 
                 epsilon = 1e-10
