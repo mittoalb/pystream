@@ -28,8 +28,9 @@ def start_background_services(parent_window):
     pass
 
 
-# Note: the AI Agent panel comes from pystream core (pystream.agent),
-# not from any beamline hook. bl19BM doesn't provide `provide_agent_context()`
-# yet, so the agent runs as a pure chat here — no tools, no beamline-
-# specific system prompt body. Add `provide_agent_context()` when 19-BM
-# gets its own tool catalog (see bl32ID's agent_tools.py for a template).
+# Note: the AI Agent panel comes from the separate `beamline-agent`
+# package (mounted by pystream when installed), not from any beamline
+# hook. bl19BM doesn't provide `provide_agent_context()` yet, so the
+# agent runs as a pure chat here — no tools, no beamline-specific
+# system prompt body. Add `provide_agent_context()` when 19-BM gets
+# its own tool catalog (see bl32ID's agent_tools.py for a template).

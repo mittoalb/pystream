@@ -12,21 +12,19 @@ from .rotationaxis import RotationAxisDialog
 from .qgmax import QGMaxDialog, ensure_qgmax_background_watcher
 from .autocenter import AutoCenterDialog
 from .blgui import BLGuiDialog
-# NOTE: AgentDialog is NOT imported at package level. It's still available
-# via the pystream.agent module (`from pystream.agent import AgentDialog`) and is
-# opened on demand by the AI Agent panel's ⚙ Settings button. Toolbar
-# registration would be redundant (chat is always visible at the bottom).
+# NOTE: AgentDialog is not imported at package level. The AI Agent
+# now lives in the separate `beamline-agent` package (mounted by
+# pystream when installed), so bl32ID no longer exposes an agent
+# widget of its own — the chat is always the bottom panel.
 from .datamap import DataMapDialog
 from .xraytools import XRayToolsDialog
 from .autofocus import AutofocusLauncherDialog
 from .atomo import AtomoLauncherDialog
 
-# AgentDialog is intentionally NOT in __all__ — the AI Agent is
-# available as a permanent bottom panel (via `provide_bottom_panels`
-# below) with its own ⚙ Settings button that opens the full dialog on
-# demand. A toolbar button would be redundant. The class is still
-# importable (for the Settings button to instantiate it) via
-# the pystream.agent module (`from pystream.agent import AgentDialog`).
+# AgentDialog is not part of pystream any more — it moved to
+# `beamline_agent.chat.AgentDialog` (imported by beamline-agent's
+# mount()). The chat still surfaces at the bottom of the pystream
+# window when beamline-agent is installed.
 __all__ = ['MotorScanDialog', 'CenterOfRotationDialog', 'ParticleAlignDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'DataMapDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
 
 
@@ -64,9 +62,9 @@ def provide_task_templates():
 
 def provide_agent_context():
     """Beamline-specific tools + prompt-body appended to the core agent
-    prompt in pystream.agent. Queried at every Send. Returning None or
-    an empty dict here would make the agent tool-less on this beamline
-    (falling back to pure chat)."""
+    prompt in beamline_agent.chat. Queried by beamline-agent at every
+    Send. Returning None or an empty dict here would make the agent
+    tool-less on this beamline (falling back to pure chat)."""
     try:
         from .agent_tools import (
             anthropic_tool_specs, openai_tool_specs, get_tool,

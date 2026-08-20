@@ -24,8 +24,8 @@ task (positioning between scans — off the 1–6 numbering):
     –  Sample        — per-scan positioning
     7. Final Joint Refinement — all 15 optics axes together
 
-`task_template_map()` is what pystream.task_recorder consumes via
-bl32ID/__init__.py's provide_task_templates() hook.
+`task_template_map()` is what beamline_agent.task_recorder consumes
+via bl32ID/__init__.py's provide_task_templates() hook.
 
 `bl_gui_element_dump()` remains available for cross-checking PV
 assignments against bl_gui's own layout when txmOptics is edited.
