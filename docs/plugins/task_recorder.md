@@ -8,16 +8,25 @@ procedure, and PUBLISH the good ones as named **tools** for one-click
 future runs. The AI agent also reads every recording and can describe
 the exact procedure back to you.
 
-**Beamline-agnostic core feature.** The recorder engine, browser,
-replay engine, published-tools store, and AI-agent core tools all
-live in `pystream` core — every beamline gets them. Beamlines
-OPTIONALLY pre-populate the task dropdown by exposing
-`provide_task_templates()`; without that hook the dialog falls back
-to a free-text task name + manual PV table.
+**Ships with `beamline-agent`, not pystream.** Task Recorder is really
+an agent tool — its recordings train the LLM's procedural knowledge
+and provide one-click replay for the same sequences the agent
+describes. Since pystream v2 the code lives in the standalone
+[`beamline-agent`](https://github.com/mittoalb/beamline-agent) package
+and mounts into pystream through the `HostContext` protocol.
+
+- **Install**: `pip install pystream[ai]` (or add `beamline-agent`
+  directly). Without it, no 🎥 Task Rec button — pystream still runs.
+- **Beamline-agnostic engine**: recorder, browser, replay, published
+  tools, and the AI-agent read tools work on any beamline pystream
+  supports. Beamlines OPTIONALLY pre-populate the task dropdown by
+  exposing `provide_task_templates()`; without that hook the dialog
+  falls back to a free-text task name + manual PV table.
 
 ## Where it lives
 
-Top toolbar → **🎥 Task Rec** (next to *HDF5 Viewer*).
+Top toolbar → **🎥 Task Rec** (next to *HDF5 Viewer*). Button only
+appears when `beamline-agent` is installed.
 
 ## The workflow — teach, refine, publish, execute
 
@@ -153,7 +162,7 @@ is pressed rather than silently trying to replay a missing session.
 ## How the AI agent uses recordings
 
 Two read-only, beamline-agnostic tools registered in
-[agent_core_tools.py](../../src/pystream/agent_core_tools.py):
+`beamline_agent/core_tools.py`:
 
 | Tool | Purpose |
 |---|---|

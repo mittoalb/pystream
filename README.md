@@ -10,6 +10,7 @@ Real-time image viewer for EPICS PVAccess NTNDArray data with beamline-specific 
 - **HDF5 Viewer** — drag-and-drop, line + ROI tools with the same UX as the live viewer, filters (median/Gaussian/threshold), frame averaging, PNG/TIFF/NPY export
 - **Motor-driven tools** — center-of-rotation finder, click-a-particle → auto-align on rotation axis, mosaic scan, XANES / XANES-2D / DataMap
 - **Extensible AI backends** — heavy ML models (SAM2, …) run in a separate conda env via subprocess; pystream stays light
+- **Optional AI agent** — install [`beamline-agent`](https://github.com/mittoalb/beamline-agent) to add the chat panel, sub-agent dispatch, live Agents/Console dialogs, and Task Recorder. pystream works normally without it — just no agent toolbar buttons.
 - **`pystream-new-beamline` CLI** — scaffold a new beamline package in one command
 
 ## Installation
@@ -17,11 +18,14 @@ Real-time image viewer for EPICS PVAccess NTNDArray data with beamline-specific 
 ```bash
 # From this repo (recommended for developers):
 cd pystream
-pip install -e ".[bl32ID]"        # editable + bl32ID extras
+pip install -e ".[bl32ID]"          # editable + bl32ID extras
+pip install -e ".[bl32ID,ai]"       # …plus the AI agent (beamline-agent)
 
 # From GitHub with extras:
-pip install "pystream[bl32ID] @ git+https://github.com/mittoalb/pystream.git@dev"
+pip install "pystream[bl32ID,ai] @ git+https://github.com/mittoalb/pystream.git@dev"
 ```
+
+The `ai` extra pulls in the standalone [`beamline-agent`](https://github.com/mittoalb/beamline-agent) package — the chat panel, Task Recorder, and Agents/Console dialogs live there, mounted into pystream through a small `HostContext` protocol. Skip it for a minimal viewer-only install; add it later with `pip install beamline-agent`.
 
 **Note**: `pip install pystream` (bare name) resolves to an unrelated PyPI package. Always use a local path (`.`) or a `git+…` URL.
 

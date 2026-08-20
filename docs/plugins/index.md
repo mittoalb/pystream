@@ -11,12 +11,19 @@ data.
 - [Python Console](console.md) — run Python on the live image.
 - [Image Metrics](metrics.md) — live image-quality metrics.
 - [Mosaic Alignment](mosalign.md) — 2D motor scan with stitched preview.
-- [Task Recorder](task_recorder.md) — capture any beamline procedure
-  (alignment, sample positioning, scan setup) for one-click replay
-  and for the AI agent to read.
-- [Agents Panel](agents_panel.md) — live "who's running" view of
-  every AI agent (pystream's Röntgen + spawned subagents +
-  cross-machine workers).
+
+The next two live in the separate
+[`beamline-agent`](https://github.com/mittoalb/beamline-agent) package
+(install with `pip install pystream[ai]`) and mount into pystream
+through the `HostContext` protocol. Their toolbar buttons only appear
+when the package is present.
+
+- [Task Recorder](task_recorder.md) *(via beamline-agent)* — capture
+  any beamline procedure (alignment, sample positioning, scan setup)
+  for one-click replay and for the AI agent to read.
+- [Agents Panel](agents_panel.md) *(via beamline-agent)* — live
+  "who's running" view of every AI agent (Röntgen + spawned
+  sub-agents + cross-machine workers).
 
 ## Adding a plugin
 

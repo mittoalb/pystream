@@ -19,13 +19,14 @@ dependencies = [
   "pyqtgraph>=0.13.0",
   "Pillow>=9.0",
   "h5py>=3.0",
-  "anthropic>=0.50",       # Anthropic Messages API client (AI plugin)
-  "openai>=1.40",          # OpenAI Chat Completions client (AI plugin)
 ]
 
 [project.optional-dependencies]
 vispy = ["vispy>=0.14.0"]
 docs = ["sphinx>=6.0", "sphinx-rtd-theme", "myst-parser>=3.0"]
+# `ai` mounts the AI Agent + Console + Agents panel. Without it,
+# pystream runs normally (viewer + plugins + HDF5) — just no agent.
+ai = ["beamline-agent"]
 bl32ID = [
   "xanes-gui @ git+https://github.com/mittoalb/xanes_gui.git",
   "mosalign @ git+https://github.com/mittoalb/mosalign.git",
@@ -35,7 +36,7 @@ bl19BM = [
   # that need extra Python libraries. Add here as you register plugins,
   # e.g.  "some-tool @ git+https://github.com/…",
 ]
-all = ["vispy>=0.14.0"]
+all = ["vispy>=0.14.0", "beamline-agent"]
 dev = ["black", "flake8", "pytest"]
 
 [project.scripts]
@@ -52,4 +53,4 @@ where = ["src"]
 include = ["pystream*"]
 
 [tool.setuptools.package-data]
-pystream = ["pipelines/*.json", "agent/context_docs/*.md"]
+pystream = ["pipelines/*.json"]

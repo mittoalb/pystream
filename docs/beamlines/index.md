@@ -30,22 +30,30 @@ pick a plugin from any dropdown.
 
 ## Core features (present regardless of beamline)
 
-- **AI Agent** — chat panel always docked at the bottom of the main
-  window. Beamlines optionally contribute tools + prompt-body via
-  `provide_agent_context()`. bl32ID contributes its full 32-ID tool
-  catalog; bl19BM (empty scaffold) leaves the agent in pure-chat mode.
-  See [Röntgen](txmbot.md).
-- **Task Recorder** — top-toolbar button that captures motor moves +
-  detector frames as procedural demonstrations. Load and replay past
-  sessions with `caput -c`, or publish a good session as a named tool
-  for one-click future runs. Beamlines contribute their task/motor
-  map via `provide_task_templates()`; otherwise a free-text mode is
-  available. The AI agent also reads every recording. See
-  [Task Recorder](../plugins/task_recorder.md).
-- **Agents Panel** — bottom-docked live view of every AI agent
-  running on the beamline, indented by parent-child relationships.
-  Any code that calls `AgentStatusPublisher` shows up here, including
-  cross-machine workers over shared NFS home. See
+The viewer, HDF5 Viewer, side-panel plugins, and the beamline
+dropdown are always available. The AI features below ship in the
+separate [`beamline-agent`](https://github.com/mittoalb/beamline-agent)
+package (`pip install pystream[ai]` or `pip install beamline-agent`);
+without them installed, pystream runs normally minus the corresponding
+toolbar buttons.
+
+- **AI Agent** *(via beamline-agent)* — chat panel docked at the
+  bottom of the main window. Beamlines optionally contribute tools +
+  prompt-body via `provide_agent_context()`. bl32ID contributes its
+  full 32-ID tool catalog; bl19BM (empty scaffold) leaves the agent
+  in pure-chat mode. See [Röntgen](txmbot.md).
+- **Task Recorder** *(via beamline-agent)* — 🎥 toolbar button that
+  captures motor moves + detector frames as procedural demonstrations.
+  Load and replay past sessions with `caput -c`, or publish a good
+  session as a named tool for one-click future runs. Beamlines
+  contribute their task/motor map via `provide_task_templates()`;
+  otherwise a free-text mode is available. The AI agent also reads
+  every recording. See [Task Recorder](../plugins/task_recorder.md).
+- **Agents Panel** *(via beamline-agent)* — 👥 toolbar button opens
+  a live view of every AI agent running on the beamline, indented
+  by parent-child relationships. Any code that calls
+  `AgentStatusPublisher` shows up here, including cross-machine
+  workers over shared NFS home. See
   [Agents Panel](../plugins/agents_panel.md).
 
 ## Built-in beamlines

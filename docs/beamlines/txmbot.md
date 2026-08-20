@@ -1,21 +1,31 @@
 # Röntgen — AI Agent
 
-LLM chat assistant embedded in PyStream that can read live beamline state
-through a tool catalog and, with an explicit Yes/No confirmation, run
-allowlisted IOC-restart scripts.
+LLM chat assistant that mounts into PyStream and can read live beamline
+state through a tool catalog and, with an explicit Yes/No confirmation,
+run allowlisted IOC-restart scripts.
 
 ## Where it lives
 
-**Always visible** as a bottom panel in pystream's central splitter —
-regardless of which beamline (or no beamline) is active. Drag the
-splitter handle above it to change its height. Hide/show from the View
-menu; state persists across restarts.
+The AI agent is shipped as a separate package,
+[`beamline-agent`](https://github.com/mittoalb/beamline-agent). Install
+it with `pip install pystream[ai]` (or `pip install beamline-agent`
+directly) and pystream will mount its chat panel at the bottom of the
+central splitter on next launch — regardless of which beamline (or no
+beamline) is active. Drag the splitter handle above it to change its
+height. Hide/show from the View menu; state persists across restarts.
 
-This is a change from earlier versions where the agent was a bl32ID-only
-toolbar button. It is now a **core pystream feature**; beamlines
-contribute tools and prompt-body content, but the widget itself,
-protocol handling, history, and settings all live in
-[src/pystream/agent.py](../../src/pystream/agent.py).
+Without `beamline-agent` installed, pystream runs normally minus the
+🎥 Task Rec / 👥 Agents / 📜 Console toolbar buttons and the AI
+Agent dock — a strict optional dependency.
+
+Earlier versions had the agent baked into pystream as a bl32ID-only
+toolbar button, then briefly as a core `src/pystream/agent.py`. It now
+lives entirely in `beamline_agent/` (chat, sub-agent dispatch, image
+viewer, task recorder, agents panel, console). pystream provides only
+the mount point: a small `HostContext` describing what the host offers
+(live frame, plugin dispatcher, HDF5 viewer, active beamline name) —
+beamlines still contribute tools and prompt-body content the same way,
+through `provide_agent_context()`.
 
 ## Configuration
 

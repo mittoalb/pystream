@@ -494,33 +494,36 @@ class PvViewerApp(QtWidgets.QMainWindow):
         # that were added during _build_ui.
         self._central_splitter.insertWidget(0, viewer_widget)
         self.setCentralWidget(self._central_splitter)
-        # Core AI Agent panel — beamline-agnostic. Every pystream
-        # session gets this at the bottom regardless of which beamline
-        # (or none) is active. Tools + prompt body come from the active
-        # beamline's `provide_agent_context()` hook at every Send.
-        try:
-            from .agent import build_agent_panel
-            self._add_bottom_panel(build_agent_panel(self, persist_id="dock"),
-                                   "AI Agent")
-        except Exception as e:
-            if LOGGER:
-                LOGGER.warning(f"failed to add AI Agent panel: {e}")
-        # Agents diagram lives in its own window — accessible from the
-        # top toolbar (`👥 Agents` button). Kept out of the bottom-dock
-        # stack because it's a monitor rather than a chat surface and
-        # the user asked for a separate window.
 
-        # Core agent-context bootstrap — symlink every ~/Software/*
-        # AGENTS.md into ~/.pystream/docs/ so Röntgen (and any spawned
-        # sub-agent) can read project-specific headless-operation
-        # guides via its existing read_file / bash: cat tools.
-        # Beamline-agnostic; runs regardless of ACTIVE_BEAMLINE.
+        # AI-agent mount point. beamline-agent is an OPTIONAL dependency
+        # — pystream still starts (viewer + HDF5 button + plugins) if
+        # it isn't installed. When present, we hand it a HostContext
+        # describing what pystream can offer (live frame, plugin
+        # dispatcher, HDF5 viewer, active beamline name) and it
+        # returns the chat widget + accessors for the toolbar buttons.
+        self._agent_bundle = None
         try:
-            from .agent import bootstrap_agent_context_docs
-            bootstrap_agent_context_docs()
+            from beamline_agent import mount as _agent_mount, HostContext
+            from . import beamline_config
+            host = HostContext(
+                main_window       = self,
+                live_frame        = lambda: self.image_view.getImageItem().image,
+                frame_signal      = self.image_ready,
+                active_beamline   = beamline_config.ACTIVE_BEAMLINE,
+                open_hdf5_viewer  = self._open_viewer,
+                open_plugin       = self._open_beamline_plugin,
+                list_plugins      = self._list_beamline_plugins,
+            )
+            self._agent_bundle = _agent_mount(host, persist_id="dock")
+            self._add_bottom_panel(self._agent_bundle["chat_widget"], "AI Agent")
+        except ImportError as e:
+            if LOGGER:
+                LOGGER.info("beamline-agent not installed — AI features "
+                            "disabled. `pip install beamline-agent` to enable. "
+                            "(%s)", e)
         except Exception as e:
             if LOGGER:
-                LOGGER.warning(f"agent-context bootstrap failed: {e}")
+                LOGGER.warning(f"failed to mount AI Agent: {e}")
         # Give the splitter panes explicit STRETCH FACTORS (used when
         # the window is resized) AND EXPLICIT INITIAL SIZES (so the
         # drag handle has a definite starting point rather than
@@ -792,32 +795,37 @@ class PvViewerApp(QtWidgets.QMainWindow):
         btn_viewer.clicked.connect(self._open_viewer)
         top_layout.addWidget(btn_viewer)
 
-        btn_task_rec = QtWidgets.QPushButton("🎥 Task Rec")
-        btn_task_rec.setMaximumWidth(180)
-        btn_task_rec.setToolTip(
-            "Record beamline task procedures for the AI agent and for "
-            "one-click replay (alignment, sample positioning, scan "
-            "setup, anything with a motor sequence)")
-        btn_task_rec.clicked.connect(self._open_task_recorder)
-        top_layout.addWidget(btn_task_rec)
+        # Agent-owned toolbar buttons — Task Rec, Agents, Console — only
+        # show if beamline-agent is installed. Cheap check via find_spec
+        # (no actual import; that happens later during mount()).
+        import importlib.util
+        if importlib.util.find_spec("beamline_agent") is not None:
+            btn_task_rec = QtWidgets.QPushButton("🎥 Task Rec")
+            btn_task_rec.setMaximumWidth(180)
+            btn_task_rec.setToolTip(
+                "Record beamline task procedures for the AI agent and for "
+                "one-click replay (alignment, sample positioning, scan "
+                "setup, anything with a motor sequence)")
+            btn_task_rec.clicked.connect(self._open_task_recorder)
+            top_layout.addWidget(btn_task_rec)
 
-        btn_agents = QtWidgets.QPushButton("👥 Agents")
-        btn_agents.setMaximumWidth(140)
-        btn_agents.setToolTip(
-            "Live view of every AI agent running on the beamline "
-            "(pystream's Röntgen, spawned sub-agents, cross-machine "
-            "workers) with parent-child relationships")
-        btn_agents.clicked.connect(self._open_agents_dialog)
-        top_layout.addWidget(btn_agents)
+            btn_agents = QtWidgets.QPushButton("👥 Agents")
+            btn_agents.setMaximumWidth(140)
+            btn_agents.setToolTip(
+                "Live view of every AI agent running on the beamline "
+                "(pystream's Röntgen, spawned sub-agents, cross-machine "
+                "workers) with parent-child relationships")
+            btn_agents.clicked.connect(self._open_agents_dialog)
+            top_layout.addWidget(btn_agents)
 
-        btn_console = QtWidgets.QPushButton("📜 Console")
-        btn_console.setMaximumWidth(140)
-        btn_console.setToolTip(
-            "Live wire trace of every command/tool the AI agent runs "
-            "and every response it gets back. Timestamped, colored, "
-            "dark theme. Open when debugging agent behavior.")
-        btn_console.clicked.connect(self._open_agent_console)
-        top_layout.addWidget(btn_console)
+            btn_console = QtWidgets.QPushButton("📜 Console")
+            btn_console.setMaximumWidth(140)
+            btn_console.setToolTip(
+                "Live wire trace of every command/tool the AI agent runs "
+                "and every response it gets back. Timestamped, colored, "
+                "dark theme. Open when debugging agent behavior.")
+            btn_console.clicked.connect(self._open_agent_console)
+            top_layout.addWidget(btn_console)
 
         top_layout.addStretch()
         
@@ -2308,42 +2316,36 @@ class PvViewerApp(QtWidgets.QMainWindow):
         return viewer_dialog
 
     def _open_task_recorder(self):
-        """Open (or focus) the singleton Task Recorder dialog."""
-        from .task_recorder import TaskRecorderDialog
-        dlg = getattr(self, "_task_recorder_dialog", None)
-        if dlg is None or not dlg.isVisible():
-            dlg = TaskRecorderDialog(parent=self, logger=LOGGER)
-            self._task_recorder_dialog = dlg
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        """Open (or focus) the singleton Task Recorder dialog. Task
+        Recorder lives in beamline-agent — recordings train the agent —
+        so this no-ops with a gentle log when the package isn't installed."""
+        if not self._agent_bundle:
+            if LOGGER:
+                LOGGER.info("Task Recorder requested but beamline-agent "
+                            "isn't installed — pip install beamline-agent")
+            return
+        self._agent_bundle["open_task_recorder"]()
 
     def _open_agents_dialog(self):
-        """Open (or focus) the singleton Agents dialog."""
-        from .agent import AgentsDialog
-        dlg = getattr(self, "_agents_dialog", None)
-        if dlg is None or not dlg.isVisible():
-            dlg = AgentsDialog(parent=self)
-            self._agents_dialog = dlg
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        """Open (or focus) the singleton Agents dialog. Delegates to
+        the mounted beamline-agent bundle if present; no-op with a
+        gentle log otherwise."""
+        if not self._agent_bundle:
+            if LOGGER:
+                LOGGER.info("Agents dialog requested but beamline-agent "
+                            "isn't installed — pip install beamline-agent")
+            return
+        self._agent_bundle["open_agents_panel"]()
 
     def _open_agent_console(self):
-        """Open (or focus) the singleton Agent Console dialog. Re-scans
-        the widget tree on every open so AI widgets that appeared after
-        the console was first created are still picked up."""
-        from .agent import AgentConsoleDialog
-        dlg = getattr(self, "_agent_console_dialog", None)
-        if dlg is None or not dlg.isVisible():
-            dlg = AgentConsoleDialog(parent=self)
-            self._agent_console_dialog = dlg
-        else:
-            # Already open — refresh in case new agents connected since
-            dlg._wire_to_agents()
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        """Open (or focus) the singleton Agent Console dialog. See
+        `_open_agents_dialog` for the no-agent-installed behavior."""
+        if not self._agent_bundle:
+            if LOGGER:
+                LOGGER.info("Console requested but beamline-agent "
+                            "isn't installed — pip install beamline-agent")
+            return
+        self._agent_bundle["open_console"]()
 
     # ── Beamline-provided bottom panels + View menu + layout persist ──
     def _add_bottom_panel(self, widget, title: str):
