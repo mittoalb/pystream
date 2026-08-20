@@ -1317,8 +1317,13 @@ SYSTEM_PROMPT_ADDENDUM = """
 |-------------------------------|------------------------------------------------|
 | list_status_pages()           | First step for any "running / status / up?"    |
 | fetch_url(url)                | Read a registered status page (HTML→text)      |
-| read_pv(pv_name)              | Get one EPICS PV value                         |
-| caput(pv_name, value)         | Write to EPICS — Yes/No dialog before run      |
+| read_pv(pv_name)              | Get one EPICS PV value (fast; no motor logic)  |
+| bash("bl-cli motor …")        | **The right way to move a motor on 32-ID.**   |
+|                               | Layout-aware + calibration-aware + safe caget/ |
+|                               | caput. See "bl-cli — bl_gui headless" below.   |
+| caput(pv_name, value)         | Raw EPICS write — non-motor PVs only, or motor |
+|                               | fields (.SET, .STOP) that bl-cli doesn't cover.|
+|                               | Motor VAL writes go through `bl-cli motor set`.|
 | get_detector_image_stats(pv)  | Numeric detector stats (mean / sat / etc.)     |
 | view_detector_image(pv)       | SEE the live frame as a downsampled PNG        |
 | read_file(path)               | Read a config / doc / log on disk              |
@@ -1371,9 +1376,60 @@ C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
        read_pv("32id:TXMOptics:Energy_RBV") # mono energy in keV
        read_pv("32idbSP1:cam1:Acquire_RBV") # camera state
 
-D. PV writes — use caput() for ANY write. Preview the action in chat
-   first; the dialog will pop. Never use bash("caput …") — it bypasses
-   the structured confirmation.
+D. PV writes — for MOTORS on 32-ID, use `bash("bl-cli motor set <PV>
+   <VAL>")` — bl_gui is the beamline's canonical motor mover; raw
+   caput to a motor VAL is the wrong path (skips calibration, and is
+   what the user has explicitly told the agent NOT to do). For
+   non-motor PV writes, use caput() — preview in chat first; the
+   dialog pops. Never use bash("caput …") for anything the caput()
+   tool covers — it bypasses the structured confirmation.
+
+CAPUT.D2 — bl-cli — bl_gui HEADLESS (32-ID motor / layout / energy)
+
+   bl_gui ships a headless CLI, `bl-cli`, that IS the agent's motor
+   mover. Layout-aware, calibration-aware, bounded subprocess caget/
+   caput. Full reference: `read_file ~/.pystream/docs/bl_gui.md`.
+   Every subcommand accepts `--json`.
+
+   Discovery:
+     bash("bl-cli layout motors --name bl32id --json")
+       → flat list [{panel_title, label, pv, ...}]. Use this to
+         translate a user's motor LABEL ("Sample Top X") into a PV
+         instead of guessing.
+
+   Reads:
+     bash("bl-cli motor rbv <MOTOR_PV>")     — <PV>.RBV as float
+     bash("bl-cli motor get <PV>")           — caget -t on any PV
+
+   Writes (motors):
+     bash("bl-cli motor set <PV> <VAL>")     — sync caput, timeout 5s
+     bash("bl-cli motor wait <MOTOR_PV>")    — poll .DMOV to settle
+
+   Coordinated energy move (uses ZP + QG calibration table):
+     bash("bl-cli energy set <keV> --dry-run --json")  — inspect plan
+     bash("bl-cli energy set <keV> --json")            — commit
+     — For "set energy to N keV" on 32-ID, this is the RIGHT tool.
+       Do NOT raw-caput 32id:TXMOptics:EnergySet — that skips the
+       coordinated ZP + Queensgate move.
+
+   Motor-move canonical pattern:
+     1. bash("bl-cli motor rbv <PV>")             — see current RBV
+     2. Say the target in chat ("+1 mm → 1.234").
+     3. Ask the user to confirm the number (in chat text, not via
+        the caput dialog — bl-cli writes DON'T trigger the caput
+        confirmation; they go straight through). If unsure, DRY-RUN
+        with `bl-cli energy set … --dry-run --json` or just don't
+        issue the write.
+     4. bash("bl-cli motor set <PV> <VAL>") once the user says yes.
+     5. bash("bl-cli motor wait <PV>") to confirm settled.
+     6. bash("bl-cli motor rbv <PV>") to report the final position.
+
+   Common motor PVs at 32-ID (all in MILLIMETRES, not µm):
+     32idbTXM:mcs2:c1:m13   — ZP X          32idbTXM:mcs2:c1:m14 — ZP Y
+     32idbTXM:mcs2:c1:m15   — ZP Z (focus)  32idQG:m1  — QG V
+     32idQG:m2              — QG H           32idbTXM:mcs:c2:m1 — Sample TopX
+     32idbTXM:mcs:c2:m2     — Sample TopZ
+     Look up any others via `bl-cli layout motors --json`.
 
 E. Detector image checks — two complementary tools:
    * `get_detector_image_stats(pv)` for NUMERIC questions (saturation,
@@ -1423,6 +1479,15 @@ G. Network diagnostics — bash("ping -c 4 <host>"), bash("traceroute -n
 - ❌ Direct ssh to IOC hosts. Use the Control Panel.
 - ❌ Inventing IOC / PV names. Verify with a tool or ask.
 - ❌ Echoing ~/.pystream/agent_settings.json (contains api_key).
+- ❌ **Raw `caput <MOTOR_PV>.VAL <VAL>` to move a motor.** Use
+  `bash("bl-cli motor set <PV> <VAL>")` — the beamline's motor moves
+  go through bl_gui / bl-cli, not raw caput. If bl-cli isn't
+  available on this host, ASK the user; don't fall back to caput.
+- ❌ Confusing units. All 32-ID motor RBVs are in **millimetres**,
+  not micrometres. "1 µm move" = 0.001 in the caput value.
+- ❌ "1e-6 = 4499" or any other magic-number rescaling of an RBV.
+  The RBV IS the position. If the read looks tiny (~1e-6), the
+  motor is near zero — that's real, not "raw units".
 
 # 32-ID ALIGNMENT WORKFLOW (element order + slugs)
 
