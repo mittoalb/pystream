@@ -237,6 +237,35 @@ class _GuiActionHelper(QtCore.QObject):
         except Exception as ex:
             return f"{type(ex).__name__}: {ex}"
 
+    @QtCore.pyqtSlot(str, result=str)
+    def open_image_viewer(self, path: str) -> str:
+        """Open the agent-only image viewer on `path`. Returns "" on
+        success or an error message. The dialog is parented to the
+        main window so it cleans up when pystream exits."""
+        try:
+            if not path:
+                return "empty path"
+            path = os.path.expanduser(path)
+            if not os.path.isfile(path):
+                return f"file does not exist: {path}"
+            main = self._find_main()
+            if main is None:
+                return "pystream main window not reachable"
+            from .image_viewer import open_image_viewer
+            # Keep a reference on the main window so the dialog survives
+            # scope exit. A list, so multiple images can coexist.
+            store = getattr(main, "_agent_image_viewers", None)
+            if store is None:
+                store = []
+                main._agent_image_viewers = store
+            # Prune dialogs the user has closed
+            store[:] = [d for d in store if d.isVisible()]
+            dlg = open_image_viewer(path, parent=main)
+            store.append(dlg)
+            return ""
+        except Exception as ex:
+            return f"{type(ex).__name__}: {ex}"
+
 
 def _confirmation_message(name: str, args: dict) -> str:
     """Format a clear, scannable confirmation message per write tool."""

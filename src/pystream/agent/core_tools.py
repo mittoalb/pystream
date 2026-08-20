@@ -343,6 +343,41 @@ def tool_open_beamline_plugin(name: str) -> dict:
         return {"error": f"{type(ex).__name__}: {ex}", "name": name}
 
 
+def tool_view_image(path: str) -> dict:
+    """Open pystream's agent-only image viewer on a local file. Use
+    for ANY image the agent produces or is handed by the user — PNGs
+    of plots, TIFF slices scp'd from a remote host, matplotlib output,
+    numpy `.npy` arrays. Handles grayscale + colour, single-frame +
+    multi-page TIFF, 2D + 3D volumes."""
+    if not path or not path.strip():
+        return {"error": "path is required"}
+    path = os.path.expanduser(path.strip())
+    if not os.path.isfile(path):
+        return {"error": f"file does not exist: {path}"}
+    try:
+        from .subagents import WORKER_CTX
+        from PyQt5 import QtCore
+        gui_helper = getattr(WORKER_CTX, "gui_action", None)
+        if gui_helper is None:
+            return {"error": "GUI helper unavailable (tool called outside a chat turn?)"}
+        err = QtCore.QMetaObject.invokeMethod(
+            gui_helper, "open_image_viewer",
+            QtCore.Qt.BlockingQueuedConnection,
+            QtCore.Q_RETURN_ARG(str),
+            QtCore.Q_ARG(str, path),
+        )
+        if err:
+            return {"error": err, "path": path}
+        return {
+            "ok": True,
+            "path": path,
+            "message": (f"Image viewer opened on {path}. "
+                        f"User can zoom / pan / adjust levels."),
+        }
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "path": path}
+
+
 def tool_view_hdf5_file(path: str) -> dict:
     """Open pystream's embedded HDF5 viewer on a file on disk.
     Auto-detects raw-tomo vs reconstruction layout; for reconstruction
@@ -421,6 +456,36 @@ CORE_TOOLS: list[dict[str, Any]] = [
             "required": ["name"],
         },
         "func": tool_open_beamline_plugin,
+    },
+    {
+        "name": "view_image",
+        "description": (
+            "Open pystream's built-in image viewer (agent-only — NOT "
+            "on the toolbar) on a local file. Use for ANY image the "
+            "agent produces or is handed: PNG plots, TIFF slices, "
+            "matplotlib output, numpy .npy arrays, JPGs. Handles "
+            "grayscale + colour, single-frame + multi-page TIFF, "
+            "2D + 3D volumes (slider auto-appears for stacks). "
+            "\n\n"
+            "Prefer this over `view_hdf5_file` for non-HDF5 images. "
+            "Prefer this over telling the user to `xdg-open` the "
+            "file. If the file is on a REMOTE host, scp it to the "
+            "local FS first (or use `tomogui-cli view ... --out -` "
+            "streamed into a local .png). File must exist on the "
+            "machine pystream is running on."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Absolute or ~/-relative path to "
+                         "the image file. Extension is auto-detected: "
+                         ".png / .jpg / .bmp / .gif / .tif / .tiff / .npy "
+                         "and anything PIL can decode."},
+            },
+            "required": ["path"],
+        },
+        "func": tool_view_image,
     },
     {
         "name": "view_hdf5_file",
