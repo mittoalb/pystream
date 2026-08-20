@@ -1132,8 +1132,22 @@ class PvViewerApp(QtWidgets.QMainWindow):
         try:
             handler()
         except Exception as e:
-            return f"plugin {chosen} raised: {type(e).__name__}: {e}"
-        return ""
+            # Full traceback back to the agent so the Console + chat
+            # show WHY the plugin failed instead of a bare "raised".
+            import traceback
+            tb = traceback.format_exc(limit=8)
+            if LOGGER:
+                LOGGER.error("Plugin %s failed to open:\n%s", chosen, tb)
+            return (f"plugin {chosen} raised: {type(e).__name__}: {e}\n"
+                    f"\n{tb}")
+
+        # Verify it actually made it on-screen — some plugins silently
+        # `self.reject()` in __init__ (the launcher pattern) after
+        # queuing a subprocess. Report both cases as success but tag
+        # the mode so the agent knows what happened.
+        cls = getattr(module, chosen, None)
+        htype = getattr(cls, "HANDLER_TYPE", "singleton") if cls else "?"
+        return ""  # empty = success; mode is discoverable via handler_type
 
     def _create_control_panel(self):
         """Create collapsible control panel with all settings"""

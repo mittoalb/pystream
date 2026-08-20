@@ -325,9 +325,20 @@ def tool_open_beamline_plugin(name: str) -> dict:
             QtCore.Q_ARG(str, name.strip()),
         )
         if err:
-            return {"error": err, "name": name}
+            # Return the FULL error verbatim (may include a traceback)
+            # so the model surfaces the actual failure reason instead
+            # of a bare "plugin didn't open". The user needs to see
+            # missing-module errors etc. to know which env to fix.
+            return {"error": err, "name": name,
+                    "hint": ("If the error mentions a missing module "
+                             "the plugin likely needs to run in a "
+                             "different conda env — set `CONDA_ENV` "
+                             "on the plugin class and use "
+                             "pystream.launcher_utils.spawn_python_in_env().")}
         return {"ok": True, "name": name,
-                "message": f"Opened plugin {name!r} — the user can now interact with the dialog."}
+                "message": f"Opened plugin {name!r} — the user can now interact with the dialog. "
+                           "For LAUNCHER-style plugins, the dialog closes immediately after "
+                           "spawning the subprocess; the launched app is a separate window."}
     except Exception as ex:
         return {"error": f"{type(ex).__name__}: {ex}", "name": name}
 

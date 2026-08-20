@@ -2,14 +2,16 @@
 atomo Launcher for bl32ID.
 
 Launches the standalone `atomo` adaptive-exposure tomography GUI
-(~/Software/atomo/atomo/gui.py). Same subprocess-launch pattern as
-XANESGuiDialog / AutofocusLauncherDialog.
+(~/Software/atomo/atomo/gui.py) in its OWN conda env (`atomo`) so
+its heavy CUDA / torch deps don't need to be in pystream's env.
+Same subprocess-launch pattern as XANESGuiDialog / etc., but goes
+through `pystream.launcher_utils.spawn_python_in_env`.
 """
 
 import os
-import subprocess
-import sys
 from PyQt5 import QtWidgets
+
+from ...launcher_utils import spawn_python_in_env
 
 
 class AtomoLauncherDialog(QtWidgets.QDialog):
@@ -18,6 +20,9 @@ class AtomoLauncherDialog(QtWidgets.QDialog):
     BUTTON_TEXT = "aTomo"
     GROUP       = "Scans"
     HANDLER_TYPE = 'launcher'
+    # Conda env atomo's GUI runs in. Change if your install differs.
+    # None → uses pystream's env (legacy fallback).
+    CONDA_ENV   = "atomo"
 
     def __init__(self, parent=None, logger=None):
         super().__init__(parent)
@@ -43,13 +48,15 @@ class AtomoLauncherDialog(QtWidgets.QDialog):
             return
 
         try:
-            subprocess.Popen(
-                [sys.executable, script_path],
+            spawn_python_in_env(
+                env=self.CONDA_ENV,
+                script_path=script_path,
                 cwd=os.path.dirname(script_path),
-                start_new_session=True,
+                logger=self.logger,
             )
             if self.logger:
-                self.logger.info(f"Launched atomo GUI from {script_path}")
+                self.logger.info(f"Launched atomo GUI from {script_path} "
+                                 f"in conda env {self.CONDA_ENV!r}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self.parent(), "Launch Failed",
