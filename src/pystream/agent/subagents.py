@@ -69,6 +69,48 @@ SUBAGENT_KINDS: dict[str, dict] = {
         # are followed; cap prevents runaway spawn.
         "max_iterations": 8,
     },
+    "physicist": {
+        "display_name": "Physicist subagent",
+        "purpose":      ("answer physics questions related to x-ray "
+                         "optics, tomography, matter interactions, "
+                         "diffraction, coherence, detector physics"),
+        "doc_path":     "~/.pystream/docs/physicist.md",
+        "tool_names":   ["bash", "fetch_url", "read_file",
+                         "save_learned_note"],
+        "max_iterations": 6,
+    },
+    "chemist": {
+        "display_name": "Chemist subagent",
+        "purpose":      ("answer chemistry questions related to XANES / "
+                         "EXAFS interpretation, absorption edges, "
+                         "chemical composition inference"),
+        "doc_path":     "~/.pystream/docs/chemist.md",
+        "tool_names":   ["bash", "fetch_url", "read_file",
+                         "save_learned_note"],
+        "max_iterations": 6,
+    },
+    "beamline_operator": {
+        "display_name": "Beamline operator subagent",
+        "purpose":      ("perform multi-step beamline work — open "
+                         "plugins in sequence, run alignments, coordinate "
+                         "operational tasks that would burn Röntgen's "
+                         "tool rounds if done inline"),
+        "doc_path":     "~/.pystream/docs/beamline_operator.md",
+        # Broad tool set — this is the operational specialist. Note
+        # PV / plugin tools are only present if the active beamline
+        # contributes them (bl32ID does; bl19BM currently doesn't).
+        "tool_names":   [
+            "bash", "read_file",
+            "read_pv", "caput",
+            "open_beamline_plugin", "list_beamline_plugins",
+            "view_hdf5_file",
+            "view_detector_image", "get_detector_image_stats",
+            "list_status_pages", "fetch_url",
+            "list_task_recordings", "read_task_recording",
+            "save_learned_note",
+        ],
+        "max_iterations": 10,
+    },
 }
 
 

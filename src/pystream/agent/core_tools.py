@@ -626,10 +626,26 @@ or from context.
 
 ### Available kinds
 
-- **reconstruction** — tomogui-cli / tomocupy work on beamline GPU
-  nodes. Pass the user's task VERBATIM plus any details you've
-  clarified. The sub-agent has NO access to your chat history —
-  everything it needs is in your `task` argument.
+- **reconstruction** — tomogui-cli / tomocupy work on GPU nodes.
+  Trigger on "reconstruct", "run recon", "AI COR", an `_rec.h5` ask.
+- **physicist** — deep physics Q about x-ray optics, tomography
+  physics, matter interactions, diffraction, coherence, detector
+  physics. Trigger on questions with formulas, "why", "explain the
+  regime where...", or anything the user asks that needs derivation
+  rather than a PV read.
+- **chemist** — XANES / EXAFS interpretation, absorption-edge ID,
+  composition inference from x-ray data, sample-chemistry questions.
+  Trigger on "what element", "what oxidation state", "identify this
+  edge", "interpret this spectrum".
+- **beamline_operator** — MULTI-STEP beamline work (align this,
+  prep for that scan, run this sequence). Trigger when the ask is
+  operational + involves multiple plugin opens / PV writes / state
+  transitions. NOT for a single `open CoR` or `read one PV` — do
+  those yourself.
+
+Pass the user's ask VERBATIM to whichever kind you pick, plus any
+context you've clarified. Sub-agents have NO chat history —
+everything they need is in `task`.
 
 ### The mental check before every spawn call
 
