@@ -774,6 +774,10 @@ class DetectorControlDialog(QtWidgets.QDialog):
             "vertical_flip": self.vertical_flip_check.isChecked(),
         })
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._load_current_values()
+
     def closeEvent(self, event):
         self._persist_settings()
         self._roi_erase()
