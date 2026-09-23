@@ -1216,6 +1216,10 @@ class QGMaxDialog(QtWidgets.QDialog):
         else:
             return self.motor2_step_input.value()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_status_display()
+
     def closeEvent(self, event):
         """Handle dialog close event."""
         # Set status PV to Done when closing
