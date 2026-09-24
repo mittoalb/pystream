@@ -19,6 +19,11 @@ dependencies = [
   "pyqtgraph>=0.13.0",
   "Pillow>=9.0",
   "h5py>=3.0",
+  # PVHub (verified caputs with monitor-echo) + AppBus (intra-app Qt
+  # signals). Every plugin/dialog goes through self.hub / self.bus
+  # instead of subprocess caget/caput or ~/.pystream/*_request.json
+  # handshakes — see CLAUDE.md.
+  "bmsg @ git+https://github.com/mittoalb/bmsg.git",
 ]
 
 [project.optional-dependencies]
