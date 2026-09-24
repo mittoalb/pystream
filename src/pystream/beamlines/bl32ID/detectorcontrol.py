@@ -6,7 +6,6 @@ Controls detector binning and ROI by:
 - Drawing an ROI on the image that sets CropLeft/Right/Top/Bottom and applies via Crop PV
 """
 
-import subprocess
 import logging
 from typing import Optional
 import pyqtgraph as pg
@@ -27,16 +26,26 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self.setWindowTitle("Detector Control - bl32ID")
         self.resize(500, 600)
 
+        # PVHub is required — pystream sets it on PvViewerApp at startup.
+        # We hold a reference so PV reads/writes never fall back to raw
+        # subprocess caget/caput (see bmsg/README.md convention).
+        self.hub = parent.hub if parent is not None and hasattr(parent, 'hub') else None
+
         self.roi = None
         self.roi_enabled = False
         self._last_image = None
         self._max_sizex = None
         self._max_sizey = None
         self._center_overlays = []  # crosshairs for ROI center + image center
+        self._bound_monitors = []   # [(PVMonitor, slot), ...] for teardown on prefix change
 
         self._init_ui()
         self._restore_settings()
-        self._load_current_values()
+        # Subscribe now; monitors keep spin-box widgets in sync with the IOC
+        # for the life of the dialog, no snapshot-and-cache.
+        self._resubscribe_pvs()
+        self._read_binning()
+        self._read_roi()
 
     def _init_ui(self):
         """Initialize the user interface."""
@@ -58,6 +67,9 @@ class DetectorControlDialog(QtWidgets.QDialog):
         prefix_layout = QtWidgets.QFormLayout()
 
         self.pv_prefix_input = QtWidgets.QLineEdit("32idbSP1:cam1")
+        # Editing the prefix re-points all monitors at the new PVs so the
+        # spin boxes track a different camera without app restart.
+        self.pv_prefix_input.editingFinished.connect(self._resubscribe_pvs)
         prefix_layout.addRow("Camera PV Prefix:", self.pv_prefix_input)
 
         self.crop_prefix_input = QtWidgets.QLineEdit("32id:TXMOptics")
@@ -192,51 +204,106 @@ class DetectorControlDialog(QtWidgets.QDialog):
         timestamp = time.strftime("%H:%M:%S")
         self.log_text.append(f"[{timestamp}] {message}")
 
-    def _get_pv_value(self, pv_name: str) -> Optional[str]:
-        """Get PV value using caget."""
-        try:
-            result = subprocess.run(
-                ['caget', '-t', pv_name],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-            else:
-                self._log_message(f"Failed to get PV {pv_name}: {result.stderr}")
-                return None
-        except Exception as e:
-            self._log_message(f"Error getting PV {pv_name}: {e}")
+    def _get_pv_value(self, pv_name: str):
+        """Return the latest monitor-cached value for pv_name (or None).
+
+        Kept as a thin wrapper so the rest of the file reads unchanged.
+        Never falls back to a fresh caget — if the PV isn't subscribed
+        yet, subscribes and returns whatever the cache has (initially
+        None; the first monitor push arrives asynchronously).
+        """
+        if self.hub is None:
             return None
+        mon = self.hub.subscribe(pv_name)
+        return mon.value
 
     def _set_pv_value(self, pv_name: str, value) -> bool:
-        """Set PV value using caput with -c flag to wait for callback.
-
-        Args:
-            pv_name: PV name to set
-            value: Value to set
-        """
-        try:
-            # Use caput -c to wait for callback completion
-            # This ensures the value is processed before returning
-            result = subprocess.run(
-                ['caput', '-c', pv_name, str(value)],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return True
-            else:
-                self._log_message(f"Failed to set PV {pv_name}: {result.stderr}")
-                return False
-        except Exception as e:
-            self._log_message(f"Error setting PV {pv_name}: {e}")
+        """caput -c and verify via the monitor. Logs the mismatch on
+        silent IOC rejects (Acquire lock, autosave revert, competing
+        writer) so the failure is visible instead of looking like
+        success."""
+        if self.hub is None:
+            self._log_message(f"No PVHub available; cannot set {pv_name}")
             return False
+        ok = self.hub.put(pv_name, value, verify_timeout=2.0)
+        if not ok:
+            actual = self.hub.value(pv_name)
+            self._log_message(
+                f"WARN {pv_name}: wrote {value} but IOC now shows {actual} "
+                f"(check Acquire state / autosave / competing writer)"
+            )
+        return ok
+
+    def _resubscribe_pvs(self):
+        """(Re)bind live monitors for all camera + crop PVs currently
+        named in the prefix inputs. Call when the user edits either
+        prefix so widgets track the newly-selected PVs."""
+        if self.hub is None:
+            return
+        for mon, slot in self._bound_monitors:
+            try:
+                mon.valueChanged.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        self._bound_monitors = []
+
+        def bind(pv: str, slot):
+            mon = self.hub.subscribe(pv)
+            mon.valueChanged.connect(slot)
+            self._bound_monitors.append((mon, slot))
+
+        prefix = self.pv_prefix_input.text()
+
+        # BinX / BinY drive the spin boxes and also (with MaxSizeX/Y_RBV)
+        # the unbinned-sensor-size cache used by _apply_binning.
+        bind(f"{prefix}:BinX", self._on_binx_update)
+        bind(f"{prefix}:BinY", self._on_biny_update)
+        bind(f"{prefix}:MaxSizeX_RBV", self._on_max_size_x)
+        bind(f"{prefix}:MaxSizeY_RBV", self._on_max_size_y)
+
+    def _on_binx_update(self, v):
+        try:
+            self.binx_spin.setValue(int(float(v)))
+        except (TypeError, ValueError):
+            pass
+        self._refresh_max_size_cache()
+
+    def _on_biny_update(self, v):
+        try:
+            self.biny_spin.setValue(int(float(v)))
+        except (TypeError, ValueError):
+            pass
+        self._refresh_max_size_cache()
+
+    def _on_max_size_x(self, _v):
+        self._refresh_max_size_cache()
+
+    def _on_max_size_y(self, _v):
+        self._refresh_max_size_cache()
+
+    def _refresh_max_size_cache(self):
+        """MaxSizeX/Y_RBV is reported in *binned* units on this camera —
+        recover unbinned sensor size by multiplying with the current
+        BinX/Y. Called whenever any of those four monitors ticks."""
+        prefix = self.pv_prefix_input.text()
+        binx = self._get_pv_value(f"{prefix}:BinX")
+        biny = self._get_pv_value(f"{prefix}:BinY")
+        max_x = self._get_pv_value(f"{prefix}:MaxSizeX_RBV")
+        max_y = self._get_pv_value(f"{prefix}:MaxSizeY_RBV")
+        try:
+            if max_x is not None and binx is not None:
+                self._max_sizex = int(float(max_x)) * int(float(binx))
+            if max_y is not None and biny is not None:
+                self._max_sizey = int(float(max_y)) * int(float(biny))
+        except (TypeError, ValueError):
+            return
+        self._refresh_computed_sizes()
 
     def _load_current_values(self):
-        """Load current binning and ROI values from PVs."""
+        """Kept for backward compat; monitors keep values fresh, this
+        just triggers a resubscribe (in case the prefix changed) and
+        a synchronous read of any values already cached."""
+        self._resubscribe_pvs()
         self._read_binning()
         self._read_roi()
 
@@ -774,11 +841,10 @@ class DetectorControlDialog(QtWidgets.QDialog):
             "vertical_flip": self.vertical_flip_check.isChecked(),
         })
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._load_current_values()
-
     def closeEvent(self, event):
+        # Note: no showEvent refresh anymore — PVHub monitors keep the
+        # spin boxes tracking the IOC live, so re-opening the dialog
+        # already shows current values. See bmsg convention.
         self._persist_settings()
         self._roi_erase()
         self._uninstall_filter()
