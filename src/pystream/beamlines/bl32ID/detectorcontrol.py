@@ -287,66 +287,79 @@ class DetectorControlDialog(QtWidgets.QDialog):
     def _apply_binning(self):
         """Apply BinX/BinY targeting the FULL detector frame.
 
-        Per ADKinetix (and standard ADCore): ADSizeX is in *unbinned*
-        sensor pixels. Full-frame at any binning is:
-            MinX=0, MinY=0, SizeX=MaxSizeX_RBV, SizeY=MaxSizeY_RBV
-        The output image dims are then SizeX/BinX × SizeY/BinY (i.e.
-        the binning "applies to" the full sensor).
+        Oryx / ADSpinnaker: binning is HARDWARE. Writing BinX causes
+        the sensor to natively output fewer pixels, and MaxSizeX_RBV
+        auto-updates to reflect the new max (6464→3232→1616 for
+        bin 1→2→4). SizeX is in the current post-bin pixel space, so
+        full frame = SizeX = MaxSizeX_RBV (current), no math.
 
-        Order matters: MinX/MinY first, then Bin, then Size. caput -c
-        makes each wait for its put-callback so the writes serialize
-        instead of racing.
+        Order:
+          1. MinX=0, MinY=0 (clear any prior ROI so BinX write isn't
+             constrained by a leftover slice).
+          2. BinX, BinY (driver internally recomputes MaxSizeX/Y_RBV).
+          3. Re-read the new MaxSizeX/Y_RBV.
+          4. SizeX = new MaxSizeX_RBV, SizeY = new MaxSizeY_RBV.
+        caput -c between steps so each write settles before the next.
         """
+        import subprocess, time as _time
         prefix = self.pv_prefix_input.text()
         binx = self.binx_spin.value()
         biny = self.biny_spin.value()
 
-        if self._max_sizex is None or self._max_sizey is None:
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "Max sensor size not available. Click 'Read Current' first."
-            )
-            return
-
-        # SizeX/Y are the unbinned sensor width/height, ALWAYS full — never
-        # divided by binning. Binning applies to this region on output.
-        sizex = self._max_sizex
-        sizey = self._max_sizey
-
-        success = True
-        # Explicit ordering: reset ROI to full first, then binning, then size.
+        # 1-2. MinX=0/MinY=0, then BinX/BinY. Order in single loop, blocking.
         for pv, val in [
-            (f"{prefix}:MinX",  0),
-            (f"{prefix}:MinY",  0),
-            (f"{prefix}:BinX",  binx),
-            (f"{prefix}:BinY",  biny),
-            (f"{prefix}:SizeX", sizex),
-            (f"{prefix}:SizeY", sizey),
+            (f"{prefix}:MinX", 0),
+            (f"{prefix}:MinY", 0),
+            (f"{prefix}:BinX", binx),
+            (f"{prefix}:BinY", biny),
         ]:
             if not self._set_pv_value(pv, val):
-                success = False
+                self._log_message(f"WARN {pv}={val} caput failed")
 
-        out_w = sizex // max(1, binx)
-        out_h = sizey // max(1, biny)
-        if success:
-            self.sizex_spin.setValue(sizex)
-            self.sizey_spin.setValue(sizey)
-            self._log_message(
-                f"Applied full frame: MinX=0 MinY=0 BinX={binx} BinY={biny} "
-                f"SizeX={sizex} SizeY={sizey} → output image {out_w}×{out_h}"
-            )
-            QtWidgets.QMessageBox.information(
-                self, "Success",
-                f"Full-frame binning applied:\n"
-                f"BinX={binx}, BinY={biny}\n"
-                f"Region SizeX={sizex}, SizeY={sizey} (unbinned)\n"
-                f"Output image: {out_w} × {out_h}"
-            )
-        else:
+        # 3. Give the driver a beat to update MaxSizeX/Y_RBV after the bin change.
+        _time.sleep(0.2)
+
+        # Re-read MaxSizeX/Y_RBV FRESH from the IOC (don't trust the
+        # cached self._max_sizex — it might reflect the pre-bin value).
+        try:
+            max_x = int(float(subprocess.run(
+                ["caget", "-t", f"{prefix}:MaxSizeX_RBV"],
+                capture_output=True, text=True, timeout=2.0,
+            ).stdout.strip()))
+            max_y = int(float(subprocess.run(
+                ["caget", "-t", f"{prefix}:MaxSizeY_RBV"],
+                capture_output=True, text=True, timeout=2.0,
+            ).stdout.strip()))
+        except Exception as e:
+            self._log_message(f"Failed to re-read MaxSizeX/Y_RBV: {e}")
             QtWidgets.QMessageBox.warning(
                 self, "Error",
-                "Failed to apply binning. Check log for details."
-            )
+                "Could not re-read MaxSizeX/Y_RBV after setting binning.")
+            return
+
+        # 4. Set SizeX/SizeY to the new max (full frame at this binning).
+        self._max_sizex = max_x
+        self._max_sizey = max_y
+        for pv, val in [
+            (f"{prefix}:SizeX", max_x),
+            (f"{prefix}:SizeY", max_y),
+        ]:
+            if not self._set_pv_value(pv, val):
+                self._log_message(f"WARN {pv}={val} caput failed")
+
+        self.sizex_spin.setValue(max_x)
+        self.sizey_spin.setValue(max_y)
+        self._log_message(
+            f"Applied full frame: BinX={binx} BinY={biny}  "
+            f"MaxSizeX/Y_RBV → {max_x}×{max_y}  "
+            f"SizeX/Y ← {max_x}×{max_y}"
+        )
+        QtWidgets.QMessageBox.information(
+            self, "Success",
+            f"Full-frame binning applied:\n"
+            f"BinX={binx}, BinY={biny}\n"
+            f"Output image: {max_x} × {max_y}"
+        )
 
     def _read_roi(self):
         """Read current ROI values from crop PVs."""
