@@ -9,6 +9,7 @@ Monitors the image mean value and optimizes two motors to maximize it.
 
 import json
 import os
+import subprocess
 import logging
 import time
 from typing import Optional, Tuple
@@ -54,27 +55,9 @@ class QGMaxBackgroundWatcher(QtCore.QObject):
             return 0.0
 
     def _ensure_dialog(self):
-        """Return the singleton QGMaxDialog. Reuses the instance the
-        PvViewerApp caches for the toolbar-click path so background
-        triggers and the visible dialog share ONE state — same
-        `auto_mode_enabled`, same motor PVs, same timers, same
-        `optimization_active`. Prevents the historical "two disjoint
-        instances" drift where XANES2D toggled a hidden clone the
-        user could not see.
-        """
-        cached = getattr(self._parent_window, "qgmaxdialog_instance", None)
-        if cached is not None:
-            self._dialog = cached
-            return cached
         if self._dialog is None:
             logger = getattr(self._parent_window, "logger", None)
             self._dialog = QGMaxDialog(parent=self._parent_window, logger=logger)
-            # Publish as the parent's singleton so a subsequent toolbar
-            # click adopts the same instance instead of creating another.
-            try:
-                self._parent_window.qgmaxdialog_instance = self._dialog
-            except Exception:
-                pass
             # Do NOT show it — background mode.
         return self._dialog
 
@@ -154,12 +137,6 @@ class QGMaxDialog(QtWidgets.QDialog):
         self.logger = logger
         self.setWindowTitle("QGMax")
         self.resize(600, 700)
-
-        # PVHub / AppBus from PvViewerApp. See bmsg/README.md convention.
-        # Reads become monitor-cached, writes are verified via caput -c
-        # + monitor-echo instead of fire-and-forget subprocess caput.
-        self.hub = parent.hub if parent is not None and hasattr(parent, 'hub') else None
-        self.bus = parent.bus if parent is not None and hasattr(parent, 'bus') else None
 
         self.is_running = False
         self.optimization_timer = QtCore.QTimer()
@@ -450,38 +427,40 @@ class QGMaxDialog(QtWidgets.QDialog):
             self.logger.info(f"MeanOptimizer: {message}")
 
     def _get_pv_value(self, pv_name: str) -> Optional[float]:
-        """Return the latest monitor-cached float value for pv_name.
-
-        Subscribes on first use; subsequent calls read from the cache
-        that the pvaccess monitor keeps fresh. No blocking caget round-
-        trip on every read.
-        """
-        if self.hub is None:
-            return None
-        mon = self.hub.subscribe(pv_name)
-        v = mon.value
-        if v is None:
-            return None
+        """Get PV value using caget."""
         try:
-            return float(v)
-        except (TypeError, ValueError):
-            self._log_message(f"PV {pv_name} value {v!r} is not numeric")
+            result = subprocess.run(
+                ['caget', '-t', pv_name],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return float(result.stdout.strip())
+            else:
+                self._log_message(f"Failed to get PV {pv_name}: {result.stderr}")
+                return None
+        except Exception as e:
+            self._log_message(f"Error getting PV {pv_name}: {e}")
             return None
 
     def _set_pv_value(self, pv_name: str, value: float) -> bool:
-        """caput -c and verify via the monitor. Silent IOC rejects
-        (Acquire lock, autosave revert, competing writer) become False
-        here rather than being reported as success."""
-        if self.hub is None:
-            self._log_message(f"No PVHub available; cannot set {pv_name}")
-            return False
-        ok = self.hub.put(pv_name, value, verify_timeout=2.0)
-        if not ok:
-            actual = self.hub.value(pv_name)
-            self._log_message(
-                f"WARN {pv_name}: wrote {value} but IOC now shows {actual}"
+        """Set PV value using caput."""
+        try:
+            result = subprocess.run(
+                ['caput', '-c', pv_name, str(value)],
+                capture_output=True,
+                text=True,
+                timeout=10
             )
-        return ok
+            if result.returncode == 0:
+                return True
+            else:
+                self._log_message(f"Failed to set PV {pv_name}: {result.stderr}")
+                return False
+        except Exception as e:
+            self._log_message(f"Error setting PV {pv_name}: {e}")
+            return False
 
     def _check_trigger_pv(self):
         """If an external client (e.g. the XANES2D scan) wrote a START request
@@ -520,15 +499,16 @@ class QGMaxDialog(QtWidgets.QDialog):
         self._run_optimization_cycle()
 
     def _set_status_pv(self, status: str):
-        """Set the status PV. Non-blocking best-effort — the value is
-        for external observers, so a failure here is not fatal."""
-        if self.hub is None:
-            return
-        # verify=False so the caput is fire-and-forget on the Qt side
-        # (external observers still see the change via their own monitor).
+        """Set the status PV to RUN or STOP."""
         try:
-            self.hub.put(self.status_pv, status, verify=False)
+            subprocess.run(
+                ['caput', self.status_pv, status],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
         except Exception:
+            # Don't log PV errors to avoid spam, just fail silently
             pass
 
     def _get_image(self) -> Optional[np.ndarray]:
@@ -691,14 +671,18 @@ class QGMaxDialog(QtWidgets.QDialog):
 
         hdf5_location_pv = self.hdf5_location_pv_input.text()
 
-        # Get current value from the monitor cache (first call subscribes).
+        # Get current value
         try:
-            if self.hub is None:
+            result = subprocess.run(
+                ['caget', '-t', hdf5_location_pv],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode != 0:
                 return
-            raw = self.hub.subscribe(hdf5_location_pv).value
-            if raw is None:
-                return
-            current_value = str(raw).strip()
+
+            current_value = result.stdout.strip()
 
             # State machine logic:
             # 1. Count /exchange/data occurrences
@@ -740,19 +724,24 @@ class QGMaxDialog(QtWidgets.QDialog):
 
     def _pause_tomoscan(self):
         """Set TomoScan to Pause and wait for /exchange/Pause location."""
+        # Set TomoScan to Pause to stop the scan
         tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
-        if self.hub is None:
-            self._log_message("Warning: no PVHub, cannot pause TomoScan")
-            return
-        # verify=False because the enum RBV may echo back the resolved
-        # string, not "PAUSE" — waiting_for_pause_location handles the
-        # confirmation via the HDF5 location state machine anyway.
-        if self.hub.put(tomoscan_pause_pv, 'PAUSE', verify=False):
-            self._log_message("Set TomoScan:Pause = Pause")
-            self.waiting_for_pause_location = True
-            self.status_label.setText("Status: Waiting for TomoScan to pause")
-        else:
-            self._log_message("Warning: Failed to set TomoScan:Pause = Pause")
+        try:
+            result = subprocess.run(
+                ['caput', tomoscan_pause_pv, 'PAUSE'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                self._log_message("Set TomoScan:Pause = Pause")
+                # Set flag to wait for /exchange/Pause location
+                self.waiting_for_pause_location = True
+                self.status_label.setText("Status: Waiting for TomoScan to pause")
+            else:
+                self._log_message(f"Warning: Failed to set TomoScan:Pause = Pause: {result.stderr}")
+        except Exception as e:
+            self._log_message(f"Warning: Failed to pause TomoScan: {e}")
 
     def _toggle_optimization(self, checked: bool):
         """Toggle continuous optimization on/off."""
@@ -1177,15 +1166,29 @@ class QGMaxDialog(QtWidgets.QDialog):
         # If in automated mode, resume TomoScan
         if self.auto_mode_enabled:
             tomoscan_pause_pv = self.tomoscan_pause_pv_input.text()
-            if self.hub is not None:
-                # verify=False for the same enum-echo reason as _pause_tomoscan.
-                if self.hub.put(tomoscan_pause_pv, 'GO', verify=False):
+            try:
+                result = subprocess.run(
+                    ['caput', tomoscan_pause_pv, 'GO'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if result.returncode == 0:
                     self._log_message("Set TomoScan:Pause = Go")
-                    actual = self.hub.value(tomoscan_pause_pv)
-                    if actual is not None:
-                        self._log_message(f"TomoScan:Pause monitor now = {actual}")
+                    # Verify the value was set
+                    verify_result = subprocess.run(
+                        ['caget', '-t', tomoscan_pause_pv],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                    if verify_result.returncode == 0:
+                        actual_value = verify_result.stdout.strip()
+                        self._log_message(f"Verified TomoScan:Pause = {actual_value}")
                 else:
-                    self._log_message("Warning: Failed to set TomoScan:Pause = Go")
+                    self._log_message(f"Warning: Failed to set TomoScan:Pause = Go: {result.stderr}")
+            except Exception as e:
+                self._log_message(f"Warning: Failed to resume TomoScan: {e}")
 
         # Report final results
         motor1_improvement = self.motor_max_mean.get('motor1', 0) - self.motor_last_mean.get('motor1', 0)
@@ -1218,43 +1221,20 @@ class QGMaxDialog(QtWidgets.QDialog):
         self._update_status_display()
 
     def closeEvent(self, event):
-        """Handle dialog close event.
-
-        Historically this stopped the auto-mode / trigger timers but
-        left `auto_mode_enabled` / `is_running` set to True. Since the
-        singleton stays alive, a later `_external_set_auto_mode(True)`
-        then short-circuited on the equality guard and never restarted
-        the timer — auto mode looked armed but polled nothing.
-
-        Fix: whenever we stop a timer here, also reset the matching
-        state flag and button, so re-enabling actually re-arms.
-        """
+        """Handle dialog close event."""
         # Set status PV to Done when closing
         self._set_status_pv("Done")
 
         # Stop trigger polling
         self.trigger_poll_timer.stop()
 
-        # Stop automated mode if running — AND clear state so a later
-        # _external_set_auto_mode(True) actually re-enables it.
+        # Stop automated mode if running
         if self.auto_mode_enabled:
             self.hdf5_location_monitor_timer.stop()
-            self.auto_mode_enabled = False
-            try:
-                self.auto_mode_btn.setChecked(False)
-                self.auto_mode_btn.setText("Enable Automated Mode")
-            except Exception:
-                pass
 
-        # Same reset for continuous-optimization mode.
+        # Stop optimization if running
         if self.is_running:
             self.optimization_timer.stop()
-            self.is_running = False
-            try:
-                self.toggle_btn.setChecked(False)
-                self.toggle_btn.setText("Start Continuous Optimization")
-            except Exception:
-                pass
             self._log_message("Stopped optimization (dialog closed)")
 
         self._persist_settings()

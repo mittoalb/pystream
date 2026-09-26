@@ -50,9 +50,6 @@ except (ImportError, AttributeError):
 
 from .logger import setup_custom_logger, log_exception
 
-from bmsg import PVHub
-
-from .app_bus import PystreamBus
 from .plugins.roi import ROIManager
 from .plugins.line import LineProfileManager
 from .plugins.ellipse import EllipseROIManager
@@ -395,16 +392,8 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 display_bin: int = 0, hist_fps: float = 4.0,
                 auto_every: int = 10):
         super().__init__()
-
+        
         self.setWindowTitle("pystream")
-
-        # Shared PV monitors and intra-app event bus. Every plugin/dialog
-        # spawned by pystream should pull PV values via self.hub.subscribe/
-        # self.hub.put and exchange in-process events via self.bus signals
-        # — never via direct subprocess caget/caput or via
-        # ~/.pystream/*_request.json handshakes. See bmsg/README.md.
-        self.hub = PVHub(parent=self)
-        self.bus = PystreamBus(parent=self)
 
         screen = QtWidgets.QApplication.desktop().availableGeometry()
         self.is_small_screen = screen.width() < 1600 or screen.height() < 1000
