@@ -356,20 +356,17 @@ class DetectorControlDialog(QtWidgets.QDialog):
     def _apply_binning(self):
         """Apply BinX/BinY targeting the FULL detector frame.
 
-        Sequence (matters for AreaDetector):
-          1. Stop Acquire — the driver silently rejects size/binning
-             writes while Acquire=1.
-          2. MinX=0, MinY=0 — clear any prior ROI so binning applies
-             to the whole sensor, not to a leftover slice.
-          3. BinX, BinY.
-          4. SizeX = MaxSizeX_RBV // BinX, SizeY = MaxSizeY_RBV // BinY
-             (SizeX/Y are in *binned* pixels per ADCore convention).
-          5. Restart Acquire if we stopped it.
+        Fire the six caputs sequentially with a small settle delay
+        between them, then read every RBV back so the log shows what
+        the IOC actually accepted. Deliberately does NOT cycle Acquire
+        or block on per-write verify — those were more brittle than
+        useful. When the driver silently rejects a write, the readback
+        line at the end shows it plainly.
 
-        Every write is verified via monitor echo; a silent revert
-        (autosave, competing writer) surfaces as a WARN and the whole
-        apply is reported as failed rather than falsely succeeded.
+        Order matters: MinX/MinY first (so bin isn't constrained by a
+        leftover ROI), then BinX/BinY, then SizeX/SizeY = MaxSize // Bin.
         """
+        import time as _time
         prefix = self.pv_prefix_input.text()
         binx = self.binx_spin.value()
         biny = self.biny_spin.value()
@@ -377,65 +374,59 @@ class DetectorControlDialog(QtWidgets.QDialog):
         if self._max_sizex is None or self._max_sizey is None:
             QtWidgets.QMessageBox.warning(
                 self, "Error",
-                "Max sensor size not available yet. The monitor for "
-                "MaxSizeX_RBV / MaxSizeY_RBV hasn't received the first "
-                "update — check the camera PV prefix and try again."
+                "Max sensor size not available yet. The MaxSizeX_RBV / "
+                "MaxSizeY_RBV monitor hasn't received a first update — "
+                "check the camera PV prefix and network reachability."
             )
             return
 
         sizex = self._max_sizex // binx
         sizey = self._max_sizey // biny
 
-        # 1. Snapshot & stop Acquire
-        was_acquiring = 0
-        acq_pv = f"{prefix}:Acquire"
-        cur = self._get_pv_value(acq_pv)
-        try:
-            was_acquiring = int(float(cur)) if cur is not None else 0
-        except (TypeError, ValueError):
-            was_acquiring = 0
-        if was_acquiring:
-            self._log_message("Stopping Acquire before size/bin change")
-            self._set_pv_value(acq_pv, 0)
+        self._log_message(
+            f"Apply full-frame → MinX=0 MinY=0  BinX={binx} BinY={biny}  "
+            f"SizeX={sizex} SizeY={sizey}  (sensor={self._max_sizex}×{self._max_sizey})"
+        )
 
-        # 2-4. Reset ROI to full frame, then set bin+size
-        success = True
-        for pv, val in [
+        writes = [
             (f"{prefix}:MinX",  0),
             (f"{prefix}:MinY",  0),
             (f"{prefix}:BinX",  binx),
             (f"{prefix}:BinY",  biny),
             (f"{prefix}:SizeX", sizex),
             (f"{prefix}:SizeY", sizey),
-        ]:
-            if not self._set_pv_value(pv, val):
-                success = False
+        ]
 
-        # 5. Restart Acquire if we stopped it
-        if was_acquiring:
-            self._log_message("Restarting Acquire")
-            self._set_pv_value(acq_pv, 1)
+        for pv, val in writes:
+            # verify=False: caput -c already waits for put-callback.
+            # AD drivers can be slow to echo back onto a monitor
+            # (esp. after size/bin changes trigger internal
+            # reconfigure), so blocking a verify loop just stalls.
+            ok = self.hub.put(pv, val, verify=False) if self.hub else False
+            if not ok:
+                self._log_message(f"  caput {pv}={val} FAILED (see terminal for stderr)")
+            _time.sleep(0.05)  # small settle so consecutive writes don't race
 
-        if success:
-            self.sizex_spin.setValue(sizex)
-            self.sizey_spin.setValue(sizey)
-            self._log_message(
-                f"Applied full-frame: BinX={binx} BinY={biny} "
-                f"MinX=0 MinY=0 SizeX={sizex} SizeY={sizey}"
-            )
-            QtWidgets.QMessageBox.information(
-                self, "Success",
-                f"Binning applied (full frame):\n"
-                f"BinX={binx}, BinY={biny}\n"
-                f"MinX=0, MinY=0\n"
-                f"SizeX={sizex}, SizeY={sizey}"
-            )
-        else:
-            QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "Some writes did not stick — see log for the WARN line(s) "
-                "identifying which PV was reverted."
-            )
+        # Readback everything after — this is the actual truth check.
+        _time.sleep(0.2)
+        rb = {
+            "MinX":  self._get_pv_value(f"{prefix}:MinX"),
+            "MinY":  self._get_pv_value(f"{prefix}:MinY"),
+            "BinX":  self._get_pv_value(f"{prefix}:BinX"),
+            "BinY":  self._get_pv_value(f"{prefix}:BinY"),
+            "SizeX": self._get_pv_value(f"{prefix}:SizeX"),
+            "SizeY": self._get_pv_value(f"{prefix}:SizeY"),
+        }
+        self._log_message(
+            f"Readback: MinX={rb['MinX']} MinY={rb['MinY']}  "
+            f"BinX={rb['BinX']} BinY={rb['BinY']}  "
+            f"SizeX={rb['SizeX']} SizeY={rb['SizeY']}"
+        )
+        try:
+            self.sizex_spin.setValue(int(float(rb['SizeX'])))
+            self.sizey_spin.setValue(int(float(rb['SizeY'])))
+        except (TypeError, ValueError):
+            pass
 
     def _read_roi(self):
         """Read current ROI values from crop PVs."""
@@ -867,63 +858,51 @@ class DetectorControlDialog(QtWidgets.QDialog):
     def _remove_roi(self):
         """Reset to full detector frame at the CURRENT binning.
 
-        SizeX/Y are in binned pixels, so writing MaxSizeX_RBV directly
-        overshoots the valid range whenever BinX>1. Divide by the
-        current bin (as _apply_binning does) so the write always
-        succeeds.
+        SizeX/Y are in binned pixels, so we divide MaxSize by the
+        current Bin (writing MaxSize directly overshoots the valid
+        range whenever Bin>1).
         """
+        import time as _time
         prefix = self.pv_prefix_input.text()
         max_x = self._get_pv_value(f"{prefix}:MaxSizeX_RBV")
         max_y = self._get_pv_value(f"{prefix}:MaxSizeY_RBV")
         binx = self._get_pv_value(f"{prefix}:BinX")
         biny = self._get_pv_value(f"{prefix}:BinY")
-        if not max_x or not max_y:
-            QtWidgets.QMessageBox.warning(self, "Error",
-                "Could not read detector maximum size (MaxSizeX/Y_RBV).")
-            return
         try:
             mx = int(float(max_x)); my = int(float(max_y))
             bx = max(1, int(float(binx or 1)))
             by = max(1, int(float(biny or 1)))
         except (TypeError, ValueError):
             QtWidgets.QMessageBox.warning(self, "Error",
-                "MaxSizeX/Y_RBV or BinX/Y is not numeric.")
+                "MaxSizeX/Y_RBV or BinX/Y is not numeric — check PV prefix "
+                "and that monitors have received their first update.")
             return
         sizex = mx // bx
         sizey = my // by
 
-        # Stop Acquire around the writes (same reason as _apply_binning).
-        acq_pv = f"{prefix}:Acquire"
-        cur = self._get_pv_value(acq_pv)
-        try:
-            was_acquiring = int(float(cur)) if cur is not None else 0
-        except (TypeError, ValueError):
-            was_acquiring = 0
-        if was_acquiring:
-            self._set_pv_value(acq_pv, 0)
+        self._log_message(
+            f"Full frame at bin {bx}×{by} → MinX=0 MinY=0 "
+            f"SizeX={sizex} SizeY={sizey}"
+        )
+        for pv, val in [
+            (f"{prefix}:MinX",  0),
+            (f"{prefix}:MinY",  0),
+            (f"{prefix}:SizeX", sizex),
+            (f"{prefix}:SizeY", sizey),
+        ]:
+            ok = self.hub.put(pv, val, verify=False) if self.hub else False
+            if not ok:
+                self._log_message(f"  caput {pv}={val} FAILED (see terminal for stderr)")
+            _time.sleep(0.05)
 
-        success = all([
-            self._set_pv_value(f"{prefix}:MinX", 0),
-            self._set_pv_value(f"{prefix}:MinY", 0),
-            self._set_pv_value(f"{prefix}:SizeX", sizex),
-            self._set_pv_value(f"{prefix}:SizeY", sizey),
-        ])
-
-        if was_acquiring:
-            self._set_pv_value(acq_pv, 1)
-
-        if success:
-            self._log_message(
-                f"Reset to full frame at bin {bx}×{by}: "
-                f"SizeX={sizex} SizeY={sizey}"
-            )
-            QtWidgets.QMessageBox.information(self, "Success",
-                f"Detector reset to full frame at bin {bx}×{by}:\n"
-                f"SizeX={sizex}, SizeY={sizey}")
-            self._read_roi()
-        else:
-            QtWidgets.QMessageBox.warning(self, "Error",
-                "Some writes did not stick — see log for the WARN line(s).")
+        _time.sleep(0.2)
+        self._log_message(
+            f"Readback: MinX={self._get_pv_value(f'{prefix}:MinX')} "
+            f"MinY={self._get_pv_value(f'{prefix}:MinY')} "
+            f"SizeX={self._get_pv_value(f'{prefix}:SizeX')} "
+            f"SizeY={self._get_pv_value(f'{prefix}:SizeY')}"
+        )
+        self._read_roi()
 
     def _restore_settings(self):
         s = load_settings("DetectorControlDialog")
