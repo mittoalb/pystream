@@ -267,14 +267,36 @@ class DetectorControlDialog(QtWidgets.QDialog):
         self._log_message(f"Read: BinX={binx_val}, BinY={biny_val}, MaxSizeX={max_x_val}, MaxSizeY={max_y_val}")
 
     def _refresh_computed_sizes(self):
-        """Recompute SizeX/SizeY from max sensor size and current binning."""
+        """SizeX/SizeY that Apply will send.
+
+        ADKinetix (like standard ADCore) uses ADSizeX in *unbinned* sensor
+        pixels — the region on the sensor, NOT the output image size. Full
+        frame at any binning is SizeX = MaxSizeX_RBV, constant. The output
+        image is SizeX / BinX pixels wide.
+
+        Showing the actual SizeX we'll caput (unbinned) rather than the
+        output image dims — was previously dividing here, which made the
+        spin box display half-sensor values at Bin>1 and matched the
+        (wrong) write in _apply_binning.
+        """
         if self._max_sizex is None or self._max_sizey is None:
             return
-        self.sizex_spin.setValue(self._max_sizex // self.binx_spin.value())
-        self.sizey_spin.setValue(self._max_sizey // self.biny_spin.value())
+        self.sizex_spin.setValue(self._max_sizex)
+        self.sizey_spin.setValue(self._max_sizey)
 
     def _apply_binning(self):
-        """Apply binning values to detector, computing SizeX/SizeY from max sensor size."""
+        """Apply BinX/BinY targeting the FULL detector frame.
+
+        Per ADKinetix (and standard ADCore): ADSizeX is in *unbinned*
+        sensor pixels. Full-frame at any binning is:
+            MinX=0, MinY=0, SizeX=MaxSizeX_RBV, SizeY=MaxSizeY_RBV
+        The output image dims are then SizeX/BinX × SizeY/BinY (i.e.
+        the binning "applies to" the full sensor).
+
+        Order matters: MinX/MinY first, then Bin, then Size. caput -c
+        makes each wait for its put-callback so the writes serialize
+        instead of racing.
+        """
         prefix = self.pv_prefix_input.text()
         binx = self.binx_spin.value()
         biny = self.biny_spin.value()
@@ -286,26 +308,39 @@ class DetectorControlDialog(QtWidgets.QDialog):
             )
             return
 
-        sizex = self._max_sizex // binx
-        sizey = self._max_sizey // biny
+        # SizeX/Y are the unbinned sensor width/height, ALWAYS full — never
+        # divided by binning. Binning applies to this region on output.
+        sizex = self._max_sizex
+        sizey = self._max_sizey
 
         success = True
-        if not self._set_pv_value(f"{prefix}:BinX", binx):
-            success = False
-        if not self._set_pv_value(f"{prefix}:BinY", biny):
-            success = False
-        if not self._set_pv_value(f"{prefix}:SizeX", sizex):
-            success = False
-        if not self._set_pv_value(f"{prefix}:SizeY", sizey):
-            success = False
+        # Explicit ordering: reset ROI to full first, then binning, then size.
+        for pv, val in [
+            (f"{prefix}:MinX",  0),
+            (f"{prefix}:MinY",  0),
+            (f"{prefix}:BinX",  binx),
+            (f"{prefix}:BinY",  biny),
+            (f"{prefix}:SizeX", sizex),
+            (f"{prefix}:SizeY", sizey),
+        ]:
+            if not self._set_pv_value(pv, val):
+                success = False
 
+        out_w = sizex // max(1, binx)
+        out_h = sizey // max(1, biny)
         if success:
             self.sizex_spin.setValue(sizex)
             self.sizey_spin.setValue(sizey)
-            self._log_message(f"Applied: BinX={binx}, BinY={biny}, SizeX={sizex}, SizeY={sizey}")
+            self._log_message(
+                f"Applied full frame: MinX=0 MinY=0 BinX={binx} BinY={biny} "
+                f"SizeX={sizex} SizeY={sizey} → output image {out_w}×{out_h}"
+            )
             QtWidgets.QMessageBox.information(
                 self, "Success",
-                f"Binning applied: BinX={binx}, BinY={biny}\nSizeX={sizex}, SizeY={sizey}"
+                f"Full-frame binning applied:\n"
+                f"BinX={binx}, BinY={biny}\n"
+                f"Region SizeX={sizex}, SizeY={sizey} (unbinned)\n"
+                f"Output image: {out_w} × {out_h}"
             )
         else:
             QtWidgets.QMessageBox.warning(

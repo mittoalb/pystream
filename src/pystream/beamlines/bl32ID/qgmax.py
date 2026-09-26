@@ -1221,22 +1221,13 @@ class QGMaxDialog(QtWidgets.QDialog):
         self._update_status_display()
 
     def closeEvent(self, event):
-        """Handle dialog close event."""
-        # Set status PV to Done when closing
-        self._set_status_pv("Done")
-
-        # Stop trigger polling
-        self.trigger_poll_timer.stop()
-
-        # Stop automated mode if running
-        if self.auto_mode_enabled:
-            self.hdf5_location_monitor_timer.stop()
-
-        # Stop optimization if running
-        if self.is_running:
-            self.optimization_timer.stop()
-            self._log_message("Stopped optimization (dialog closed)")
-
+        """Close = HIDE only. QGMax is a singleton — the dialog object
+        stays alive after the window is closed, and its timers
+        (trigger_poll, hdf5_location_monitor, optimization) MUST keep
+        running so background / auto mode continues without the widget
+        being visible. Previously stopped all three here, which silently
+        killed auto mode the moment the user closed the window.
+        """
         self._persist_settings()
         event.accept()
 
