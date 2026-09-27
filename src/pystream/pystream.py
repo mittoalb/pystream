@@ -221,6 +221,112 @@ def _save_config(data: dict, filename: str = "viewer_config.json") -> None:
         raise
 
 
+# ---------------- Recording metadata (JSON-driven) --------------
+#
+# Structure and fields written into each recording's metadata.json are
+# defined by a template shipped INSIDE the `detectors` package:
+#
+#     detectors/recording_metadata.json
+#
+# The template belongs with the detector code (per-camera PV names,
+# per-camera fields), not with pystream. pystream just consumes it.
+# Edit that file in the detectors repo to add/remove/rename fields or
+# restructure groups — no code change here.
+#
+# Each LEAF is one of:
+#   {"pv":    "PV:NAME"}     -> caget at recording stop, numeric if possible
+#   {"value": <anything>}    -> literal, written as-is
+#   {"auto":  "started" | "stopped" | "frame_count"
+#           | "dropped_count" | "output_dir"}   -> filled by pystream
+# Any dict WITHOUT one of those three keys is a group; recursion goes
+# through it. Missing PVs are recorded as "<caget failed: msg>".
+
+def _find_recording_metadata_template() -> Optional[str]:
+    """Locate the JSON template that ships with the ``detectors`` package.
+    Returns ``None`` if the detectors package is not importable — in
+    which case metadata.json will just be empty."""
+    try:
+        import detectors as _det
+        det_dir = os.path.dirname(os.path.abspath(_det.__file__))
+        path = os.path.join(det_dir, "recording_metadata.json")
+        if os.path.isfile(path):
+            return path
+    except Exception:
+        pass
+    return None
+
+
+RECORDING_META_TEMPLATE_PATH = _find_recording_metadata_template()
+
+
+def _load_recording_metadata_template() -> Dict:
+    """Read the template from the detectors package. On any failure,
+    return {} so recording still stops cleanly (metadata.json will
+    just be empty)."""
+    path = RECORDING_META_TEMPLATE_PATH
+    if path is None:
+        if LOGGER:
+            LOGGER.warning(
+                "detectors package or its recording_metadata.json not found "
+                "— writing empty metadata.json")
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        if LOGGER:
+            LOGGER.warning("Recording metadata template load failed (%s): %s",
+                           path, e)
+        return {}
+
+
+def _caget_one(pv: str, timeout: float = 2.0):
+    """Blocking single caget. Returns a python value (int/float/str) or
+    a '<caget failed: ...>' sentinel string so a missing PV shows up
+    in the metadata rather than silently vanishing."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["caget", "-t", pv],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return f"<caget failed: rc={r.returncode} {r.stderr.strip()}>"
+        raw = r.stdout.strip()
+        try:
+            iv = int(raw)
+            if str(iv) == raw:  # avoid coercing "1.0" -> 1
+                return iv
+        except ValueError:
+            pass
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+    except Exception as e:
+        return f"<caget failed: {type(e).__name__}: {e}>"
+
+
+def resolve_recording_metadata(template: Dict, auto_ctx: Dict) -> Dict:
+    """Walk a metadata template, replace each leaf with its resolved
+    value. Groups (plain dicts without pv/value/auto) recurse."""
+    out = {}
+    for k, v in template.items():
+        if isinstance(v, dict):
+            if "pv" in v:
+                out[k] = _caget_one(v["pv"])
+            elif "value" in v:
+                out[k] = v["value"]
+            elif "auto" in v:
+                out[k] = auto_ctx.get(v["auto"], f"<unknown auto: {v['auto']}>")
+            else:
+                out[k] = resolve_recording_metadata(v, auto_ctx)
+        else:
+            # Bare value in the template → keep as-is.
+            out[k] = v
+    return out
+
+
 # ----------------------- Plugin pipeline -----------------------
 PIPE = None
 def _init_pipeline(proc_config_path: Optional[str]):
@@ -2207,6 +2313,7 @@ class PvViewerApp(QtWidgets.QMainWindow):
 
             self.recording = True
             self.recorded_frame_count = 0
+            self._recording_started_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             self.btn_record.setText("⏹" if self.is_small_screen else "Stop Recording")
             self.btn_record.setStyleSheet("QPushButton:checked { background-color: #8B0000; }")
             self.lbl_record_status.setText("🔴 REC  0 frm")
@@ -2248,6 +2355,30 @@ class PvViewerApp(QtWidgets.QMainWindow):
         nd  = pool.frames_dropped if pool else 0
         record_dir = self.record_dir
 
+        # Resolve the JSON-driven metadata template and write metadata.json
+        # into the recording directory. Users edit
+        # ~/.pystream/recording_metadata.json to change structure / fields
+        # without touching pystream code.
+        meta_path = None
+        try:
+            template = _load_recording_metadata_template()
+            auto_ctx = {
+                "started":       getattr(self, "_recording_started_iso", ""),
+                "stopped":       time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "frame_count":   int(nw),
+                "dropped_count": int(nd),
+                "output_dir":    record_dir,
+            }
+            resolved = resolve_recording_metadata(template, auto_ctx)
+            meta_path = os.path.join(record_dir, "metadata.json")
+            with open(meta_path, "w") as f:
+                json.dump(resolved, f, indent=2, default=str)
+            if LOGGER:
+                LOGGER.info("Wrote recording metadata to %s", meta_path)
+        except Exception as e:
+            if LOGGER:
+                LOGGER.warning("Failed to write recording metadata: %s", e)
+
         msg = f"Saved {nw} frames"
         if nd:
             msg += f"  ({nd} dropped)"
@@ -2256,6 +2387,10 @@ class PvViewerApp(QtWidgets.QMainWindow):
             LOGGER.info("Recording stopped: %s to %s", msg, record_dir)
 
         body = f"{msg}\nTIFF files in:\n\n{record_dir}"
+        if meta_path:
+            body += f"\n\nMetadata: {os.path.basename(meta_path)}"
+            body += (f"\nTemplate: {RECORDING_META_TEMPLATE_PATH}"
+                     f"\n(edit that file to change fields / structure)")
         if nd:
             body += f"\n\n⚠ {nd} frames were dropped (queue full).\nUse more writer threads or faster storage."
         QtWidgets.QMessageBox.information(self, "Recording Stopped", body)
@@ -2515,6 +2650,59 @@ def _parse_loglevel(s: Optional[str]) -> int:
     return getattr(logging, s, logging.INFO)
 
 
+STREAM_PV_CANDIDATES_DEFAULT = [
+    # AreaDetector (ADSpinnaker) — currently deployed at bl32ID
+    "32idbSP1:image1:ArrayData",
+    "32idbSP2:image1:ArrayData",
+    # detectors-package IOCs — common prefixes when running via
+    # `run_ioc.py --prefix <X>`; overridden by the user's config.
+    "ORYX:image1:ArrayData",
+    "KTX:image1:ArrayData",
+    "KINETIX:image1:ArrayData",
+    "ORCA:image1:ArrayData",
+    "DET:image1:ArrayData",
+]
+
+
+def _probe_stream_pv(pv_name: str, timeout: float = 1.0) -> bool:
+    """Return True if pv_name is reachable within `timeout` seconds via
+    PVAccess. Used to auto-pick the live stream when `--pv` isn't set."""
+    try:
+        ch = pva.Channel(pv_name)
+        # Channel.get() blocks until a value comes back or the PVA
+        # provider raises. pvaccess doesn't expose a top-level timeout,
+        # so we run it in a thread and wait on it.
+        import threading
+        result = {"ok": False}
+        def _try():
+            try:
+                ch.get("field(dimension)")   # tiny query — dims only, no pixels
+                result["ok"] = True
+            except Exception:
+                pass
+        t = threading.Thread(target=_try, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        return result["ok"]
+    except Exception:
+        return False
+
+
+def _auto_pick_stream_pv(candidates, timeout: float = 1.0) -> Optional[str]:
+    """Probe each candidate in order; return the first that responds
+    within `timeout` seconds. `None` if nothing is reachable."""
+    for pv in candidates:
+        if not pv:
+            continue
+        if LOGGER:
+            LOGGER.info("Probing stream PV %s ...", pv)
+        if _probe_stream_pv(pv, timeout=timeout):
+            if LOGGER:
+                LOGGER.info("Auto-picked stream PV: %s", pv)
+            return pv
+    return None
+
+
 def main():
     global LOGGER
     ap = argparse.ArgumentParser(description="pystream")
@@ -2527,6 +2715,8 @@ def main():
     ap.add_argument("--no-plugins", action="store_true", help="Disable plugin processing")
     ap.add_argument("--log-file", default=None, help="Optional log file path")
     ap.add_argument("--log-level", default="INFO", help="Logging level")
+    ap.add_argument("--auto-pick-timeout", type=float, default=1.0,
+                    help="Per-candidate timeout when auto-picking a stream PV (seconds)")
     args = ap.parse_args()
     
     # Logger
@@ -2545,13 +2735,40 @@ def main():
     else:
         LOGGER.info("[Plugins] Disabled via --no-plugins")
     
+    # Resolve the stream PV. Priority:
+    #   1. --pv on the command line (explicit).
+    #   2. `pv_name` in ~/.pystream/viewer_config.json (last used).
+    #   3. auto-probe: walk STREAM_PV_CANDIDATES_DEFAULT (extended by
+    #      config key `stream_pv_candidates` if present) and pick the
+    #      first PV that responds within --auto-pick-timeout seconds.
+    #      This lets pystream latch onto either the ADSpinnaker IOC
+    #      (32idbSP1:image1:ArrayData) OR the detectors-package IOC
+    #      (e.g. ORYX:image1:ArrayData) without the user telling it.
+    pv_name = args.pv
+    if not pv_name:
+        cfg = _load_config(defaults={"pv_name": ""})
+        pv_name = (cfg.get("pv_name") or "").strip()
+    if not pv_name:
+        cfg = _load_config(defaults={"stream_pv_candidates": []})
+        extras = cfg.get("stream_pv_candidates") or []
+        candidates = list(extras) + [
+            p for p in STREAM_PV_CANDIDATES_DEFAULT if p not in extras
+        ]
+        picked = _auto_pick_stream_pv(candidates, timeout=args.auto_pick_timeout)
+        if picked:
+            pv_name = picked
+        else:
+            LOGGER.warning(
+                "No stream PV auto-detected — GUI will open with empty PV "
+                "field; type one and press Enter to connect.")
+
     # Create Qt application
     app = QtWidgets.QApplication([])
     app.setApplicationName("pystream")
-    
+
     # Create viewer window
     viewer = PvViewerApp(
-        pv_name=args.pv,
+        pv_name=pv_name,
         max_fps=args.max_fps,
         display_bin=args.display_bin,
         hist_fps=args.hist_fps,
