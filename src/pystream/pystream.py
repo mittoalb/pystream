@@ -661,6 +661,27 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
         self.image_view.view.setMouseEnabled(x=True, y=True)
+
+        # Live stats overlay pinned to the top-right of the image viewport.
+        # Shows current-frame mean and FPS; updated from _update_image_slot.
+        self.image_overlay_lbl = QtWidgets.QLabel(self.image_view)
+        self.image_overlay_lbl.setStyleSheet(
+            "QLabel { color: #e6e6e6; background: rgba(0,0,0,140); "
+            "padding: 4px 8px; border-radius: 4px; "
+            "font: bold 10pt 'Liberation Mono','DejaVu Sans Mono',monospace; }"
+        )
+        self.image_overlay_lbl.setText("Mean: --\nFPS: --")
+        self.image_overlay_lbl.adjustSize()
+        self.image_overlay_lbl.move(10, 10)
+        self.image_overlay_lbl.raise_()
+        # Reposition to top-right whenever the image_view resizes.
+        _orig_iv_resize = self.image_view.resizeEvent
+        def _iv_resize(ev, orig=_orig_iv_resize):
+            orig(ev)
+            lbl = self.image_overlay_lbl
+            lbl.move(max(10, self.image_view.width() - lbl.width() - 10), 10)
+            lbl.raise_()
+        self.image_view.resizeEvent = _iv_resize
         # Custom drag: pan only when zoomed in, clamped to image bounds
         self._img_full_range = None
         _orig_drag = self.image_view.view.mouseDragEvent
@@ -1783,13 +1804,23 @@ class PvViewerApp(QtWidgets.QMainWindow):
         self.lbl_fps.setText(f"FPS: {self.fps_ema:4.1f}")
 
         # Update image info - show original shape before binning
+        _mean = float(img.mean())
         self.lbl_info.setText(
             f"Shape: {original_shape}\n"
             f"Dtype: {img.dtype}\n"
             f"Min: {img.min():.2f}\n"
             f"Max: {img.max():.2f}\n"
-            f"Mean: {img.mean():.2f}"
+            f"Mean: {_mean:.2f}"
         )
+
+        # Live overlay pinned to the image viewport's top-right corner.
+        try:
+            lbl = self.image_overlay_lbl
+            lbl.setText(f"Mean: {_mean:.1f}\nFPS:  {self.fps_ema:5.1f}")
+            lbl.adjustSize()
+            lbl.move(max(10, self.image_view.width() - lbl.width() - 10), 10)
+        except AttributeError:
+            pass
         
         # Recording is handled in _pump_queue before the display throttle.
         
