@@ -15,3 +15,10 @@ ai_backends
 simulator
 api
 ```
+
+```{toctree}
+:maxdepth: 1
+:caption: Architecture (for software + AI engineers)
+
+architecture/index
+```
