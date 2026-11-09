@@ -220,7 +220,7 @@ STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 #
 # `bash` is conditionally gated: read-only commands run without confirmation,
 # destructive ones trigger the dialog (see _bash_is_destructive below).
-WRITE_TOOLS = {"caput"}
+WRITE_TOOLS = {"caput", "ioc_action"}
 
 
 # Patterns that should pop a confirmation dialog when seen in a bash command.
@@ -333,12 +333,15 @@ def tool_list_docs(directory: str = DOCS_DIR_DEFAULT,
         if not os.path.isdir(d):
             return {"error": f"docs directory does not exist: {d}",
                     "hint": f"create {d} and put .md files in it"}
-        paths = sorted(glob.glob(os.path.join(d, pattern)))
+        # Recursive: the procedures tree nests by beamline/category
+        # (e.g. bl32ID/motors/zone_plate.md). `name` is the path relative
+        # to `directory`, which read_doc accepts as-is.
+        paths = sorted(glob.glob(os.path.join(d, "**", pattern), recursive=True))
         out = []
         for p in paths:
             st = os.stat(p)
             out.append({
-                "name": os.path.basename(p),
+                "name": os.path.relpath(p, d),
                 "path": p,
                 "size_kb": round(st.st_size / 1024, 1),
             })
@@ -349,15 +352,15 @@ def tool_list_docs(directory: str = DOCS_DIR_DEFAULT,
 
 def tool_read_doc(name: str, directory: str = DOCS_DIR_DEFAULT,
                   max_chars: int = 20000) -> dict:
-    """Read one reference doc by filename. `name` may be a bare filename
-    (resolved against `directory`) or an absolute path inside `directory`.
-    Truncates after `max_chars` to keep the response bounded."""
+    """Read one reference doc. `name` may be a path relative to
+    `directory` (as returned by list_docs, e.g. 'bl32ID/motors/zp.md')
+    or an absolute path inside `directory`. Truncates after `max_chars`
+    to keep the response bounded."""
     try:
         d = os.path.expanduser(directory)
         if not name:
             return {"error": "name is required"}
-        candidate = (name if os.path.isabs(name)
-                     else os.path.join(d, os.path.basename(name)))
+        candidate = name if os.path.isabs(name) else os.path.join(d, name)
         # Refuse path traversal — must end up inside `directory`.
         real_d = os.path.realpath(d)
         real_p = os.path.realpath(candidate)
@@ -390,13 +393,13 @@ def tool_search_docs(query: str, directory: str = DOCS_DIR_DEFAULT,
             return {"error": f"docs directory does not exist: {d}"}
         q = query.lower()
         hits = []
-        for p in sorted(glob.glob(os.path.join(d, "*.md"))):
+        for p in sorted(glob.glob(os.path.join(d, "**", "*.md"), recursive=True)):
             try:
                 with open(p, encoding="utf-8", errors="replace") as f:
                     for i, line in enumerate(f, start=1):
                         if q in line.lower():
                             hits.append({
-                                "file": os.path.basename(p),
+                                "file": os.path.relpath(p, d),
                                 "line": i,
                                 "text": line.rstrip("\n")[:240],
                             })
@@ -562,19 +565,78 @@ def tool_read_file(path: str, max_chars: int = 50000) -> dict:
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
-def tool_caput(pv_name: str, value, timeout: float = 5.0) -> dict:
-    """Write a value to an EPICS PV. WRITE action — gated by user
-    confirmation. Returns {success: bool}. The model should explain WHY
-    it wants to write before calling this; the confirmation dialog is the
-    user's chance to veto."""
+def tool_caput(pv_name: str, value, timeout: float = 30.0) -> dict:
+    """Write a value to an EPICS PV, then read it back. WRITE action —
+    gated by user confirmation.
+
+    `success` is true only when the write actually completed: pyepics
+    returns None (not connected) or a negative code (put-callback timed
+    out) — the old `bool(ok)` treated the timeout code as success, so a
+    motor move longer than the timeout was reported done while still
+    moving. Motor .VAL writes additionally check DMOV and limit flags.
+    """
     if not pv_name:
         return {"error": "pv_name is required"}
     try:
         import epics
-        ok = epics.caput(pv_name, value, timeout=float(timeout), wait=True)
-        return {"pv_name": pv_name, "value": value, "success": bool(ok)}
     except Exception as ex:
-        return {"error": f"{type(ex).__name__}: {ex}"}
+        return {"error": f"pyepics unavailable: {ex}", "success": False}
+
+    base, _, field = pv_name.partition(".")
+    field = (field or "VAL").upper()
+    try:
+        rtyp = epics.caget(f"{base}.RTYP", timeout=1.0)
+    except Exception:
+        rtyp = None
+    is_motor_move = (rtyp == "motor" and field == "VAL")
+
+    try:
+        ret = epics.caput(pv_name, value, wait=True, timeout=float(timeout))
+    except Exception as ex:
+        return {"error": f"{type(ex).__name__}: {ex}", "success": False}
+
+    out: dict[str, Any] = {"pv_name": pv_name, "requested": value}
+    if ret is None:
+        out.update(success=False,
+                   reason="could not connect to the PV — nothing was written")
+        return out
+    completed = ret > 0
+    out["completed"] = completed
+
+    if is_motor_move:
+        rb = {f: epics.caget(f"{base}.{f}", timeout=1.0)
+              for f in ("RBV", "DMOV", "LVIO", "HLS", "LLS")}
+        flags = [label for f, label in (("LVIO", "soft-limit violation"),
+                                        ("HLS", "high limit switch"),
+                                        ("LLS", "low limit switch"))
+                 if rb.get(f)]
+        out["readback"] = rb.get("RBV")
+        out["done_moving"] = rb.get("DMOV") == 1
+        out["limit_flags"] = flags
+        out["success"] = completed and out["done_moving"] and not flags
+        if not completed:
+            out["reason"] = (f"move did not finish within {timeout}s — the "
+                             "motor may still be moving")
+        elif flags:
+            out["reason"] = "motor stopped on " + ", ".join(flags)
+        return out
+
+    # Non-motor PV: prefer the areaDetector-style `<pv>_RBV` readback,
+    # falling back to the PV itself.
+    readback_pv = pv_name
+    readback = None
+    if "." not in pv_name:
+        readback = epics.caget(f"{pv_name}_RBV", timeout=0.5)
+        if readback is not None:
+            readback_pv = f"{pv_name}_RBV"
+    if readback is None:
+        readback = epics.caget(pv_name, timeout=1.0)
+    out["readback"] = readback
+    out["readback_pv"] = readback_pv
+    out["success"] = completed
+    if not completed:
+        out["reason"] = f"put-callback did not complete within {timeout}s"
+    return out
 
 
 # ── network diagnostics (no sudo, read-only) ───────────────────────────
@@ -1194,15 +1256,24 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "caput",
         "description": (
-            "Write a value to an EPICS PV. WRITE action — Yes/No dialog "
-            "before executing. Use for setpoints, mode changes, motor "
-            "moves (set the .VAL field). Always explain WHY before calling."
+            "Write a value to an EPICS PV and read it back. WRITE action — "
+            "Yes/No dialog before executing. Use for setpoints, mode "
+            "changes, motor moves (set the .VAL field). Always explain WHY "
+            "before calling.\n\n"
+            "Returns {success, completed, readback, reason?}; motor moves "
+            "also return done_moving and limit_flags. Report the READBACK, "
+            "not the requested value. Only say the action succeeded when "
+            "success is true; otherwise quote `reason` to the user."
         ),
         "schema": {
             "type": "object",
             "properties": {
                 "pv_name": {"type": "string"},
                 "value":   {"description": "Number, string, or list."},
+                "timeout": {"type": "number",
+                            "description": "Seconds to wait for the write "
+                            "(or motor move) to complete. Default 30; raise "
+                            "for long moves."},
             },
             "required": ["pv_name", "value"],
         },
@@ -1272,6 +1343,119 @@ TOOLS: list[dict[str, Any]] = [
         "schema": {"type": "object", "properties": {}, "required": []},
         "func": tool_list_status_pages,
     },
+]
+
+
+def _spec(name, description, func, properties=None, required=()):
+    return {"name": name, "description": description, "func": func,
+            "schema": {"type": "object", "properties": properties or {},
+                       "required": list(required)}}
+
+
+_STR = {"type": "string"}
+_DOCS_DIR_HELP = {
+    "type": "string",
+    "description": "Defaults to ~/.pystream/docs (reference docs). Use "
+                   "~/.pystream/procedures for the beamline procedures.",
+}
+
+# Tools that were implemented above but never offered to the model. The
+# system-prompt addendum already told the model to call list_docs /
+# read_doc, which failed as "unknown tool" until these were registered.
+TOOLS += [
+    _spec("read_motor",
+          "Read a motor's position (tries <pv>.RBV, then the base PV). "
+          "Prefer this over read_pv for motors.",
+          tool_read_motor, {"motor_pv": _STR}, ["motor_pv"]),
+    _spec("check_motor_health",
+          "Diagnose a motor: RBV, DMOV, MSTA bits decoded (at limit, comm "
+          "error, problem). Use when a motor won't move or reports errors.",
+          tool_check_motor_health, {"motor_pv": _STR}, ["motor_pv"]),
+    _spec("check_pv_health",
+          "Report whether a PV is alive: connected, alarm severity, age of "
+          "last update. Use when a device seems to have stopped talking.",
+          tool_check_pv_health, {"pv_name": _STR}, ["pv_name"]),
+    _spec("check_detector_stream",
+          "Check whether detector frames are arriving (uniqueId advancing). "
+          "Distinguishes a live stream from an idle/stuck camera.",
+          tool_check_detector_stream,
+          {"detector_pv": {"type": "string",
+                           "description": "Defaults to 32idbSP1:Pva1:Image."}}),
+    _spec("list_recent_scans",
+          "List the most recent HDF5 files in a directory, newest first.",
+          tool_list_recent_scans,
+          {"save_dir": {"type": "string", "description": "Default ~/scans."},
+           "pattern": {"type": "string", "description": "Default *.h5."},
+           "limit": {"type": "integer", "description": "Default 10."}}),
+    _spec("read_scan_metadata",
+          "Read the scan_config attribute and /exchange dataset shapes from "
+          "an XANES2D master HDF5 file.",
+          tool_read_scan_metadata, {"path": _STR}, ["path"]),
+    _spec("list_docs",
+          "List markdown docs the agent can read (recursive). Returns names "
+          "usable with read_doc.",
+          tool_list_docs, {"directory": _DOCS_DIR_HELP}),
+    _spec("read_doc",
+          "Read one markdown doc by the name list_docs returned (relative "
+          "path, e.g. 'bl32ID/motors/zone_plate.md').",
+          tool_read_doc, {"name": _STR, "directory": _DOCS_DIR_HELP}, ["name"]),
+    _spec("search_docs",
+          "Case-insensitive text search across all markdown docs "
+          "(recursive). Returns file, line number and line text. Use this "
+          "to find the right procedure before acting.",
+          tool_search_docs, {"query": _STR, "directory": _DOCS_DIR_HELP},
+          ["query"]),
+    _spec("list_url_docs",
+          "Return the user's saved name → URL map of reference websites.",
+          tool_list_url_docs),
+    _spec("list_pv_aliases",
+          "Return the user's friendly-name → PV alias map and macro values.",
+          tool_list_pv_aliases),
+    _spec("resolve_pv",
+          "Expand $(MACRO) placeholders in a PV template using the saved "
+          "macros (or the ones passed).",
+          tool_resolve_pv,
+          {"template": _STR,
+           "macros": {"type": "object", "description": "Optional overrides."}},
+          ["template"]),
+    _spec("list_plugins",
+          "List pystream plugins that have saved settings.",
+          tool_list_plugins),
+    _spec("get_plugin_settings",
+          "Return one plugin's saved settings (e.g. 'QGMaxDialog'). "
+          "Sensitive fields are redacted.",
+          tool_get_plugin_settings, {"plugin_name": _STR}, ["plugin_name"]),
+    _spec("ping",
+          "Ping a host: reachability, packet loss, RTT.",
+          tool_ping,
+          {"host": _STR, "count": {"type": "integer", "description": "Default 4."}},
+          ["host"]),
+    _spec("tcp_check",
+          "Try a TCP connect to host:port; distinguishes host down, "
+          "firewalled, and port not listening.",
+          tool_tcp_check, {"host": _STR, "port": {"type": "integer"}},
+          ["host", "port"]),
+    _spec("traceroute",
+          "Show the network hops to a host.",
+          tool_traceroute, {"host": _STR}, ["host"]),
+    _spec("dns_lookup",
+          "Resolve a hostname to IP (and reverse).",
+          tool_dns_lookup, {"host": _STR}, ["host"]),
+    _spec("list_restartable_iocs",
+          "List IOCs with registered start/stop scripts. This is the "
+          "allowlist for ioc_action — not a status source.",
+          tool_list_restartable_iocs),
+    _spec("ioc_status",
+          "Check whether a registered IOC is running (read-only).",
+          tool_ioc_status, {"ioc_name": _STR}, ["ioc_name"]),
+    _spec("ioc_action",
+          "Start, stop or restart a registered IOC. WRITE action — Yes/No "
+          "dialog before executing. Check ioc_status first, and report the "
+          "returned output rather than assuming it worked.",
+          tool_ioc_action,
+          {"ioc_name": _STR,
+           "action": {"type": "string", "enum": ["start", "stop", "restart"]}},
+          ["ioc_name", "action"]),
 ]
 
 
