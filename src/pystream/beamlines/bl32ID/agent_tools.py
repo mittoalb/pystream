@@ -19,6 +19,7 @@ model can recover gracefully and the conversation continues.
 import glob
 import json
 import os
+import re
 import time
 from typing import Any, Callable
 
@@ -211,7 +212,6 @@ def tool_list_recent_scans(save_dir: str = "~/scans",
 DOCS_DIR_DEFAULT  = os.path.join(PYSTREAM_HOME, "docs")
 PV_ALIASES_FILE   = os.path.join(PYSTREAM_HOME, "pv_aliases.json")
 DOC_URLS_FILE     = os.path.join(PYSTREAM_HOME, "doc_urls.json")
-IOC_SCRIPTS_FILE  = os.path.join(PYSTREAM_HOME, "ioc_scripts.json")
 STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 
 
@@ -228,11 +228,22 @@ WRITE_TOOLS = {"caput", "ioc_action"}
 # that could mutate the filesystem, kill processes, or hit the network with
 # a write needs the user to click Yes. Compiled at module load.
 _DESTRUCTIVE_BASH_RE = None
+# Running an iocs_monitor wrapper script with an IOC action. These open
+# terminal windows and return on *launch*, not when the IOC is up, which
+# is how the agent ended up reporting "started" without evidence.
+# tool_bash refuses them and points to ioc_action instead.
+_IOC_WRAPPER_RE = re.compile(
+    r"iocs_monitor.*\.sh\b\s+(?:start|stop|restart|status)\b",
+    re.IGNORECASE | re.DOTALL)
+
+
 def _bash_is_destructive(command: str) -> bool:
     """Heuristic: True if this bash command should pop the confirmation
     dialog. Conservative — when in doubt, returns True. Two parts:
     (1) destructive command words at command-position (after start, ; & | `)
     (2) certain patterns ANYWHERE in the line (.sh invocations, > redirects)."""
+    if _IOC_WRAPPER_RE.search(command or ""):
+        return False  # refused by tool_bash; don't ask the user first
     global _DESTRUCTIVE_BASH_RE
     if _DESTRUCTIVE_BASH_RE is None:
         import re
@@ -519,6 +530,13 @@ def tool_bash(command: str, timeout: float = 30.0) -> dict:
     minutes-scale value or you'll get spurious timeouts."""
     if not command or not command.strip():
         return {"error": "command is required"}
+    if _IOC_WRAPPER_RE.search(command):
+        return {"error": "refused: don't run the iocs_monitor wrapper scripts "
+                         "(they open terminal windows and report only that "
+                         "the IOC was launched). Use ioc_status / ioc_action, "
+                         "which go through the IOC control panel and confirm "
+                         "the IOC is actually up or down.",
+                "command": command}
     try:
         timeout = max(1.0, min(3600.0, float(timeout)))
     except (TypeError, ValueError):
@@ -823,134 +841,120 @@ def tool_list_status_pages() -> dict:
         return {"error": f"{type(ex).__name__}: {ex}"}
 
 
-# ── IOC restart (write tool, gated by user confirmation) ───────────────
+# ── IOC control (via the beamline IOC Control Panel REST API) ──────────
+#
+# The panel owns the IOC startup procedure (screen sessions, env). The
+# iocs_monitor wrapper scripts it replaces open terminal windows and
+# return as soon as they *launch*, so the agent reported "started" with
+# no evidence the IOC came up. These tools ask the panel and, for
+# actions, poll /status until the requested state is actually observed.
 
-def _load_ioc_scripts() -> dict:
-    """Read the allowlist of restart scripts. Returns {} on any failure."""
-    try:
-        if not os.path.isfile(IOC_SCRIPTS_FILE):
-            return {}
-        import json as _json
-        with open(IOC_SCRIPTS_FILE) as f:
-            data = _json.load(f)
-        return data.get("scripts", {}) or {}
-    except Exception:
-        return {}
+IOC_PANEL_URL = "http://164.54.102.6:5100"
 
-
-def tool_list_restartable_iocs() -> dict:
-    """List the IOC restart scripts the user has registered in
-    ~/.pystream/ioc_scripts.json. This is the WRITE allowlist — only IOCs
-    that appear here can be RESTARTED. It is NOT a status source and
-    says nothing about which IOCs exist or whether they're up."""
-    note = ("This is the IOC RESTART ALLOWLIST (a write-action permission "
-            "list), NOT a status source. For 'what IOCs are running' / "
-            "'are my IOCs up' / 'list my IOCs', call list_status_pages "
-            "then fetch_url on the ioc_monitor page, or ping/tcp_check "
-            "the IOC hosts. Only call this tool when about to call "
-            "restart_ioc.")
-    try:
-        if not os.path.isfile(IOC_SCRIPTS_FILE):
-            return {
-                "error": f"allowlist not found: {IOC_SCRIPTS_FILE}",
-                "hint": "create the file with a 'scripts' dict mapping "
-                        "ioc_name → {path, description} to authorize "
-                        "restart actions.",
-                "note": note,
-            }
-        scripts = _load_ioc_scripts()
-        out = []
-        for name, entry in scripts.items():
-            if not isinstance(entry, dict):
-                continue
-            out.append({
-                "ioc_name": name,
-                "description": entry.get("description", ""),
-                "path": entry.get("path"),
-                "exists": bool(entry.get("path")
-                               and os.path.isfile(os.path.expanduser(entry["path"]))),
-            })
-        return {"file": IOC_SCRIPTS_FILE, "scripts": out, "count": len(out),
-                "note": note}
-    except Exception as ex:
-        return {"error": f"{type(ex).__name__}: {ex}"}
+# Names the panel manages. Not enforced (the panel is the authority);
+# used for list_iocs and error hints.
+CONTROL_PANEL_IOCS = (
+    "ioc32idbSP1", "ioc32idbSP2", "ioc32idbBPM", "ioc32idbTEMP",
+    "ioc32idbTXM", "ioc32idbShaker", "ioc32idbSoft", "ioc32idaSoft",
+    "ioc32idcSoft", "ioc32idAERO", "ioc32idLM", "ioc32idQG",
+    "ioc32idTomoScan", "ioc32Kinetix", "iocEnergyServer",
+    "32idMZ1", "32idMZ2", "TXMbackend",
+)
 
 
-_IOC_ALLOWED_ACTIONS = ("start", "stop", "restart", "status")
+def _panel_post(endpoint: str, ioc_name: str, timeout: float = 10.0) -> dict:
+    import urllib.request
+    req = urllib.request.Request(
+        f"{IOC_PANEL_URL}/{endpoint}/{ioc_name}", data=b"", method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode() or "{}")
 
 
-def _run_ioc_script(ioc_name: str, action: str, timeout: float) -> dict:
-    """Shared dispatcher: validate the IOC + script, run it with `action`
-    as argv[1], capture and truncate the output."""
+def _panel_resolve(ioc_name: str) -> tuple:
+    """Return (panel_name, status_json). Accepts the script-registry form
+    ('32idbSP1') as well as the panel form ('ioc32idbSP1')."""
+    status = _panel_post("status", ioc_name)
+    if status.get("status") == "not found" and not ioc_name.startswith("ioc"):
+        alt = _panel_post("status", "ioc" + ioc_name)
+        if alt.get("status") != "not found":
+            return "ioc" + ioc_name, alt
+    return ioc_name, status
+
+
+def _panel_wait(ioc_name: str, want: str, timeout: float) -> tuple:
+    """Poll /status until it reports `want` or `timeout` elapses.
+    Returns (last_status, seconds_waited)."""
+    start = time.monotonic()
+    while True:
+        try:
+            last = _panel_post("status", ioc_name).get("status")
+        except Exception as ex:
+            last = f"unreachable ({ex})"
+        waited = time.monotonic() - start
+        if last == want or waited >= timeout:
+            return last, round(waited, 1)
+        time.sleep(2.0)
+
+
+def tool_list_iocs() -> dict:
+    """IOC names the control panel manages (for ioc_status / ioc_action)."""
+    return {"iocs": list(CONTROL_PANEL_IOCS), "panel": IOC_PANEL_URL}
+
+
+def tool_ioc_status(ioc_name: str) -> dict:
+    """Ask the IOC control panel whether an IOC is up. READ-ONLY."""
     if not ioc_name:
         return {"error": "ioc_name is required"}
-    if action not in _IOC_ALLOWED_ACTIONS:
-        return {"error": f"action must be one of {_IOC_ALLOWED_ACTIONS}, "
-                         f"got {action!r}"}
-    scripts = _load_ioc_scripts()
-    entry = scripts.get(ioc_name)
-    if not entry or not isinstance(entry, dict):
-        return {
-            "error": f"IOC {ioc_name!r} is not in the allowlist "
-                     f"({IOC_SCRIPTS_FILE}). Available: "
-                     f"{sorted(scripts.keys())}",
-        }
-    raw_path = entry.get("path")
-    if not raw_path:
-        return {"error": f"no 'path' configured for {ioc_name!r}"}
-    script = os.path.expanduser(raw_path)
-    if not os.path.isfile(script):
-        return {"error": f"script does not exist on disk: {script}"}
-
-    import subprocess
     try:
-        result = subprocess.run(
-            [script, action],
-            capture_output=True, text=True,
-            timeout=float(timeout), shell=False,
-        )
-        return {
-            "ioc_name": ioc_name,
-            "action": action,
-            "script": script,
-            "returncode": result.returncode,
-            "success": result.returncode == 0,
-            "stdout": (result.stdout or "")[-2000:],
-            "stderr": (result.stderr or "")[-2000:],
-        }
-    except subprocess.TimeoutExpired:
-        return {"error": f"script timed out after {timeout}s: {script}",
-                "ioc_name": ioc_name, "action": action}
+        name, status = _panel_resolve(ioc_name)
     except Exception as ex:
-        return {"error": f"{type(ex).__name__}: {ex}",
-                "ioc_name": ioc_name, "action": action}
+        return {"error": f"IOC control panel unreachable at {IOC_PANEL_URL}: {ex}"}
+    if status.get("status") == "not found":
+        return {"error": f"IOC {ioc_name!r} is not known to the control panel",
+                "known_iocs": list(CONTROL_PANEL_IOCS)}
+    return {"ioc_name": name, "status": status.get("status"),
+            "address": status.get("address")}
 
 
-def tool_ioc_action(ioc_name: str, action: str,
-                    timeout: float = 30.0) -> dict:
-    """Run start, stop, or restart on an IOC's registered script.
-
-    SAFETY GATE: this tool is wrapped in a user-confirmation dialog before
-    it executes. The user sees the IOC name, action, and script path, and
-    must click Yes. Only IOCs listed in ~/.pystream/ioc_scripts.json are
-    permitted, and only the actions {start, stop, restart} are allowed
-    here. For non-destructive status checks, use ioc_status instead.
-    """
-    if action == "status":
-        return {"error": "use ioc_status (non-gated) for status checks; "
-                         "ioc_action is for start/stop/restart only."}
+def tool_ioc_action(ioc_name: str, action: str, timeout: float = 60.0) -> dict:
+    """Start, stop or restart an IOC through the control panel, then poll
+    /status until the requested state is observed. WRITE action — gated
+    by user confirmation. `success` is true only when the end state was
+    actually seen, not when the request was merely accepted."""
     if action not in ("start", "stop", "restart"):
-        return {"error": f"action must be one of: start, stop, restart "
-                         f"(got {action!r})"}
-    return _run_ioc_script(ioc_name, action, timeout)
-
-
-def tool_ioc_status(ioc_name: str, timeout: float = 30.0) -> dict:
-    """Check whether an IOC is currently running by invoking its registered
-    script with the 'status' action. READ-ONLY — no confirmation dialog.
-    Returns the script's stdout (typically a 'is running' / 'not running'
-    line plus PID info) and the returncode."""
-    return _run_ioc_script(ioc_name, "status", timeout)
+        return {"error": f"action must be start, stop or restart (got {action!r})"}
+    if not ioc_name:
+        return {"error": "ioc_name is required"}
+    try:
+        name, status = _panel_resolve(ioc_name)
+    except Exception as ex:
+        return {"error": f"IOC control panel unreachable at {IOC_PANEL_URL}: {ex}",
+                "success": False}
+    before = status.get("status")
+    if before == "not found":
+        return {"error": f"IOC {ioc_name!r} is not known to the control panel",
+                "known_iocs": list(CONTROL_PANEL_IOCS), "success": False}
+    want = "down" if action == "stop" else "up"
+    if action != "restart" and before == want:
+        return {"ioc_name": name, "action": action, "status": before,
+                "success": True, "note": f"already {before} — nothing was done"}
+    try:
+        if action == "restart":
+            _panel_post("stop", name, timeout=30.0)
+            _panel_wait(name, "down", timeout=min(30.0, float(timeout)))
+            _panel_post("start", name, timeout=30.0)
+        else:
+            _panel_post(action, name, timeout=30.0)
+    except Exception as ex:
+        return {"error": f"control panel {action} request failed: {ex}",
+                "ioc_name": name, "success": False}
+    final, waited = _panel_wait(name, want, timeout=float(timeout))
+    out = {"ioc_name": name, "action": action, "status_before": before,
+           "status": final, "waited_s": waited, "success": final == want}
+    if final != want:
+        out["reason"] = (f"control panel reports '{final}' after {waited}s, "
+                         f"expected '{want}' — the {action} is NOT confirmed")
+    return out
 
 
 # ── device-health diagnostics ───────────────────────────────────────────
@@ -1170,10 +1174,10 @@ TOOLS: list[dict[str, Any]] = [
         "name": "bash",
         "description": (
             "Run any shell command. The agent's general-purpose Swiss-army "
-            "knife — use for ping/traceroute/dns, listing files, reading "
-            "docs (cat / grep), running IOC restart scripts, querying the "
-            "iocs_monitor scripts directory, or anything else that's a "
-            "regular shell operation. Read-only commands run freely; "
+            "knife — use for listing files, grep, or anything else that's "
+            "a regular shell operation without a dedicated tool. Never "
+            "start/stop IOCs here — use ioc_status / ioc_action (the "
+            "iocs_monitor .sh scripts are refused). Read-only commands run freely; "
             "destructive ones (rm, mv, kill, chmod, sudo, *.sh executions, "
             "redirects to files, git push) trigger a Yes/No confirmation. "
             "\n\n"
@@ -1441,20 +1445,26 @@ TOOLS += [
     _spec("dns_lookup",
           "Resolve a hostname to IP (and reverse).",
           tool_dns_lookup, {"host": _STR}, ["host"]),
-    _spec("list_restartable_iocs",
-          "List IOCs with registered start/stop scripts. This is the "
-          "allowlist for ioc_action — not a status source.",
-          tool_list_restartable_iocs),
+    _spec("list_iocs",
+          "List the IOC names the beamline IOC control panel manages.",
+          tool_list_iocs),
     _spec("ioc_status",
-          "Check whether a registered IOC is running (read-only).",
+          "Ask the IOC control panel whether an IOC is up (read-only). "
+          "Accepts 'ioc32idbSP1' or '32idbSP1'.",
           tool_ioc_status, {"ioc_name": _STR}, ["ioc_name"]),
     _spec("ioc_action",
-          "Start, stop or restart a registered IOC. WRITE action — Yes/No "
-          "dialog before executing. Check ioc_status first, and report the "
-          "returned output rather than assuming it worked.",
+          "Start, stop or restart an IOC through the control panel, then "
+          "wait until the panel reports it up (or down). WRITE action — "
+          "Yes/No dialog before executing. This is the ONLY way to start/"
+          "stop IOCs; never use the iocs_monitor .sh scripts. Report the "
+          "returned `status`; if success is false, quote `reason`. For the "
+          "camera IOC also confirm frames with check_detector_stream.",
           tool_ioc_action,
           {"ioc_name": _STR,
-           "action": {"type": "string", "enum": ["start", "stop", "restart"]}},
+           "action": {"type": "string", "enum": ["start", "stop", "restart"]},
+           "timeout": {"type": "number",
+                       "description": "Seconds to wait for the end state. "
+                       "Default 60."}},
           ["ioc_name", "action"]),
 ]
 
@@ -1531,25 +1541,21 @@ A. ANY status / availability / load question — *always* start with
    pre-registered the right URLs in ~/.pystream/status_pages.json.
 
 B. Per-IOC actions — "is X running", "start/stop/restart X":
-   FIRST read_file ~/.pystream/ioc_scripts.json for the IOC's entry
-   (wrapper / host / work_dir / inner_script / rest_endpoint / verify_pvs).
-   THEN use the IOC CONTROL PANEL REST API at http://164.54.102.6:5100/:
-       POST /status/<ioc_name>   → {"status": "up"|"down", "address": "..."}
-       POST /start/<ioc_name>    → starts and returns same JSON
-       POST /stop/<ioc_name>     → stops  and returns same JSON
-       POST /medm/<ioc_name>     → opens MEDM (don't use; opens a window)
-       POST /gui/<TYPE>          → launches a GUI (TXM, 32ID-GUI, etc.)
-   IOC names: ioc32idbSP1, ioc32idbSP2, ioc32idbBPM, ioc32idbTEMP,
-   ioc32idbTXM, ioc32idbShaker, ioc32idbSoft, ioc32idaSoft, ioc32idcSoft,
-   ioc32idAERO, ioc32idLM, ioc32idQG, ioc32idTomoScan, ioc32Kinetix,
-   iocEnergyServer, 32idMZ1, 32idMZ2, TXMbackend.
-   DO NOT call wrapper scripts under
-   /home/beams/USERTXM/Software/iocs_monitor/iocs_monitor/scripts/*.sh
-   — they spawn gnome-terminal windows the user doesn't want.
-   DO NOT ssh directly to the IOC host — the Control Panel server handles
-   startup procedure (screen sessions, env) that a manual ssh misses.
-   After start/stop/restart, verify via /status/<name> after 2–3 s OR
-   read_pv on a meaningful PV exposed by that IOC.
+   ioc_status(name)            → {"status": "up"|"down"}       (read-only)
+   ioc_action(name, action)    → start | stop | restart; waits until the
+                                 IOC control panel reports the new state
+                                 and returns success + status.
+   list_iocs()                 → names the panel manages.
+   Names: ioc32idbSP1 (Oryx camera), ioc32idbSP2, ioc32idbBPM,
+   ioc32idbTEMP, ioc32idbTXM, ioc32idbShaker, ioc32idbSoft, ioc32idaSoft,
+   ioc32idcSoft, ioc32idAERO, ioc32idLM, ioc32idQG, ioc32idTomoScan,
+   ioc32Kinetix, iocEnergyServer, 32idMZ1, 32idMZ2, TXMbackend.
+   NEVER run the iocs_monitor/scripts/*.sh wrappers (bash refuses them)
+   and never ssh to the IOC host — the control panel owns startup.
+   Say an IOC is started/stopped ONLY if ioc_action returned
+   success: true; otherwise quote its `reason`. "Start the camera" may
+   mean start acquisition (caput 32idbSP1:cam1:Acquire 1) rather than
+   the IOC — check ioc_status first, and ask if it's already up.
 
 C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
        read_pv("32id:m1.RBV")              # ZP motor (focal axis)
@@ -1591,7 +1597,9 @@ F. PROJECT QUESTIONS — when the user mentions a project name (bl_gui,
    Other on-disk references:
        ~/.pystream/docs/<topic>.md           — user notes (condensers etc.)
        ~/.pystream/status_pages.json         — registered status URLs
-       ~/.pystream/ioc_scripts.json          — IOC restart allowlist
+       ~/.pystream/procedures/               — beamline procedures; use
+                                              search_docs / read_doc with
+                                              directory="~/.pystream/procedures"
        ~/.bl_gui/bl32id_zp_calibration.json  — ZP energy/X/Y/Z table
        ~/.pystream/agent_settings.json       — pystream agent settings
                                               (api_key is sensitive, DO NOT echo)
