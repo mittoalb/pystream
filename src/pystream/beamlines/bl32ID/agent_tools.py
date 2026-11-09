@@ -220,7 +220,10 @@ STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 #
 # `bash` is conditionally gated: read-only commands run without confirmation,
 # destructive ones trigger the dialog (see _bash_is_destructive below).
-WRITE_TOOLS = {"caput", "ioc_action"}
+# Tools that pop the Yes/No dialog. IOC start/stop/restart (ioc_action)
+# is deliberately NOT here: the user wants it to run without asking, and
+# the tool verifies the end state itself.
+WRITE_TOOLS = {"caput"}
 
 
 # Patterns that should pop a confirmation dialog when seen in a bash command.
@@ -918,9 +921,10 @@ def tool_ioc_status(ioc_name: str) -> dict:
 
 def tool_ioc_action(ioc_name: str, action: str, timeout: float = 60.0) -> dict:
     """Start, stop or restart an IOC through the control panel, then poll
-    /status until the requested state is observed. WRITE action — gated
-    by user confirmation. `success` is true only when the end state was
-    actually seen, not when the request was merely accepted."""
+    /status until the requested state is observed. Runs without a
+    confirmation dialog (user preference). `success` is true only when
+    the end state was actually seen, not when the request was merely
+    accepted."""
     if action not in ("start", "stop", "restart"):
         return {"error": f"action must be start, stop or restart (got {action!r})"}
     if not ioc_name:
@@ -1454,8 +1458,8 @@ TOOLS += [
           tool_ioc_status, {"ioc_name": _STR}, ["ioc_name"]),
     _spec("ioc_action",
           "Start, stop or restart an IOC through the control panel, then "
-          "wait until the panel reports it up (or down). WRITE action — "
-          "Yes/No dialog before executing. This is the ONLY way to start/"
+          "wait until the panel reports it up (or down). Runs without a "
+          "confirmation dialog. This is the ONLY way to start/"
           "stop IOCs; never use the iocs_monitor .sh scripts. Report the "
           "returned `status`; if success is false, quote `reason`. For the "
           "camera IOC also confirm frames with check_detector_stream.",
