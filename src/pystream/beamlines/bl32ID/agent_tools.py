@@ -223,7 +223,7 @@ STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 # Tools that pop the Yes/No dialog. IOC start/stop/restart (ioc_action)
 # is deliberately NOT here: the user wants it to run without asking, and
 # the tool verifies the end state itself.
-WRITE_TOOLS = {"caput"}
+WRITE_TOOLS = {"caput", "tomoscan_start"}
 
 
 # Patterns that should pop a confirmation dialog when seen in a bash command.
@@ -431,7 +431,7 @@ def tool_search_docs(query: str, directory: str = DOCS_DIR_DEFAULT,
 def tool_list_pv_aliases() -> dict:
     """Read the user-maintained PV alias / macro-substitution file, a JSON
     mapping friendly names → full PV strings. Format:
-        {"aliases": {"zp_z": "32id:m1", "energy_rbv": "32id:TXMOptics:Energy_RBV"},
+        {"aliases": {"zp_z": "32idbTXM:mcs2:c1:m15", "energy_rbv": "32id:TXMOptics:Energy_RBV"},
          "macros": {"P": "32id:", "M": "m1"}}"""
     try:
         if not os.path.isfile(PV_ALIASES_FILE):
@@ -961,6 +961,205 @@ def tool_ioc_action(ioc_name: str, action: str, timeout: float = 60.0) -> dict:
     return out
 
 
+# ── bl_gui display buttons (MEDM screens, launchers) ────────────────────
+#
+# The TomoScan / TomoStep / TomoStream screens, XANES, DCM Motors, IOC
+# Setup, … are buttons in bl_gui's Displays / Launchers panels. Reading
+# them from bl_gui's own saved layout keeps bl_gui the source of truth:
+# a button the user edits there is what the agent opens.
+
+def _norm_label(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _bl_gui_shell_buttons() -> dict:
+    """label → shell command for every saved bl_gui shell button."""
+    from bl_gui import headless as blh
+    out = {}
+    for a in blh.list_actions(blh.load_layout()):
+        if a.get("type") == "shell" and a.get("label") and a.get("action"):
+            out.setdefault(a["label"], a["action"])
+    return out
+
+
+def tool_open_bl_gui_display(name: str) -> dict:
+    """Open a bl_gui display/launcher button by its label (e.g. 'TomoScan',
+    'XANES', 'DCM Motors'). Runs the button's own command."""
+    try:
+        buttons = _bl_gui_shell_buttons()
+    except Exception as ex:
+        return {"error": f"cannot read bl_gui layout: {type(ex).__name__}: {ex}"}
+    if not name:
+        return {"available": sorted(buttons)}
+    match = next((lbl for lbl in buttons if _norm_label(lbl) == _norm_label(name)), None)
+    if match is None:
+        return {"error": f"no bl_gui button named {name!r}",
+                "available": sorted(buttons)}
+    cmd = buttons[match].strip()
+    if cmd.endswith("&"):
+        cmd = cmd[:-1].rstrip()  # track the program itself, not a backgrounding shell
+    import subprocess
+    import tempfile
+    log = tempfile.NamedTemporaryFile(prefix="bl_gui_display_", suffix=".log",
+                                      delete=False)
+    try:
+        proc = subprocess.Popen(cmd, shell=True, start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    except Exception as ex:
+        return {"error": f"launch failed: {type(ex).__name__}: {ex}",
+                "command": cmd}
+    # A window program that fails (no DISPLAY, missing .adl, bad macro)
+    # exits within a second; one that stays up is very likely showing.
+    time.sleep(1.5)
+    code = proc.poll()
+    if code is None:
+        return {"button": match, "command": cmd, "pid": proc.pid,
+                "success": True, "note": "process is running; window should be open"}
+    log.close()
+    try:
+        with open(log.name, errors="replace") as f:
+            output = f.read()[-1500:]
+    except OSError:
+        output = ""
+    return {"button": match, "command": cmd, "success": code == 0,
+            "exit_code": code, "output": output,
+            "reason": None if code == 0 else "program exited immediately — the window did not open"}
+
+
+def tool_list_bl_gui_displays() -> dict:
+    """Labels of the bl_gui display/launcher buttons open_bl_gui_display accepts."""
+    try:
+        return {"buttons": sorted(_bl_gui_shell_buttons())}
+    except Exception as ex:
+        return {"error": f"cannot read bl_gui layout: {type(ex).__name__}: {ex}"}
+
+
+# ── TomoScan ────────────────────────────────────────────────────────────
+#
+# ioc32idTomoScan serves three scan types, each its own PV prefix. A scan
+# starts by writing StartScan=1 (a busy record that stays "Acquire" until
+# the scan ends); ScanStatus is a text line the python server updates as
+# it goes. ServerRunning=Running means the tomoscan python server is up.
+
+TOMOSCAN_PREFIXES = {
+    "TomoScan":       "32id:TomoScan:",
+    "TomoScanStep":   "32id:TomoScanStep:",
+    "TomoScanStream": "32id:TomoScanStream:",
+}
+
+_TOMOSCAN_STATUS_PVS = (
+    "ServerRunning", "ScanStatus", "StartScan", "ScanType",
+    "RotationStart", "RotationStep", "RotationStop", "NumAngles",
+    "ExposureTime", "NumDarkFields", "NumFlatFields", "FlatFieldMode",
+    "FlatFieldAxis", "SampleInX", "SampleOutX", "SampleInY", "SampleOutY",
+    "FilePath", "FileName", "ImagesCollected", "ImagesSaved",
+    "ElapsedTime", "RemainingTime",
+)
+
+
+def _tomoscan_get(epics, prefix: str, field: str):
+    return epics.caget(prefix + field, as_string=True, timeout=1.0)
+
+
+def _tomoscan_prefix(scan: str):
+    prefix = TOMOSCAN_PREFIXES.get(scan or "TomoScan")
+    if prefix is None:
+        return None, {"error": f"scan must be one of {sorted(TOMOSCAN_PREFIXES)}, "
+                               f"got {scan!r}"}
+    return prefix, None
+
+
+def tool_tomoscan_status(scan: str = "TomoScan") -> dict:
+    """Read a TomoScan's state and scan parameters. READ-ONLY."""
+    prefix, err = _tomoscan_prefix(scan)
+    if err:
+        return err
+    try:
+        import epics
+    except Exception as ex:
+        return {"error": f"pyepics unavailable: {ex}"}
+    server = _tomoscan_get(epics, prefix, "ServerRunning")
+    if server is None:
+        return {"error": f"TomoScan PVs not reachable at {prefix} — check "
+                         "ioc_status('ioc32idTomoScan')"}
+    pvs = {f: _tomoscan_get(epics, prefix, f) for f in _TOMOSCAN_STATUS_PVS}
+    return {"scan": scan, "prefix": prefix, "pvs": pvs,
+            "server_running": server == "Running",
+            "scan_in_progress": pvs.get("StartScan") == "Acquire"}
+
+
+def tool_tomoscan_start(scan: str = "TomoScan", timeout: float = 20.0) -> dict:
+    """Start a TomoScan with its current parameters, then confirm it really
+    began (StartScan busy and ScanStatus or ImagesCollected changing).
+    WRITE action — gated by user confirmation."""
+    prefix, err = _tomoscan_prefix(scan)
+    if err:
+        return err
+    try:
+        import epics
+    except Exception as ex:
+        return {"error": f"pyepics unavailable: {ex}", "success": False}
+    server = _tomoscan_get(epics, prefix, "ServerRunning")
+    if server is None:
+        return {"success": False,
+                "reason": f"TomoScan PVs not reachable at {prefix}"}
+    if server != "Running":
+        return {"success": False,
+                "reason": f"tomoscan python server is not running "
+                          f"(ServerRunning={server}) — nothing was started"}
+    if _tomoscan_get(epics, prefix, "StartScan") == "Acquire":
+        return {"success": False, "reason": "a scan is already in progress"}
+    status0 = _tomoscan_get(epics, prefix, "ScanStatus")
+    images0 = _tomoscan_get(epics, prefix, "ImagesCollected")
+    # wait=False: the busy record stays "Acquire" for the whole scan.
+    if not epics.caput(prefix + "StartScan", 1, wait=False):
+        return {"success": False, "reason": "write to StartScan failed"}
+
+    deadline = time.monotonic() + float(timeout)
+    busy = status = images = None
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        busy = _tomoscan_get(epics, prefix, "StartScan")
+        status = _tomoscan_get(epics, prefix, "ScanStatus")
+        images = _tomoscan_get(epics, prefix, "ImagesCollected")
+        if busy == "Acquire" and (status != status0 or images != images0):
+            return {"scan": scan, "success": True, "scan_status": status,
+                    "images_collected": images}
+        if busy == "Done" and status != status0:
+            break  # ended already — almost always an error
+    return {"scan": scan, "success": False, "start_scan": busy,
+            "scan_status": status, "images_collected": images,
+            "reason": (f"no scan progress seen within {timeout}s "
+                       f"(StartScan={busy}, ScanStatus={status!r}) — the scan "
+                       "is NOT confirmed as running")}
+
+
+def tool_tomoscan_abort(scan: str = "TomoScan", timeout: float = 30.0) -> dict:
+    """Abort a running TomoScan and wait for StartScan to return to Done.
+    Not gated — stopping a scan must be immediate."""
+    prefix, err = _tomoscan_prefix(scan)
+    if err:
+        return err
+    try:
+        import epics
+    except Exception as ex:
+        return {"error": f"pyepics unavailable: {ex}", "success": False}
+    if not epics.caput(prefix + "AbortScan", 1, wait=True, timeout=5.0):
+        return {"success": False, "reason": "write to AbortScan failed"}
+    deadline = time.monotonic() + float(timeout)
+    busy = None
+    while time.monotonic() < deadline:
+        busy = _tomoscan_get(epics, prefix, "StartScan")
+        if busy == "Done":
+            break
+        time.sleep(0.5)
+    out = {"scan": scan, "success": busy == "Done", "start_scan": busy,
+           "scan_status": _tomoscan_get(epics, prefix, "ScanStatus")}
+    if busy != "Done":
+        out["reason"] = f"scan still reports StartScan={busy} after {timeout}s"
+    return out
+
+
 # ── device-health diagnostics ───────────────────────────────────────────
 
 # CA alarm severity codes
@@ -1361,6 +1560,9 @@ def _spec(name, description, func, properties=None, required=()):
 
 
 _STR = {"type": "string"}
+_TOMOSCAN_SCAN = {"type": "string", "enum": sorted(TOMOSCAN_PREFIXES),
+                  "description": "Which TomoScan: TomoScan (fly scan, "
+                                 "default), TomoScanStep, TomoScanStream."}
 _DOCS_DIR_HELP = {
     "type": "string",
     "description": "Defaults to ~/.pystream/docs (reference docs). Use "
@@ -1470,6 +1672,35 @@ TOOLS += [
                        "description": "Seconds to wait for the end state. "
                        "Default 60."}},
           ["ioc_name", "action"]),
+    _spec("list_bl_gui_displays",
+          "List the bl_gui display/launcher buttons (TomoScan, TomoStep, "
+          "TomoStream, XANES, DCM Motors, IOC Setup, ImageJ, …).",
+          tool_list_bl_gui_displays),
+    _spec("open_bl_gui_display",
+          "Open a bl_gui display/launcher by its button label, exactly as "
+          "clicking it in bl_gui — e.g. 'TomoScan' opens the TomoScan MEDM "
+          "screen. Use this for 'open tomoscan', 'open the XANES screen', "
+          "'open DCM motors'.",
+          tool_open_bl_gui_display, {"name": _STR}, ["name"]),
+    _spec("tomoscan_status",
+          "Read a TomoScan's state (server running, scan in progress, "
+          "status text, images collected) and its scan parameters (angles, "
+          "exposure, flats/darks, sample in/out, file path/name).",
+          tool_tomoscan_status, {"scan": _TOMOSCAN_SCAN}),
+    _spec("tomoscan_start",
+          "Start a tomography scan with the TomoScan's CURRENT parameters "
+          "and confirm it actually began. WRITE action — Yes/No dialog. "
+          "Call tomoscan_status first and show the user the parameters. "
+          "Say the scan is running only if success is true.",
+          tool_tomoscan_start,
+          {"scan": _TOMOSCAN_SCAN,
+           "timeout": {"type": "number",
+                       "description": "Seconds to wait for scan progress. "
+                       "Default 20."}}),
+    _spec("tomoscan_abort",
+          "Abort a running TomoScan and wait until it has stopped. Runs "
+          "immediately, no dialog.",
+          tool_tomoscan_abort, {"scan": _TOMOSCAN_SCAN}),
 ]
 
 
@@ -1509,19 +1740,39 @@ def openai_tool_specs() -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT_ADDENDUM = """
-# 32-ID TXM TOOLS
+# 32-ID BEAMLINE MAP — where things live
 
-| Tool                          | When to use                                    |
-|-------------------------------|------------------------------------------------|
-| list_status_pages()           | First step for any "running / status / up?"    |
-| fetch_url(url)                | Read a registered status page (HTML→text)      |
-| read_pv(pv_name)              | Get one EPICS PV value                         |
-| caput(pv_name, value)         | Write to EPICS. Motor moves, PV writes,        |
-|                               | everything. Pops the confirmation dialog.      |
-| get_detector_image_stats(pv)  | Numeric detector stats (mean / sat / etc.)     |
-| view_detector_image(pv)       | SEE the live frame as a downsampled PNG        |
-| read_file(path)               | Read a config / doc / log on disk              |
-| bash(cmd)                     | Anything else: ls, ping, curl, .sh, etc.       |
+| Thing                         | Where / how                                         |
+|-------------------------------|-----------------------------------------------------|
+| TomoScan / TomoStep / TomoStream screens, XANES, DCM Motors, IOC Setup, Furnace, ImageJ | buttons in **bl_gui** (Displays / Launchers panels) → `open_bl_gui_display(name)` |
+| Tomography scans              | TomoScan IOC (`ioc32idTomoScan`), PVs `32id:TomoScan:*` → tomoscan_* tools |
+| Camera (Oryx)                 | `ioc32idbSP1`, PVs `32idbSP1:cam1:*`, stream `32idbSP1:Pva1:Image` |
+| Motors, shutters, energy      | bl_gui layout (`bl-cli layout motors`), moves via `bl-cli` |
+| Zone plate X/Y/Z              | `32idbTXM:mcs2:c1:m13/m14/m15` (Z = focal); table ~/.bl_gui/bl32id_zp_calibration.json |
+| IOC start/stop                | IOC Control Panel → ioc_status / ioc_action          |
+| Procedures (how-to)           | ~/.pystream/procedures → search_docs / read_doc       |
+| Project docs                  | ~/.pystream/docs (AGENTS.md / README of each project) |
+| Source code                   | ~/Software/<project> (bl_gui, pystream, beamline-agent, xanes_gui, …); EPICS support under /home/beams19/USERTXM/epics/synApps/support |
+
+If the user names something you don't recognise, LOOK IT UP before
+asking: search_docs (both doc dirs), `bl-cli layout actions`,
+list_bl_gui_displays, or `grep -rn` in ~/Software/<project>.
+
+# 32-ID TOOLS (beyond the core ones)
+
+| Need                               | Tool                                      |
+|------------------------------------|-------------------------------------------|
+| PV / motor read                    | read_pv, read_motor, check_pv_health, check_motor_health |
+| PV write                           | caput (dialog, except camera Acquire)     |
+| Detector                           | view_detector_image, get_detector_image_stats, check_detector_stream |
+| IOCs                               | list_iocs, ioc_status, ioc_action (no dialog) |
+| bl_gui screens / launchers         | list_bl_gui_displays, open_bl_gui_display |
+| Tomography                         | tomoscan_status, tomoscan_start (dialog), tomoscan_abort |
+| Docs / procedures                  | list_docs, search_docs, read_doc          |
+| Status pages, web                  | list_status_pages, fetch_url              |
+| Scans on disk                      | list_recent_scans, read_scan_metadata     |
+| Network                            | ping, tcp_check, traceroute, dns_lookup   |
+| Anything else                      | bash, read_file                           |
 
 Task-recording tools (`list_task_recordings`, `read_task_recording`)
 are core, not 32-ID-specific — they're always in your catalog. See
@@ -1562,7 +1813,7 @@ B. Per-IOC actions — "is X running", "start/stop/restart X":
    the IOC — check ioc_status first, and ask if it's already up.
 
 C. PV / motor reads — use read_pv(), not bash with caget. Faster, cleaner.
-       read_pv("32id:m1.RBV")              # ZP motor (focal axis)
+       read_motor("32idbTXM:mcs2:c1:m15")  # ZP Z (focal axis)
        read_pv("32id:TXMOptics:Energy_RBV") # mono energy in keV
        read_pv("32idbSP1:cam1:Acquire_RBV") # camera state
 
@@ -1608,9 +1859,27 @@ F. PROJECT QUESTIONS — when the user mentions a project name (bl_gui,
        ~/.pystream/agent_settings.json       — pystream agent settings
                                               (api_key is sensitive, DO NOT echo)
 
-G. Network diagnostics — bash("ping -c 4 <host>"), bash("traceroute -n
-   -m 12 <host>"), bash("getent hosts <host>"). Common IOC hosts:
-   gauss, txmthree (+.aps.anl.gov suffix forms).
+G. Network diagnostics — ping, tcp_check, traceroute, dns_lookup.
+   Common IOC hosts: gauss, txmthree (+.aps.anl.gov suffix forms).
+
+H. TOMOGRAPHY — "open tomoscan", "run a tomo scan", "is the scan done":
+   - "open tomoscan" / "open the TomoScan screen" →
+     open_bl_gui_display("TomoScan") (also TomoStep, TomoStream).
+   - "run / start a scan" →
+       1. tomoscan_status() — check server_running and that no scan is
+          in progress; show the user angles, exposure, flats/darks,
+          file name.
+       2. If the user wants different parameters, set them with caput
+          on 32id:TomoScan:<Field> (NumAngles, RotationStart,
+          RotationStep, ExposureTime, NumFlatFields, NumDarkFields,
+          FileName, …) and read them back.
+       3. tomoscan_start() — the user confirms in the dialog. Report it
+          running ONLY if it returned success: true.
+   - Progress → tomoscan_status (ScanStatus, ImagesCollected,
+     RemainingTime). Stop → tomoscan_abort (immediate, no dialog).
+   - If server_running is false, the tomoscan python server is down —
+     tell the user; don't try to start a scan.
+   Three scan types: TomoScan (fly, default), TomoScanStep, TomoScanStream.
 
 # 32-ID DOMAIN CHEAT SHEET
 
@@ -1620,10 +1889,14 @@ G. Network diagnostics — bash("ping -c 4 <host>"), bash("traceroute -n
   `32idbSP1:Pva1:Image` (NTNDArray).
 - Mono: `32id:TXMOptics:{Energy, EnergySet, Energy_RBV}` (keV).
   EnergySet is rising-edge-triggered (toggle 0→1 to commit a move).
-- Zone plate: focal motor `32id:m1`; transverse X/Y/Z calibration in
-  bl_gui's table at ~/.bl_gui/bl32id_zp_calibration.json.
+- Zone plate: X/Y/Z = `32idbTXM:mcs2:c1:m13/m14/m15`, Z is the focal
+  axis. Calibration table: ~/.bl_gui/bl32id_zp_calibration.json (the
+  authority — `32id:m1` is NOT the zone plate).
 - QGMax: image-mean optimization plugin. Status PV: `32id:pystream:qgmax`.
-- IOC name → script suffix 1:1: `32idbSP1` IOC ↔ `32idbSP1.sh`.
+- TomoScan: prefix `32id:TomoScan:`; StartScan (busy: Done/Acquire),
+  AbortScan, ScanStatus (text), ServerRunning (Stopped/Running),
+  ImagesCollected, NumAngles, RotationStart/Step/Stop, ExposureTime,
+  FilePath, FileName.
 
 # 32-ID ANTI-PATTERNS (in addition to the core ones)
 
