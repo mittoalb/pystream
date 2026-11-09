@@ -884,18 +884,41 @@ def _panel_resolve(ioc_name: str) -> tuple:
     return ioc_name, status
 
 
-def _panel_wait(ioc_name: str, want: str, timeout: float) -> tuple:
-    """Poll /status until it reports `want` or `timeout` elapses.
-    Returns (last_status, seconds_waited)."""
+# One PV each IOC serves, to confirm the IOC process itself answers. The
+# panel's "up" reflects its own session bookkeeping and can say "up" for
+# an IOC that serves no PVs at all.
+IOC_PROBE_PVS = {
+    "ioc32idbSP1":     "32idbSP1:cam1:Acquire",
+    "ioc32idbSP2":     "32idbSP2:cam1:Acquire",
+    "ioc32idTomoScan": "32id:TomoScan:StartScan",
+}
+
+
+def _probe_ioc(ioc_name: str):
+    """Return (probe_pv, reachable) — (None, None) when no probe is known."""
+    pv = IOC_PROBE_PVS.get(ioc_name)
+    if not pv:
+        return None, None
+    try:
+        import epics
+        return pv, epics.caget(pv, timeout=2.0) is not None
+    except Exception:
+        return pv, False
+
+
+def _ioc_wait(ioc_name: str, want: str, timeout: float) -> tuple:
+    """Poll until the panel reports `want` and, for "up", the probe PV
+    answers. Returns (panel_status, probe_reachable, seconds_waited)."""
     start = time.monotonic()
     while True:
         try:
-            last = _panel_post("status", ioc_name).get("status")
+            panel = _panel_post("status", ioc_name).get("status")
         except Exception as ex:
-            last = f"unreachable ({ex})"
-        waited = time.monotonic() - start
-        if last == want or waited >= timeout:
-            return last, round(waited, 1)
+            panel = f"unreachable ({ex})"
+        probe_ok = _probe_ioc(ioc_name)[1] if want == "up" else None
+        waited = round(time.monotonic() - start, 1)
+        if (panel == want and probe_ok is not False) or waited >= timeout:
+            return panel, probe_ok, waited
         time.sleep(2.0)
 
 
@@ -915,8 +938,17 @@ def tool_ioc_status(ioc_name: str) -> dict:
     if status.get("status") == "not found":
         return {"error": f"IOC {ioc_name!r} is not known to the control panel",
                 "known_iocs": list(CONTROL_PANEL_IOCS)}
-    return {"ioc_name": name, "status": status.get("status"),
-            "address": status.get("address")}
+    out = {"ioc_name": name, "status": status.get("status"),
+           "address": status.get("address")}
+    probe_pv, reachable = _probe_ioc(name)
+    if probe_pv:
+        out["probe_pv"] = probe_pv
+        out["pvs_reachable"] = reachable
+        if status.get("status") == "up" and not reachable:
+            out["warning"] = (f"control panel says 'up' but {probe_pv} is not "
+                              "reachable — the IOC is not serving PVs. "
+                              "ioc_action(..., 'restart') may fix it.")
+    return out
 
 
 def tool_ioc_action(ioc_name: str, action: str, timeout: float = 60.0) -> dict:
@@ -939,25 +971,40 @@ def tool_ioc_action(ioc_name: str, action: str, timeout: float = 60.0) -> dict:
         return {"error": f"IOC {ioc_name!r} is not known to the control panel",
                 "known_iocs": list(CONTROL_PANEL_IOCS), "success": False}
     want = "down" if action == "stop" else "up"
-    if action != "restart" and before == want:
+    probe_pv, probe_before = _probe_ioc(name)
+    if action == "stop" and before == "down":
         return {"ioc_name": name, "action": action, "status": before,
-                "success": True, "note": f"already {before} — nothing was done"}
+                "success": True, "note": "already down — nothing was done"}
+    if action == "start" and before == "up":
+        if probe_before is False:
+            return {"ioc_name": name, "action": action, "status": before,
+                    "success": False,
+                    "reason": f"control panel says 'up' but {probe_pv} is not "
+                              "reachable, so start would do nothing — use "
+                              "action='restart'"}
+        return {"ioc_name": name, "action": action, "status": before,
+                "success": True, "note": "already up — nothing was done"}
     try:
         if action == "restart":
             _panel_post("stop", name, timeout=30.0)
-            _panel_wait(name, "down", timeout=min(30.0, float(timeout)))
+            _ioc_wait(name, "down", timeout=min(30.0, float(timeout)))
             _panel_post("start", name, timeout=30.0)
         else:
             _panel_post(action, name, timeout=30.0)
     except Exception as ex:
         return {"error": f"control panel {action} request failed: {ex}",
                 "ioc_name": name, "success": False}
-    final, waited = _panel_wait(name, want, timeout=float(timeout))
+    final, probe_ok, waited = _ioc_wait(name, want, timeout=float(timeout))
+    success = final == want and probe_ok is not False
     out = {"ioc_name": name, "action": action, "status_before": before,
-           "status": final, "waited_s": waited, "success": final == want}
-    if final != want:
-        out["reason"] = (f"control panel reports '{final}' after {waited}s, "
-                         f"expected '{want}' — the {action} is NOT confirmed")
+           "status": final, "waited_s": waited, "success": success}
+    if probe_pv and want == "up":
+        out["probe_pv"], out["pvs_reachable"] = probe_pv, probe_ok
+    if not success:
+        why = (f"control panel reports '{final}'" if final != want
+               else f"panel says 'up' but {probe_pv} is not reachable")
+        out["reason"] = (f"{why} after {waited}s — the {action} is NOT "
+                         "confirmed")
     return out
 
 
@@ -1080,8 +1127,11 @@ def tool_tomoscan_status(scan: str = "TomoScan") -> dict:
         return {"error": f"pyepics unavailable: {ex}"}
     server = _tomoscan_get(epics, prefix, "ServerRunning")
     if server is None:
-        return {"error": f"TomoScan PVs not reachable at {prefix} — check "
-                         "ioc_status('ioc32idTomoScan')"}
+        return {"error": f"TomoScan PVs not reachable at {prefix} — the "
+                         "TomoScan IOC is not serving them (the control panel "
+                         "may still say 'up'). Tell the user; "
+                         "ioc_action('ioc32idTomoScan', 'restart') may fix it. "
+                         "Don't retry this call."}
     pvs = {f: _tomoscan_get(epics, prefix, f) for f in _TOMOSCAN_STATUS_PVS}
     return {"scan": scan, "prefix": prefix, "pvs": pvs,
             "server_running": server == "Running",
@@ -1102,7 +1152,8 @@ def tool_tomoscan_start(scan: str = "TomoScan", timeout: float = 20.0) -> dict:
     server = _tomoscan_get(epics, prefix, "ServerRunning")
     if server is None:
         return {"success": False,
-                "reason": f"TomoScan PVs not reachable at {prefix}"}
+                "reason": f"TomoScan PVs not reachable at {prefix} — the "
+                          "TomoScan IOC is not serving them; nothing was started"}
     if server != "Running":
         return {"success": False,
                 "reason": f"tomoscan python server is not running "
