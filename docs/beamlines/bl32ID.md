@@ -169,6 +169,12 @@ Every *Y* minutes, *N* times: take *X* images at the sample position, then
 - **Timing:** the interval runs from the start of one repeat to the start
   of the next. Between repeats the sample waits at the reference position
   with the fast shutter closed.
+- **B-station shutter:** for waits of a minute or more it is also closed
+  (`32idb:rshtrB:Close.PROC`). Before the next repeat it is opened again,
+  and the series waits for `PB:32ID:STA_B_SBS_CLSD_PL` to report open. If
+  the PSS doesn't open it within 30 s, the series stops with an error
+  rather than taking dark images. Leave the B-shutter PVs blank to turn
+  this off. XANES 2D's repeats do the same.
 - **One HDF5 file**, written as it goes, so Stop keeps everything taken
   so far:
   - `/exchange/data`, `/exchange/data_white`: images

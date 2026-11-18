@@ -22,8 +22,9 @@ Positions, motor PVs, camera PVs, exposure and the fast shutter come from
 the XANES 2D plugin's saved settings (~/.xanes_gui_2d_settings.json,
 "Load from XANES 2D"); they can be edited here afterwards. The interval
 is start-to-start. Between repeats the sample waits at the reference
-position with the fast shutter closed (if a shutter PV is set). At the
-end the shutter and the camera's ImageMode / NumImages / AcquireTime /
+position with the fast shutter closed, and for waits of a minute or more
+the B-station shutter too (opened again, with its status checked, before
+the next repeat). At the end both shutters and the camera's ImageMode / NumImages / AcquireTime /
 Acquire go back to what they were before the start.
 
 Settings persist in ~/.pystream/bl32ID_settings.json under
@@ -72,13 +73,23 @@ DEFAULT_PVS = {
     "topz_pv":             "32idbTXM:mcs:c2:m2",
     "rot_pv":              "32idbTXM:ens:c1:m1",
     "fast_shutter_pv":     "32idbTXM:uniblitz:control",
+    "b_shutter_open_pv":   "32idb:rshtrB:Open.PROC",
+    "b_shutter_close_pv":  "32idb:rshtrB:Close.PROC",
+    "b_shutter_status_pv": "PB:32ID:STA_B_SBS_CLSD_PL",
 }
+OPTIONAL_PVS = {"fast_shutter_pv", "b_shutter_open_pv", "b_shutter_close_pv",
+                "b_shutter_status_pv"}
+B_SHUTTER_MIN_WAIT_S = 60.0     # only cycle the B shutter for waits this long
+B_SHUTTER_TIMEOUT_S = 30.0
 PV_LABELS = [
     ("topx_pv", "Sample X motor"), ("topz_pv", "Sample Z motor"),
     ("rot_pv", "Rotation motor"), ("detector_pv", "Detector PVA channel"),
     ("cam_acquire_pv", "Camera Acquire"), ("cam_acquire_time_pv", "Camera AcquireTime"),
     ("cam_image_mode_pv", "Camera ImageMode"), ("cam_num_images_pv", "Camera NumImages"),
     ("fast_shutter_pv", "Fast shutter (blank = none)"),
+    ("b_shutter_open_pv", "B shutter open (blank = none)"),
+    ("b_shutter_close_pv", "B shutter close"),
+    ("b_shutter_status_pv", "B shutter status (1 = closed)"),
 ]
 _NTNDA_KEYS = ("ushortValue", "shortValue", "intValue", "uintValue",
                "floatValue", "doubleValue", "ubyteValue", "byteValue")
@@ -166,6 +177,41 @@ class _SeriesWorker(QtCore.QThread):
             self.log.emit(f"  shutter {'open' if open_ else 'close'} ({pv})")
             caput(pv, 1 if open_ else 0, wait=False)          # as XANES 2D
 
+    def _b_closed(self):
+        st = self.cfg["pvs"].get("b_shutter_status_pv", "").strip()
+        if not st:
+            return None
+        v = caget(st, timeout=2.0, use_monitor=False)
+        return None if v is None else bool(int(v))       # 1 = closed
+
+    def _b_shutter(self, open_: bool):
+        """Open/close the B-station shutter and wait for its status. A failed
+        open raises (images would be dark); a failed close only warns."""
+        p = self.cfg["pvs"]
+        pv = p.get("b_shutter_open_pv" if open_ else "b_shutter_close_pv", "").strip()
+        if not pv:
+            return
+        word = "open" if open_ else "closed"
+        if self._b_closed() is (not open_):
+            return
+        self.log.emit(f"  B shutter {'opening' if open_ else 'closing'} ({pv})")
+        caput(pv, 1, wait=False)
+        if not p.get("b_shutter_status_pv", "").strip():
+            time.sleep(3.0)
+            return
+        deadline = time.monotonic() + B_SHUTTER_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self._b_closed() is (not open_):
+                self.log.emit(f"  B shutter {word}")
+                return
+            if self._stop:
+                return
+            time.sleep(0.2)
+        msg = f"B shutter not {word} after {B_SHUTTER_TIMEOUT_S:.0f}s"
+        if open_:
+            raise RuntimeError(msg + " — check the PSS / hutch search")
+        self.log.emit("  ⚠ " + msg)
+
     def _snap(self, ch) -> np.ndarray:
         """Trigger one frame and wait for a frame newer than before the
         trigger (and at least one exposure later)."""
@@ -195,6 +241,7 @@ class _SeriesWorker(QtCore.QThread):
         cam_before = {}
         shutter_pv = p.get("fast_shutter_pv", "").strip()
         shutter_before = None
+        b_closed_before = None
         f = None
         try:
             self.log.emit(f"Camera: stop, Single mode, {c['exposure_s']} s exposure")
@@ -202,6 +249,7 @@ class _SeriesWorker(QtCore.QThread):
             cam_before = {pv: caget(pv, timeout=2.0, use_monitor=False) for pv in cam_pvs}
             if shutter_pv:
                 shutter_before = caget(shutter_pv, timeout=2.0, use_monitor=False)
+            b_closed_before = self._b_closed()
             if cam_before[p["cam_acquire_pv"]]:
                 self._put(p["cam_acquire_pv"], 0)
                 time.sleep(0.3)
@@ -221,6 +269,7 @@ class _SeriesWorker(QtCore.QThread):
                     break
                 t_start = time.monotonic()
                 self.log.emit(f"══ repeat {k}/{N} ══")
+                self._b_shutter(True)
                 self._shutter(True)
 
                 self._move_to("sample", c["sample"])
@@ -247,6 +296,9 @@ class _SeriesWorker(QtCore.QThread):
                     self._shutter(False)
                     t_next = t_start + c["interval_s"]
                     left = t_next - time.monotonic()
+                    if left >= B_SHUTTER_MIN_WAIT_S:
+                        self._b_shutter(False)
+                        left = t_next - time.monotonic()
                     if left <= 0:
                         self.log.emit("  repeat took longer than the interval — next starts now")
                     else:
@@ -270,6 +322,12 @@ class _SeriesWorker(QtCore.QThread):
             if shutter_pv and shutter_before is not None:
                 caput(shutter_pv, shutter_before, wait=True, timeout=5.0)
                 self.log.emit(f"Shutter back to {'open' if shutter_before else 'closed'}.")
+            if b_closed_before is not None:
+                try:
+                    self._stop = False            # let the restore wait for status
+                    self._b_shutter(not b_closed_before)
+                except Exception as e:
+                    self.log.emit(f"[WARN] B shutter restore: {e}")
             self.done.emit(path)
 
     def _restore_camera(self, before):
@@ -540,7 +598,7 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
             probs.append("needs pyepics, pvaccess and h5py")
         if not c["path"]:
             probs.append("choose the output file")
-        missing = [lbl for k, lbl in PV_LABELS if k != "fast_shutter_pv" and not c["pvs"][k]]
+        missing = [lbl for k, lbl in PV_LABELS if k not in OPTIONAL_PVS and not c["pvs"][k]]
         if missing:
             probs.append("missing PVs: " + ", ".join(missing))
         if probs:
