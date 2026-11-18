@@ -146,6 +146,11 @@ A mosaic of X-Y positions. At each position, tick any of **Image**,
   them to the current position and restores them afterwards.
 - *Run All* runs every position with at least one action ticked; *Run
   Selected* runs only the selected rows. *Stop* aborts the running scan.
+- **Repeat N × every X min** repeats the whole run, for time series. The
+  interval runs from the start of one repeat to the start of the next;
+  if a repeat takes longer, the next one starts right away. For a time
+  series of tomographies at one position, use one row (*+ Current
+  position*) with only Tomo ticked.
 
 ### Röntgen (AI)
 

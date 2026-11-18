@@ -309,9 +309,12 @@ class _DataMapWorker(QtCore.QThread):
     done     = QtCore.pyqtSignal()
     error    = QtCore.pyqtSignal(str)
 
-    def __init__(self, plan, pvs, image, parent=None):
+    def __init__(self, plan, pvs, image, repeats=1, interval_s=0.0, parent=None):
         super().__init__(parent)
         self.plan, self.pvs, self.image = plan, pvs, image
+        self.repeats = max(1, int(repeats))
+        self.interval_s = max(0.0, float(interval_s))
+        self._rep_tag = ""            # "r02_" while repeating; goes in file names
         self._stop = False
         self._proc: Optional[subprocess.Popen] = None   # tomo caput / 3D script
         self._proc_is_tomo = False
@@ -471,7 +474,7 @@ class _DataMapWorker(QtCore.QThread):
         dx, dz = _fresh(topx + ".RBV"), _fresh(topz + ".RBV")
         if dx is None or dz is None:
             raise RuntimeError(f"cannot read XANES 2D sample motors {topx}/{topz}")
-        pvs, scan, params = xanes2d_config(f"p{n:03d}", dx, dz)
+        pvs, scan, params = xanes2d_config(f"{self._rep_tag}p{n:03d}", dx, dz)
         self.log.emit(f"    {len(scan['energies_eV'])} energies, data at "
                       f"{topx}={dx:.4f} {topz}={dz:.4f} → {params['master_path']}")
         w = gui_2d.ScanWorker(pvs, scan, params)
@@ -518,34 +521,17 @@ class _DataMapWorker(QtCore.QThread):
         try:
             if HAS_EPICS:
                 epics.ca.use_initial_context()
-            total = len(self.plan)
             failures = 0
-            for i, (row, x, y, actions) in enumerate(self.plan, start=1):
+            for k in range(1, self.repeats + 1):
                 if self._stop:
                     break
-                n = row + 1
-                self.current.emit(row)
-                names = ", ".join(ACTION_TITLE[a] for a in actions)
-                self.log.emit(f"[{i}/{total}] position #{n}  "
-                              f"{self.pvs['x_name']}={x:.4f} {self.pvs['y_name']}={y:.4f}  "
-                              f"→ {names}")
-                if not (self._move(self.pvs["x_pv"], x) and self._move(self.pvs["y_pv"], y)):
-                    self.log.emit(f"    ✗ position #{n} skipped: motors did not get there")
-                    failures += 1
-                    self.progress.emit(i, total)
-                    continue
-                for a in actions:
-                    if self._stop:
-                        break
-                    self.log.emit(f"  ▶ {ACTION_TITLE[a]}")
-                    try:
-                        getattr(self, f"_do_{a}")(n, x, y)
-                        if not self._stop:
-                            self.log.emit(f"  ✓ {ACTION_TITLE[a]} done")
-                    except Exception as e:
-                        failures += 1
-                        self.log.emit(f"  ✗ {ACTION_TITLE[a]} failed: {e}")
-                self.progress.emit(i, total)
+                t0 = time.monotonic()
+                if self.repeats > 1:
+                    self._rep_tag = f"r{k:02d}_"
+                    self.log.emit(f"══ repeat {k}/{self.repeats} ══")
+                failures += self._run_plan(k)
+                if k < self.repeats and not self._stop:
+                    self._wait_until(t0 + self.interval_s, k + 1)
             if self._stop:
                 self.log.emit("Stopped by user.")
             elif failures:
@@ -553,6 +539,51 @@ class _DataMapWorker(QtCore.QThread):
             self.done.emit()
         except Exception as e:
             self.error.emit(f"{type(e).__name__}: {e}")
+
+    def _wait_until(self, t_next: float, k_next: int):
+        """Interval is start-to-start: wait out what is left of it."""
+        left = t_next - time.monotonic()
+        if left <= 0:
+            self.log.emit(f"  repeat took longer than the interval — "
+                          f"starting repeat {k_next} now")
+            return
+        at = time.strftime("%H:%M:%S", time.localtime(time.time() + left))
+        self.log.emit(f"  waiting {left / 60:.1f} min — repeat {k_next} at {at}")
+        while not self._stop and time.monotonic() < t_next:
+            time.sleep(min(0.5, max(0.0, t_next - time.monotonic())))
+
+    def _run_plan(self, k: int) -> int:
+        failures = 0
+        per = len(self.plan)
+        total = per * self.repeats
+        for i, (row, x, y, actions) in enumerate(self.plan, start=1):
+            if self._stop:
+                break
+            n = row + 1
+            done_before = (k - 1) * per
+            self.current.emit(row)
+            names = ", ".join(ACTION_TITLE[a] for a in actions)
+            self.log.emit(f"[{i}/{per}] position #{n}  "
+                          f"{self.pvs['x_name']}={x:.4f} {self.pvs['y_name']}={y:.4f}  "
+                          f"→ {names}")
+            if not (self._move(self.pvs["x_pv"], x) and self._move(self.pvs["y_pv"], y)):
+                self.log.emit(f"    ✗ position #{n} skipped: motors did not get there")
+                failures += 1
+                self.progress.emit(done_before + i, total)
+                continue
+            for a in actions:
+                if self._stop:
+                    break
+                self.log.emit(f"  ▶ {ACTION_TITLE[a]}")
+                try:
+                    getattr(self, f"_do_{a}")(n, x, y)
+                    if not self._stop:
+                        self.log.emit(f"  ✓ {ACTION_TITLE[a]} done")
+                except Exception as e:
+                    failures += 1
+                    self.log.emit(f"  ✗ {ACTION_TITLE[a]} failed: {e}")
+            self.progress.emit(done_before + i, total)
+        return failures
 
 
 # ── Dialog ───────────────────────────────────────────────────────────────
@@ -598,7 +629,21 @@ class DataMapDialog(QtWidgets.QDialog):
         self.stop_btn.clicked.connect(self._on_stop)
         self.progress = QtWidgets.QProgressBar()
         self.summary_lbl = QtWidgets.QLabel("")
-        for w in (self.run_all_btn, self.run_sel_btn, self.stop_btn):
+        # Repeat the whole run N times; interval counted start to start.
+        self.repeat_n = QtWidgets.QSpinBox()
+        self.repeat_n.setRange(1, 10000)
+        self.repeat_n.setPrefix("Repeat ")
+        self.repeat_n.setSuffix(" ×")
+        self.repeat_every = self._dspin(0, 100000, 1, 0.0, " min")
+        self.repeat_every.setPrefix("every ")
+        self.repeat_every.setToolTip(
+            "Time from the start of one repeat to the start of the next. "
+            "If a repeat takes longer, the next starts right away.")
+        self.repeat_n.valueChanged.connect(
+            lambda n: self.repeat_every.setEnabled(n > 1))
+        self.repeat_every.setEnabled(False)
+        for w in (self.run_all_btn, self.run_sel_btn, self.stop_btn,
+                  self.repeat_n, self.repeat_every):
             run_row.addWidget(w)
         run_row.addWidget(self.progress, 1)
         run_row.addWidget(self.summary_lbl)
@@ -940,8 +985,11 @@ class DataMapDialog(QtWidgets.QDialog):
         self._save_settings()
         self._refresh_sources()
         self._log("=" * 60)
-        self._log(f"DataMap: {len(plan)} positions, {n_act} actions")
-        self._worker = _DataMapWorker(plan, self._pvs(), self._image())
+        reps, every = self.repeat_n.value(), self.repeat_every.value()
+        self._log(f"DataMap: {len(plan)} positions, {n_act} actions"
+                  + (f", repeated {reps}× every {every:g} min" if reps > 1 else ""))
+        self._worker = _DataMapWorker(plan, self._pvs(), self._image(),
+                                      repeats=reps, interval_s=every * 60.0)
         self._worker.log.connect(self._log)
         self._worker.progress.connect(lambda d, t: (self.progress.setMaximum(t),
                                                     self.progress.setValue(d)))
@@ -992,6 +1040,10 @@ class DataMapDialog(QtWidgets.QDialog):
         self.ref_z_pv.setText(im["ref_z_pv"]); self.ref_z_mm.setValue(float(im["ref_z_mm"]))
         self.ref_rot_pv.setText(im["ref_rot_pv"]); self.ref_rot.setValue(float(im["ref_rot_deg"]))
 
+        rp = s.get("repeat", {})
+        self.repeat_n.setValue(int(rp.get("n", 1)))
+        self.repeat_every.setValue(float(rp.get("every_min", 0.0)))
+
         gr = s.get("grid", {})
         for wid, k in ((self.x_start, "x_start"), (self.x_step, "x_step"),
                        (self.y_start, "y_start"), (self.y_step, "y_step")):
@@ -1015,6 +1067,7 @@ class DataMapDialog(QtWidgets.QDialog):
                       "x_n": self.x_n.value(), "y_start": self.y_start.value(),
                       "y_step": self.y_step.value(), "y_n": self.y_n.value()},
             "map":   [r for r in self._rows() if r["x"] is not None and r["y"] is not None],
+            "repeat": {"n": self.repeat_n.value(), "every_min": self.repeat_every.value()},
         })
 
     def closeEvent(self, e):
