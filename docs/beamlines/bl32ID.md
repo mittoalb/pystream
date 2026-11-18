@@ -121,16 +121,31 @@ subprocess — the GUI is a thin CA client onto the daemon.
 
 ### DataMap
 
-Runs a 2D projection (sample + flat) or a Tomoscan at every row of a
-user-defined motor positions table.
+A mosaic of X-Y positions. At each position, tick any of **Image**,
+**2D XANES**, **Tomo** and **3D XANES**; they run in that order.
 
-- *Add Motor Column* on the Positions tab adds a motor; fill its PV on
-  the **Motor PVs** tab.
-- *Add Row* adds a blank point; *Capture Live Values → New Row*
-  snapshots current motor RBVs.
-- Pick **2D Projection** or **Tomoscan** under *Mode* — applies to every
-  row. Expand the matching section to edit its parameters.
-- *Run Selected Row* runs one point; *Run All* runs them in order.
+- **Mosaic grid**: set start, step and number of points for X and Y, then
+  *Generate grid*. Rows are in serpentine order, so the stage doesn't fly
+  back across the map between rows. *Start = current position* fills in
+  the start values from the motors. *+ Current position* adds one row.
+- **Ticking actions**: click a column title (Image, 2D XANES, …) to tick
+  or untick it for the selected rows, or for all rows when none are
+  selected.
+- **Scan parameters come from the plugin that owns them.** DataMap shows
+  a summary of each under *Scan parameters*.
+  - *2D XANES*: whatever the XANES 2D GUI last saved with **Save
+    Settings**, plus bl_gui's ZP calibration. The DATA position is
+    replaced by the map position.
+  - *Tomo*: the TomoScan IOC's current settings (bl_gui → TomoScan).
+  - *3D XANES*: energies from `32id:TXMOptics:XanesStart/End/Step`, with
+    one tomography per energy using the TomoScan settings.
+  - *Image*: DataMap's own exposure and flat position (*Image settings*).
+- **PVs tab**: the X/Y motor PVs, the detector, and the TomoScan prefix.
+- **SampleIn handling**: after flat fields, TomoScan moves the sample to
+  `SampleInX`/`SampleInY`. Before each Tomo or 3D XANES, DataMap sets
+  them to the current position and restores them afterwards.
+- *Run All* runs every position with at least one action ticked; *Run
+  Selected* runs only the selected rows. *Stop* aborts the running scan.
 
 ### Röntgen (AI)
 

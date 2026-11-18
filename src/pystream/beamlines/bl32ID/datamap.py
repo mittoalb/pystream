@@ -1,45 +1,52 @@
 """
-DataMap plugin for bl32ID.
+DataMap plugin for bl32ID — a mosaic of X-Y positions, and at each one any
+combination of:
 
-Two tabs:
+  * Image      — one frame at the position + one flat at the Ref position,
+                 saved to <output_dir>/datamap_pNNN_<ts>.h5
+  * 2D XANES   — the XANES 2D plugin's scan, run at this position
+  * Tomo       — one TomoScan scan
+  * 3D XANES   — the XANES plugin's energy scan (a tomography per energy)
 
-  * "Acquisition & Positions" — common acquisition settings, a Mode
-                                selector (2D Projection or Tomoscan)
-                                with collapsible per-mode settings, and
-                                the positions table. Columns are motors
-                                (add/remove); rows are positions
-                                (add/remove). Every row runs with the
-                                same selected mode.
-  * "Motor PVs"               — the PV assigned to each motor column.
-                                Editing names here updates the column
-                                headers in the positions table.
+At each position the selected actions run in that order.
 
-Modes:
-  * 2D Projection — move all motors to the row's positions, snap a
-                    sample frame, move REF X/Z out, snap a flat,
-                    restore X/Z, save to
-                    <output_dir>/datamap_rowN_<ts>.h5 under
-                    /exchange/data and /exchange/data_flat.
-  * Tomoscan     — move motors to the row's positions, then trigger
-                   the TomoScan IOC by writing 1 to its StartScan
-                   busy record.
+Scan parameters are NOT set here. They come from the plugin that owns
+them, so DataMap always runs what those plugins would run:
 
-Settings persist to ~/.pystream/bl32ID_settings.json under key
-"DataMapDialog".
+  * 2D XANES  ← ~/.xanes_gui_2d_settings.json, written by the XANES 2D GUI's
+                Save Settings (energies, exposure, Ref position, PVs) and
+                the ZP calibration from bl_gui. The DATA position is
+                replaced by the current map position.
+  * Tomo      ← the TomoScan IOC's own PVs (set them in bl_gui → TomoScan).
+  * 3D XANES  ← energies from 32id:TXMOptics:XanesStart/End/Step (what the
+                XANES GUI primes), launch settings from
+                ~/.xanes_gui_settings.json.
+
+TomoScan moves the sample back to SampleInX/SampleInY after flat fields,
+so before a Tomo or 3D XANES DataMap sets those to the current map
+position and restores them afterwards. Otherwise every position would be
+scanned at the same place.
+
+Tab 2 ("PVs") holds the X/Y motor PVs and the detector/TomoScan names.
+Settings persist to ~/.pystream/bl32ID_settings.json under "DataMapDialog".
 """
 
+import json
 import os
+import signal
+import socket
+import subprocess
 import time
 import logging
-import subprocess
 from typing import Optional, List, Dict, Any
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
-from .plugin_settings import load_settings, save_settings, PYSTREAM_HOME
+from .plugin_settings import load_settings, save_settings
 
 try:
+    import epics
     from epics import caget, caput
     HAS_EPICS = True
 except ImportError:
@@ -60,276 +67,502 @@ except ImportError:
 
 # ── Defaults ─────────────────────────────────────────────────────────────
 
-DEFAULT_MOTORS = [
-    {"name": "TopX", "pv": "32idbTXM:mcs:c1:m2"},
-    {"name": "TopZ", "pv": "32idbTXM:mcs:c1:m1"},
+ACTIONS = [            # (key, column title) — also the run order per position
+    ("image",   "Image"),
+    ("xanes2d", "2D XANES"),
+    ("tomo",    "Tomo"),
+    ("xanes3d", "3D XANES"),
 ]
+ACTION_TITLE = dict(ACTIONS)
 
-DEFAULT_TOMOSCAN_START_PV = "32id:TomoScan:StartScan"
-DEFAULT_DETECTOR_PVA      = "32idbSP1:Pva1:Image"
-DEFAULT_CAMERA_PREFIX     = "32idbSP1:cam1:"   # used for Acquire / NumImages
-DEFAULT_REF_X_PV          = "32idbTXM:mcs:c1:m2"
-DEFAULT_REF_Z_PV          = "32idbTXM:mcs:c1:m1"
-DEFAULT_REF_ROT_PV        = "32idbTXM:ens:c1:m1"
-DEFAULT_OUTPUT_DIR        = "/tmp"
+DEFAULT_PVS = {
+    "x_name": "TopX",  "x_pv": "32idbTXM:mcs:c1:m2",
+    "y_name": "TopZ",  "y_pv": "32idbTXM:mcs:c1:m1",
+    "motor_tol_mm":    0.001,
+    "settle_s":        0.1,
+    "detector_pva":    "32idbSP1:Pva1:Image",
+    "camera_prefix":   "32idbSP1:cam1:",
+    "tomoscan_prefix": "32id:TomoScan:",
+    "tomo_timeout_s":  6 * 3600,
+}
+DEFAULT_IMAGE = {
+    "exposure_s":  0.1,
+    "output_dir":  "/tmp",
+    "ref_x_pv":    "32idbTXM:mcs:c1:m2",
+    "ref_z_pv":    "32idbTXM:mcs:c1:m1",
+    "ref_rot_pv":  "32idbTXM:ens:c1:m1",
+    "ref_x_mm":    0.0,
+    "ref_z_mm":    0.0,
+    "ref_rot_deg": 0.0,
+}
+
+XANES2D_SETTINGS = os.path.expanduser("~/.xanes_gui_2d_settings.json")
+XANES3D_SETTINGS = os.path.expanduser("~/.xanes_gui_settings.json")
+XANES3D_ENERGY_PVS = ("32id:TXMOptics:XanesStart",
+                      "32id:TXMOptics:XanesEnd",
+                      "32id:TXMOptics:XanesStep")
+# Same launch defaults as xanes_gui (headless.DEFAULTS / gui.DEFAULTS).
+XANES3D_LAUNCH_DEFAULTS = {
+    "remote_user": "usertxm",
+    "remote_host": "gauss",
+    "conda_env":   "tomoscan",
+    "work_dir":    "/home/beams/USERTXM/epics/synApps/support/tomoscan/iocBoot/iocTomoScan_32ID/",
+    "conda_path":  "/home/beams/USERTXM/conda/anaconda",
+    "script_name": "/home/beams/USERTXM/Software/xanes_gui/xanes_energy.py",
+}
+
+
+# ── Scan-parameter sources ───────────────────────────────────────────────
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _age(path: str) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
+    except OSError:
+        return "?"
+
+
+def _energies_eV(start, end, step) -> List[float]:
+    """Same rule as the XANES 2D GUI (gui_2d._energies_eV)."""
+    s, e, d = float(start), float(end), float(step)
+    if d <= 0:
+        return []
+    out, x = [], s
+    while x <= e + 1e-6:
+        out.append(round(x, 4))
+        x += d
+    return out
+
+
+def xanes2d_config(tag: str, data_x: float, data_z: float):
+    """(pvs, scan, params) for the XANES 2D ScanWorker, built from the 2D
+    GUI's saved settings exactly like its Start button does
+    (gui_2d._gather_config), with the DATA position set to (data_x,
+    data_z) and the master file named after the map position."""
+    from xanes_gui import gui_2d
+    d = _read_json(XANES2D_SETTINGS)
+    if not d:
+        raise RuntimeError(f"no XANES 2D settings at {XANES2D_SETTINGS} — "
+                           "open XANES 2D, set the scan, press Save Settings")
+    pvs = dict(gui_2d.DEFAULTS)
+    pvs.update({k: v for k, v in d.get("pvs", {}).items() if v not in (None, "")})
+    pvs = {k: (v.strip() if isinstance(v, str) else v) for k, v in pvs.items()}
+    pvs["energy_tol"] = float(pvs.get("energy_tol") or gui_2d.DEFAULTS["energy_tol"])
+
+    sc = d.get("scan", {})
+    opt = lambda k: (float(sc[k]) if str(sc.get(k, "")).strip() else None)
+    energies = _energies_eV(sc["e_start"], sc["e_end"], sc["e_step"])
+    if not energies:
+        raise RuntimeError("XANES 2D settings give no energies")
+    cal = gui_2d.load_bl_gui_zp_cal_points()
+    if not cal:
+        raise RuntimeError("no ZP calibration in bl_gui (need ≥2 points) — "
+                           "XANES 2D cannot follow focus")
+    scan = {
+        "energies_eV":  energies,
+        "exposure_s":   float(sc["exposure"]),
+        "topx_data_mm": float(data_x),
+        "topz_data_mm": float(data_z),
+        "rot_data_deg": opt("rot_data"),
+        "topx_ref_mm":  float(sc["topx_ref"]),
+        "topz_ref_mm":  float(sc["topz_ref"]),
+        "rot_ref_deg":  opt("rot_ref"),
+    }
+    stem, ext = os.path.splitext(sc.get("master_name") or "xanes2d_scan.h5")
+    params = {
+        "zp_cal_points":        cal,
+        "zp_cal_source":        gui_2d.BL_GUI_CAL_FILE,
+        "motor_settle_s":       float(sc.get("motor_settle") or 0.5),
+        "post_energy_settle_s": float(sc.get("post_energy_settle") or 0.0),
+        "master_path": os.path.join(sc.get("save_dir") or "/tmp",
+                                    f"{stem}_{tag}{ext or '.h5'}"),
+        "qgmax_every_n":   int(float(sc.get("qgmax_every") or 0)),
+        "qgmax_pv":        sc.get("qgmax_pv", ""),
+        "qgmax_timeout_s": float(sc.get("qgmax_timeout") or 300.0),
+        "repeat_count":      1,
+        "repeat_interval_s": 0.0,
+    }
+    return pvs, scan, params
+
+
+def xanes2d_summary() -> str:
+    d = _read_json(XANES2D_SETTINGS)
+    if not d:
+        return "not configured — open XANES 2D and press Save Settings"
+    sc = d.get("scan", {})
+    try:
+        en = _energies_eV(sc["e_start"], sc["e_end"], sc["e_step"])
+        return (f"{len(en)} energies {sc['e_start']}–{sc['e_end']} eV "
+                f"(step {sc['e_step']}), exposure {sc.get('exposure')} s, "
+                f"Ref X={sc.get('topx_ref')} Z={sc.get('topz_ref')}  "
+                f"[saved {_age(XANES2D_SETTINGS)}]")
+    except (KeyError, ValueError) as e:
+        return f"settings incomplete ({e})"
+
+
+def _caget_str(pv: str):
+    if not HAS_EPICS:
+        return None
+    return caget(pv, as_string=True, timeout=1.0, use_monitor=False)
+
+
+def _fresh(pv: str, timeout: float = 2.0):
+    """caget that asks the IOC, not pyepics' monitor cache — the cache can
+    still hold the value from before a put we just made."""
+    return caget(pv, timeout=timeout, use_monitor=False)
+
+
+def tomo_summary(prefix: str) -> str:
+    if not HAS_EPICS:
+        return "pyepics not installed"
+    num = {k: _fresh(prefix + k, timeout=1.0) for k in
+           ("NumAngles", "ExposureTime", "RotationStart", "RotationStep")}
+    txt = {k: _caget_str(prefix + k) for k in ("FlatFieldMode", "FileName")}
+    if all(v is None for v in num.values()):
+        return f"TomoScan IOC {prefix} not reachable"
+    return (f"{num['NumAngles']} angles from {num['RotationStart']:g}° step "
+            f"{num['RotationStep']:g}°, exposure {num['ExposureTime']:g} s, "
+            f"flats {txt['FlatFieldMode']}, file '{txt['FileName']}'  [{prefix}]")
+
+
+def xanes3d_launch_config() -> dict:
+    cfg = dict(XANES3D_LAUNCH_DEFAULTS)
+    cfg.update({k: v for k, v in _read_json(XANES3D_SETTINGS).items()
+                if k in XANES3D_LAUNCH_DEFAULTS and v})
+    return cfg
+
+
+def xanes3d_command(cfg: dict) -> List[str]:
+    """Same command the XANES GUI's Start runs (gui.StartScriptWorker /
+    headless.build_3d_launch_command)."""
+    host = socket.gethostname()
+    is_local = (host == cfg["remote_host"] or host.split(".")[0] == cfg["remote_host"]
+                or cfg["remote_host"] in ("localhost", "127.0.0.1", "")
+                or os.path.exists(cfg["script_name"]))
+    inner = (f"cd {cfg['work_dir']} && "
+             f"source {cfg['conda_path']}/etc/profile.d/conda.sh && "
+             f"conda activate {cfg['conda_env']} && python {cfg['script_name']}")
+    if is_local:
+        return ["bash", "-l", "-c", inner]
+    return ["ssh", "-t", f"{cfg['remote_user']}@{cfg['remote_host']}",
+            f'bash -l -c "{inner}"']
+
+
+def xanes3d_summary() -> str:
+    s, e, st = (_caget_str(pv) for pv in XANES3D_ENERGY_PVS)
+    cfg = xanes3d_launch_config()
+    if s is None:
+        en = "energies: TXMOptics IOC not reachable"
+    else:
+        try:
+            n = int((float(e) * 1000 - float(s) * 1000) / float(st)) + 1
+            en = f"{n} energies {s}–{e} keV (step {st} eV)"
+        except (TypeError, ValueError, ZeroDivisionError):
+            en = f"energies {s}–{e} keV step {st}"
+        en += ", tomography per energy uses the TomoScan settings"
+    return f"{en}; runs {os.path.basename(cfg['script_name'])} on {cfg['remote_host']}"
 
 
 # ── Collapsible section helper ───────────────────────────────────────────
 
 class _CollapsibleSection(QtWidgets.QWidget):
-    """A toggle-button header with a content area that can be collapsed.
-    Use ``content_layout`` to add child widgets via QFormLayout API."""
-
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.toggle = QtWidgets.QToolButton()
-        self.toggle.setStyleSheet(
-            "QToolButton { border: none; font-weight: bold; }")
+        self.toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
         self.toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(QtCore.Qt.RightArrow)
         self.toggle.setText(title)
         self.toggle.setCheckable(True)
         self.toggle.toggled.connect(self._on_toggled)
-
         self.content = QtWidgets.QFrame()
         self.content.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.content_layout = QtWidgets.QFormLayout(self.content)
         self.content.setVisible(False)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self.toggle)
-        layout.addWidget(self.content)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lay.addWidget(self.toggle)
+        lay.addWidget(self.content)
 
     def _on_toggled(self, checked: bool):
-        self.toggle.setArrowType(
-            QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+        self.toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
         self.content.setVisible(checked)
-
-    def setExpanded(self, expanded: bool):
-        self.toggle.setChecked(expanded)
 
 
 # ── Worker ───────────────────────────────────────────────────────────────
 
 class _DataMapWorker(QtCore.QThread):
-    """Runs a queue of (row_index, action) jobs sequentially."""
+    """Runs the plan: [(row_idx, x, y, [action, ...]), ...]."""
 
     log      = QtCore.pyqtSignal(str)
-    progress = QtCore.pyqtSignal(int, int)   # done, total
+    progress = QtCore.pyqtSignal(int, int)   # positions done, total
+    current  = QtCore.pyqtSignal(int)        # table row being worked on
     done     = QtCore.pyqtSignal()
     error    = QtCore.pyqtSignal(str)
 
-    def __init__(self, jobs, motors, positions, params, parent=None):
+    def __init__(self, plan, pvs, image, parent=None):
         super().__init__(parent)
-        self.jobs       = jobs          # [(row_idx, "2d" | "tomo"), ...]
-        self.motors     = motors        # [{"name", "pv"}, ...]
-        self.positions  = positions     # [[v0, v1, ...], ...] one per row
-        self.params     = params
-        self._stop      = False
+        self.plan, self.pvs, self.image = plan, pvs, image
+        self._stop = False
+        self._proc: Optional[subprocess.Popen] = None   # tomo caput / 3D script
+        self._proc_is_tomo = False
+        self._x2d_worker = None
 
     def stop(self):
+        """Called from the GUI thread. Ends the running action, then the
+        plan stops at the next check."""
         self._stop = True
+        if self._x2d_worker is not None:
+            self._x2d_worker._stop = True
+        p = self._proc
+        if p is not None and p.poll() is None:
+            if self._proc_is_tomo:
+                subprocess.run(["caput", self.pvs["tomoscan_prefix"] + "AbortScan", "1"],
+                               capture_output=True, timeout=5)
+                self.log.emit("    abort sent to TomoScan")
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            except OSError:
+                pass
 
     # ── EPICS helpers ───────────────────────────────────────────────────
 
-    def _caput(self, pv, val, wait=True, timeout=30.0):
-        if not HAS_EPICS:
-            raise RuntimeError("pyepics not installed")
-        caput(pv, val, wait=wait, timeout=timeout)
+    def _put(self, pv, val, wait=True, timeout=120.0):
+        if not caput(pv, val, wait=wait, timeout=timeout):
+            raise RuntimeError(f"caput {pv}={val} failed")
 
-    def _caget(self, pv, timeout=3.0):
-        if not HAS_EPICS:
-            return None
-        return caget(pv, timeout=timeout)
+    def _move(self, pv, target) -> bool:
+        """Move a motor and confirm with .RBV. False if it did not get there."""
+        self.log.emit(f"    move {pv} → {target:.4f}")
+        try:
+            self._put(pv, float(target), wait=True, timeout=300.0)
+        except RuntimeError as e:
+            self.log.emit(f"    ✗ {e}")
+            return False
+        # A motor record completes the put when the move is done; still
+        # poll the readback briefly in case the encoder lags.
+        deadline, rbv = time.monotonic() + 10.0, None
+        while True:
+            rbv = _fresh(pv + ".RBV")
+            if rbv is not None and abs(float(rbv) - float(target)) <= self.pvs["motor_tol_mm"]:
+                time.sleep(self.pvs["settle_s"])
+                return True
+            if time.monotonic() > deadline or self._stop:
+                self.log.emit(f"    ✗ {pv} at {rbv}, wanted {target:.4f}")
+                return False
+            time.sleep(0.1)
 
-    def _move_motor(self, pv, target, settle_s):
-        self.log.emit(f"    move {pv} → {target}")
-        self._caput(pv, float(target), wait=True, timeout=120.0)
-        if settle_s > 0:
-            time.sleep(settle_s)
+    def _run_proc(self, cmd, is_tomo=False) -> int:
+        """Run a command, streaming its output to the log. For the
+        StartScan caput the output (Old/New lines) is shown only on failure."""
+        self._proc_is_tomo = is_tomo
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True,
+                                      bufsize=1, start_new_session=True)
+        held = []
+        try:
+            for line in self._proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                if is_tomo:
+                    held.append(line)
+                else:
+                    self.log.emit("    " + line)
+            rc = self._proc.wait()
+            if is_tomo and rc != 0 and not self._stop:
+                for line in held[-15:]:
+                    self.log.emit("    " + line)
+            return rc
+        finally:
+            self._proc = None
 
-    def _move_all(self, target_values):
-        settle = self.params.get("motor_settle_s", 0.1)
-        for motor, target in zip(self.motors, target_values):
-            if self._stop:
-                return
-            if target is None or (isinstance(target, str) and target.strip() == ""):
+    # ── TomoScan sample-in pinning ─────────────────────────────────────
+
+    def _pin_sample_in(self) -> Dict[str, Any]:
+        """Set TomoScan SampleInX/Y to where its sample motors are now, so
+        the scan returns here after flats. Returns the old values."""
+        pre = self.pvs["tomoscan_prefix"]
+        old = {}
+        for axis in ("X", "Y"):
+            motor = _caget_str(f"{pre}Sample{axis}PVName")
+            if not motor:
+                self.log.emit(f"    [WARN] {pre}Sample{axis}PVName unreadable; "
+                              f"SampleIn{axis} left as is")
                 continue
-            self._move_motor(motor["pv"], target, settle)
+            here = _fresh(motor.strip() + ".RBV")
+            prev = _fresh(f"{pre}SampleIn{axis}")
+            if here is None or prev is None:
+                self.log.emit(f"    [WARN] cannot read {motor}/SampleIn{axis}")
+                continue
+            old[f"{pre}SampleIn{axis}"] = prev
+            self._put(f"{pre}SampleIn{axis}", float(here), timeout=5)
+            self.log.emit(f"    SampleIn{axis} = {float(here):.4f} (was {float(prev):.4f})")
+        return old
 
-    # ── Acquisition ─────────────────────────────────────────────────────
-
-    def _snap_frame(self):
-        """Snap one frame from the PVA detector and return it as ndarray.
-        Falls back to None if PVA isn't installed."""
-        if not HAS_PVA:
-            self.log.emit("    [WARN] pvaccess not installed; no frame captured")
-            return None
-        det_pv = self.params["detector_pva"]
-        cam    = self.params["camera_prefix"]
-        exp    = float(self.params.get("exposure_s", 0.1))
-
-        try:
-            self._caput(f"{cam}AcquireTime", exp, wait=False)
-            self._caput(f"{cam}ImageMode",   0,   wait=False)  # Single
-            self._caput(f"{cam}TriggerMode", 0,   wait=False)  # Internal
-        except Exception as e:
-            self.log.emit(f"    [WARN] camera config failed: {e}")
-
-        ch = pva.Channel(det_pv)
-        # Trigger Acquire
-        try:
-            self._caput(f"{cam}Acquire", 1, wait=True, timeout=max(5.0, exp * 3 + 5))
-        except Exception as e:
-            self.log.emit(f"    [WARN] Acquire failed: {e}")
-
-        try:
-            st = ch.get()
-        except Exception as e:
-            self.log.emit(f"    [WARN] PVA get failed: {e}")
-            return None
-        return self._ndarray_from_struct(st)
-
-    @staticmethod
-    def _ndarray_from_struct(st):
-        try:
-            d = st.toDict()
-        except Exception:
-            d = {}
-        val = d.get("value")
-        flat = None
-        if isinstance(val, dict):
-            for key in val:
-                try:
-                    flat = np.asarray(val[key])
-                    break
-                except Exception:
-                    pass
-        if flat is None:
-            return None
-        dims = d.get("dimension")
-        if isinstance(dims, list) and len(dims) >= 2:
+    def _restore(self, old: Dict[str, Any]):
+        for pv, v in old.items():
             try:
-                h = int(dims[1].get("size"))
-                w = int(dims[0].get("size"))
-                if h * w == flat.size:
-                    return flat.reshape(h, w)
-            except Exception:
-                pass
-        side = int(np.sqrt(flat.size))
-        if side * side == flat.size:
-            return flat.reshape(side, side)
-        return flat
+                self._put(pv, v, timeout=5)
+            except RuntimeError as e:
+                self.log.emit(f"    [WARN] restore {e}")
 
-    # ── Per-row actions ─────────────────────────────────────────────────
+    # ── Actions ────────────────────────────────────────────────────────
 
-    def _do_2d(self, row_idx, targets):
-        self.log.emit(f"[row {row_idx+1}] 2D image")
-        self._move_all(targets)
-        if self._stop:
-            return
-        sample = self._snap_frame()
-        if sample is None:
-            self.log.emit("    [WARN] no sample frame captured")
+    def _snap(self):
+        if not HAS_PVA:
+            raise RuntimeError("pvaccess not installed")
+        cam = self.pvs["camera_prefix"]
+        exp = float(self.image["exposure_s"])
+        self._put(f"{cam}AcquireTime", exp, wait=True, timeout=5)
+        self._put(f"{cam}ImageMode", 0, wait=True, timeout=5)      # Single
+        self._put(f"{cam}Acquire", 1, wait=True, timeout=exp * 3 + 10)
+        st = pva.Channel(self.pvs["detector_pva"]).get("")
+        val = st["value"][0]
+        flat = np.asarray(next(iter(val.values())))
+        dims = st["dimension"]
+        return flat.reshape(int(dims[1]["size"]), int(dims[0]["size"]))
 
-        # REF / flat
-        ref_x_pv   = self.params.get("ref_x_pv")
-        ref_z_pv   = self.params.get("ref_z_pv")
-        ref_rot_pv = self.params.get("ref_rot_pv")
-        ref_x      = self.params.get("ref_x_mm")
-        ref_z      = self.params.get("ref_z_mm")
-        ref_rot    = self.params.get("ref_rot_deg")
-        # Remember current values so we can return after flat
-        cur_x   = self._caget(ref_x_pv)   if ref_x_pv   else None
-        cur_z   = self._caget(ref_z_pv)   if ref_z_pv   else None
-        cur_rot = self._caget(ref_rot_pv) if ref_rot_pv else None
-        settle = self.params.get("motor_settle_s", 0.1)
-        if ref_x_pv   and ref_x   is not None:
-            self._move_motor(ref_x_pv,   ref_x,   settle)
-        if ref_z_pv   and ref_z   is not None:
-            self._move_motor(ref_z_pv,   ref_z,   settle)
-        if ref_rot_pv and ref_rot is not None:
-            self._move_motor(ref_rot_pv, ref_rot, settle)
-        flat = self._snap_frame()
-        if flat is None:
-            self.log.emit("    [WARN] no flat frame captured")
-        # Return X/Z/Rot to the row's data position (which the motor loop set)
-        if ref_x_pv   and cur_x   is not None:
-            self._move_motor(ref_x_pv,   cur_x,   settle)
-        if ref_z_pv   and cur_z   is not None:
-            self._move_motor(ref_z_pv,   cur_z,   settle)
-        if ref_rot_pv and cur_rot is not None:
-            self._move_motor(ref_rot_pv, cur_rot, settle)
-
-        if HAS_H5PY:
-            out_dir = self.params.get("output_dir", DEFAULT_OUTPUT_DIR)
-            os.makedirs(out_dir, exist_ok=True)
-            ts   = time.strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(out_dir, f"datamap_row{row_idx+1}_{ts}.h5")
-            with h5py.File(path, "w") as f:
-                ex = f.create_group("exchange")
-                if sample is not None:
-                    ex.create_dataset("data",      data=sample[np.newaxis, ...])
-                if flat is not None:
-                    ex.create_dataset("data_flat", data=flat[np.newaxis, ...])
-                meta = f.create_group("measurement/instrument/datamap")
-                meta.attrs["row"] = row_idx + 1
-                for motor, tgt in zip(self.motors, targets):
-                    if tgt is None or (isinstance(tgt, str) and tgt.strip() == ""):
-                        continue
-                    meta.attrs[f"{motor['name']}_target"] = float(tgt)
-                    rbv = self._caget(motor['pv'])
-                    if rbv is not None:
-                        try:
-                            meta.attrs[f"{motor['name']}_rbv"] = float(rbv)
-                        except (TypeError, ValueError):
-                            pass
-            self.log.emit(f"    saved {path}")
-        else:
-            self.log.emit("    [WARN] h5py not installed; frames not saved")
-
-    def _do_tomo(self, row_idx, targets):
-        self.log.emit(f"[row {row_idx+1}] Tomoscan")
-        self._move_all(targets)
-        if self._stop:
-            return
-        start_pv = self.params.get("tomo_start_pv", DEFAULT_TOMOSCAN_START_PV)
-        wait     = bool(self.params.get("tomo_wait", True))
-        self.log.emit(f"    trigger {start_pv} (wait={wait})")
+    def _do_image(self, n, x, y):
+        sample = self._snap()
+        im = self.image
+        refs = [(im["ref_x_pv"], im["ref_x_mm"]), (im["ref_z_pv"], im["ref_z_mm"]),
+                (im["ref_rot_pv"], im["ref_rot_deg"])]
+        refs = [(pv, v) for pv, v in refs if pv]
+        back = [(pv, _fresh(pv + ".RBV")) for pv, _ in refs]
         try:
-            timeout = float(self.params.get("tomo_timeout_s", 3600))
-            self._caput(start_pv, 1, wait=wait, timeout=timeout)
-        except Exception as e:
-            raise RuntimeError(f"TomoScan trigger failed: {e}")
+            for pv, v in refs:
+                if not self._move(pv, v):
+                    raise RuntimeError(f"flat position not reached ({pv})")
+            flat = self._snap()
+        finally:
+            for pv, v in reversed(back):
+                if v is not None:
+                    self._move(pv, v)
+        out = im["output_dir"]
+        os.makedirs(out, exist_ok=True)
+        path = os.path.join(out, f"datamap_p{n:03d}_{time.strftime('%Y%m%d_%H%M%S')}.h5")
+        with h5py.File(path, "w") as f:
+            ex = f.create_group("exchange")
+            ex.create_dataset("data", data=sample[np.newaxis])
+            ex.create_dataset("data_flat", data=flat[np.newaxis])
+            meta = f.create_group("measurement/instrument/datamap")
+            meta.attrs["position"] = n
+            meta.attrs[f"{self.pvs['x_name']}_mm"] = x
+            meta.attrs[f"{self.pvs['y_name']}_mm"] = y
+        self.log.emit(f"    saved {path}")
+
+    def _do_xanes2d(self, n, x, y):
+        from xanes_gui import gui_2d
+        d = _read_json(XANES2D_SETTINGS).get("pvs", {})
+        topx = d.get("topx_pv") or gui_2d.DEFAULTS["topx_pv"]
+        topz = d.get("topz_pv") or gui_2d.DEFAULTS["topz_pv"]
+        # DATA position = wherever XANES 2D's own sample motors are now,
+        # i.e. at this map position. Its Ref position stays as saved.
+        dx, dz = _fresh(topx + ".RBV"), _fresh(topz + ".RBV")
+        if dx is None or dz is None:
+            raise RuntimeError(f"cannot read XANES 2D sample motors {topx}/{topz}")
+        pvs, scan, params = xanes2d_config(f"p{n:03d}", dx, dz)
+        self.log.emit(f"    {len(scan['energies_eV'])} energies, data at "
+                      f"{topx}={dx:.4f} {topz}={dz:.4f} → {params['master_path']}")
+        w = gui_2d.ScanWorker(pvs, scan, params)
+        result = {"path": None, "error": None}
+        direct = QtCore.Qt.DirectConnection
+        w.log.connect(lambda m: self.log.emit("    " + m), direct)
+        w.error.connect(lambda m: result.__setitem__("error", m), direct)
+        w.done.connect(lambda p: result.__setitem__("path", p), direct)
+        self._x2d_worker = w
+        try:
+            w.run()            # inline in this thread, no second QThread
+        finally:
+            self._x2d_worker = None
+        if result["error"]:
+            raise RuntimeError(result["error"])
+
+    def _do_tomo(self, n, x, y):
+        old = self._pin_sample_in()
+        try:
+            pv = self.pvs["tomoscan_prefix"] + "StartScan"
+            self.log.emit(f"    StartScan (waits for the scan to finish)")
+            # -c: put-callback, returns when the busy record is Done again.
+            rc = self._run_proc(["caput", "-c", "-w", str(self.pvs["tomo_timeout_s"]),
+                                 pv, "1"], is_tomo=True)
+            if rc != 0 and not self._stop:
+                raise RuntimeError(f"StartScan caput exit code {rc}")
+        finally:
+            self._restore(old)
+
+    def _do_xanes3d(self, n, x, y):
+        old = self._pin_sample_in()
+        try:
+            cmd = xanes3d_command(xanes3d_launch_config())
+            self.log.emit(f"    {' '.join(cmd)}")
+            rc = self._run_proc(cmd)
+            if rc != 0 and not self._stop:
+                raise RuntimeError(f"3D XANES script exit code {rc}")
+        finally:
+            self._restore(old)
 
     # ── Main loop ───────────────────────────────────────────────────────
 
     def run(self):
         try:
-            total = len(self.jobs)
-            for i, (row_idx, action) in enumerate(self.jobs, start=1):
+            if HAS_EPICS:
+                epics.ca.use_initial_context()
+            total = len(self.plan)
+            failures = 0
+            for i, (row, x, y, actions) in enumerate(self.plan, start=1):
                 if self._stop:
-                    self.log.emit("Stopped by user.")
                     break
-                targets = self.positions[row_idx]
-                if action == "2d":
-                    self._do_2d(row_idx, targets)
-                elif action == "tomo":
-                    self._do_tomo(row_idx, targets)
-                else:
-                    self.log.emit(f"[row {row_idx+1}] unknown action: {action}")
+                n = row + 1
+                self.current.emit(row)
+                names = ", ".join(ACTION_TITLE[a] for a in actions)
+                self.log.emit(f"[{i}/{total}] position #{n}  "
+                              f"{self.pvs['x_name']}={x:.4f} {self.pvs['y_name']}={y:.4f}  "
+                              f"→ {names}")
+                if not (self._move(self.pvs["x_pv"], x) and self._move(self.pvs["y_pv"], y)):
+                    self.log.emit(f"    ✗ position #{n} skipped: motors did not get there")
+                    failures += 1
+                    self.progress.emit(i, total)
+                    continue
+                for a in actions:
+                    if self._stop:
+                        break
+                    self.log.emit(f"  ▶ {ACTION_TITLE[a]}")
+                    try:
+                        getattr(self, f"_do_{a}")(n, x, y)
+                        if not self._stop:
+                            self.log.emit(f"  ✓ {ACTION_TITLE[a]} done")
+                    except Exception as e:
+                        failures += 1
+                        self.log.emit(f"  ✗ {ACTION_TITLE[a]} failed: {e}")
                 self.progress.emit(i, total)
+            if self._stop:
+                self.log.emit("Stopped by user.")
+            elif failures:
+                self.log.emit(f"Finished with {failures} failure(s) — see above.")
             self.done.emit()
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(f"{type(e).__name__}: {e}")
 
 
 # ── Dialog ───────────────────────────────────────────────────────────────
 
+COL_N, COL_X, COL_Y = 0, 1, 2
+COL_ACT0 = 3
+
+
 class DataMapDialog(QtWidgets.QDialog):
-    """Two tabs: (1) Acquisition + Positions table, (2) Motor PVs."""
+    """Tab 1: mosaic grid + per-position actions. Tab 2: PVs."""
 
     BUTTON_TEXT  = "DataMap"
     GROUP        = "Scans"
@@ -339,516 +572,462 @@ class DataMapDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.logger = logger or logging.getLogger(__name__)
         self.setWindowTitle("DataMap — bl32ID")
-        self.resize(950, 750)
-
-        self._worker = None
-        # Single source of truth for the motor list.
-        self._motors: List[Dict[str, str]] = []
-        # Per-row positions, kept in sync with self._motors length.
-        # Each entry: {"values": [str, ...], "action": "2D Image"}
-        self._rows: List[Dict[str, Any]] = []
-
-        # Internal flag to suppress on-edit syncing while we rebuild tables
-        # programmatically.
-        self._suppress_sync = False
-
+        self.resize(1000, 820)
+        self._worker: Optional[_DataMapWorker] = None
+        self._loading = False
         self._build_ui()
         self._restore_settings()
+        self._refresh_sources()
 
     # ── UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         v = QtWidgets.QVBoxLayout(self)
-
         tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._build_main_tab(),   "Acquisition && Positions")
-        tabs.addTab(self._build_motors_tab(), "Motor PVs")
-        v.addWidget(tabs)
+        tabs.addTab(self._build_map_tab(), "Map")
+        tabs.addTab(self._build_pv_tab(), "PVs")
+        v.addWidget(tabs, 3)
 
-        # Run controls
         run_row = QtWidgets.QHBoxLayout()
-        self.run_selected_btn = QtWidgets.QPushButton("Run Selected Row")
-        self.run_selected_btn.clicked.connect(self._on_run_selected)
         self.run_all_btn = QtWidgets.QPushButton("Run All")
-        self.run_all_btn.clicked.connect(self._on_run_all)
+        self.run_all_btn.clicked.connect(lambda: self._start(selected_only=False))
+        self.run_sel_btn = QtWidgets.QPushButton("Run Selected")
+        self.run_sel_btn.clicked.connect(lambda: self._start(selected_only=True))
         self.stop_btn = QtWidgets.QPushButton("Stop")
-        self.stop_btn.clicked.connect(self._on_stop)
         self.stop_btn.setEnabled(False)
-        run_row.addWidget(self.run_selected_btn)
-        run_row.addWidget(self.run_all_btn)
-        run_row.addWidget(self.stop_btn)
-        run_row.addStretch()
+        self.stop_btn.clicked.connect(self._on_stop)
+        self.progress = QtWidgets.QProgressBar()
+        self.summary_lbl = QtWidgets.QLabel("")
+        for w in (self.run_all_btn, self.run_sel_btn, self.stop_btn):
+            run_row.addWidget(w)
+        run_row.addWidget(self.progress, 1)
+        run_row.addWidget(self.summary_lbl)
         v.addLayout(run_row)
 
-        # Log
         self.log_text = QtWidgets.QPlainTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumBlockCount(2000)
-        v.addWidget(self.log_text, 1)
+        self.log_text.setMaximumBlockCount(5000)
+        v.addWidget(self.log_text, 2)
 
-        # Footer
-        foot = QtWidgets.QHBoxLayout()
-        foot.addStretch()
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        foot.addWidget(close_btn)
-        v.addLayout(foot)
+    def _dspin(self, lo, hi, dec, val=0.0, suffix=""):
+        s = QtWidgets.QDoubleSpinBox()
+        s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
+        if suffix:
+            s.setSuffix(suffix)
+        return s
 
-    def _build_main_tab(self):
+    def _build_map_tab(self):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
 
-        # ── Common acquisition group ───────────────────────────────────
-        acq_box = QtWidgets.QGroupBox("Acquisition")
-        f = QtWidgets.QFormLayout(acq_box)
+        # ── Mosaic grid ────────────────────────────────────────────────
+        grid_box = QtWidgets.QGroupBox("Mosaic grid")
+        g = QtWidgets.QGridLayout(grid_box)
+        for c, t in enumerate(("", "Start [mm]", "Step [mm]", "Points")):
+            g.addWidget(QtWidgets.QLabel(f"<b>{t}</b>"), 0, c)
+        self.x_lbl, self.y_lbl = QtWidgets.QLabel("X"), QtWidgets.QLabel("Y")
+        self.x_start = self._dspin(-1000, 1000, 4)
+        self.x_step = self._dspin(-100, 100, 4, 0.5)
+        self.x_n = QtWidgets.QSpinBox(); self.x_n.setRange(1, 500); self.x_n.setValue(3)
+        self.y_start = self._dspin(-1000, 1000, 4)
+        self.y_step = self._dspin(-100, 100, 4, 0.5)
+        self.y_n = QtWidgets.QSpinBox(); self.y_n.setRange(1, 500); self.y_n.setValue(3)
+        for r, row in enumerate(((self.x_lbl, self.x_start, self.x_step, self.x_n),
+                                 (self.y_lbl, self.y_start, self.y_step, self.y_n)), 1):
+            for c, wid in enumerate(row):
+                g.addWidget(wid, r, c)
+        self.from_here_btn = QtWidgets.QPushButton("Start = current position")
+        self.from_here_btn.clicked.connect(self._start_from_current)
+        self.gen_btn = QtWidgets.QPushButton("Generate grid")
+        self.gen_btn.setToolTip("Replace the table with this grid (serpentine order)")
+        self.gen_btn.clicked.connect(self._generate_grid)
+        g.addWidget(self.from_here_btn, 1, 4)
+        g.addWidget(self.gen_btn, 2, 4)
+        v.addWidget(grid_box)
 
-        self.detector_pva_edit  = QtWidgets.QLineEdit(DEFAULT_DETECTOR_PVA)
-        self.camera_prefix_edit = QtWidgets.QLineEdit(DEFAULT_CAMERA_PREFIX)
-        self.exposure_spin = QtWidgets.QDoubleSpinBox()
-        self.exposure_spin.setRange(0.001, 60.0)
-        self.exposure_spin.setDecimals(3)
-        self.exposure_spin.setValue(0.1)
-        self.settle_spin = QtWidgets.QDoubleSpinBox()
-        self.settle_spin.setRange(0.0, 10.0)
-        self.settle_spin.setDecimals(2)
-        self.settle_spin.setValue(0.1)
-
-        self.output_dir_edit = QtWidgets.QLineEdit(DEFAULT_OUTPUT_DIR)
-        browse_btn = QtWidgets.QPushButton("…")
-        browse_btn.setMaximumWidth(30)
-        browse_btn.clicked.connect(self._browse_output)
-        out_row = QtWidgets.QHBoxLayout()
-        out_row.setContentsMargins(0, 0, 0, 0)
-        out_row.addWidget(self.output_dir_edit)
-        out_row.addWidget(browse_btn)
-        out_w = QtWidgets.QWidget(); out_w.setLayout(out_row)
-
-        f.addRow("Detector PVA channel:",  self.detector_pva_edit)
-        f.addRow("Camera prefix:",         self.camera_prefix_edit)
-        f.addRow("Exposure [s]:",          self.exposure_spin)
-        f.addRow("Motor settle [s]:",      self.settle_spin)
-        f.addRow("Output directory:",      out_w)
-        v.addWidget(acq_box)
-
-        # ── Mode selector ──────────────────────────────────────────────
-        mode_box = QtWidgets.QGroupBox("Mode")
-        mh = QtWidgets.QHBoxLayout(mode_box)
-        self.mode_2d   = QtWidgets.QRadioButton("2D Projection")
-        self.mode_tomo = QtWidgets.QRadioButton("Tomoscan")
-        self.mode_2d.setChecked(True)
-        mh.addWidget(self.mode_2d)
-        mh.addWidget(self.mode_tomo)
-        mh.addStretch()
-        v.addWidget(mode_box)
-
-        # ── 2D Projection settings (collapsible) ───────────────────────
-        self.sec_2d = _CollapsibleSection("2D Projection settings")
-        self.ref_x_pv_edit   = QtWidgets.QLineEdit(DEFAULT_REF_X_PV)
-        self.ref_z_pv_edit   = QtWidgets.QLineEdit(DEFAULT_REF_Z_PV)
-        self.ref_rot_pv_edit = QtWidgets.QLineEdit(DEFAULT_REF_ROT_PV)
-        self.ref_x_mm_spin = QtWidgets.QDoubleSpinBox()
-        self.ref_x_mm_spin.setRange(-100, 100); self.ref_x_mm_spin.setDecimals(4)
-        self.ref_z_mm_spin = QtWidgets.QDoubleSpinBox()
-        self.ref_z_mm_spin.setRange(-100, 100); self.ref_z_mm_spin.setDecimals(4)
-        self.ref_rot_deg_spin = QtWidgets.QDoubleSpinBox()
-        self.ref_rot_deg_spin.setRange(-360, 360); self.ref_rot_deg_spin.setDecimals(3)
-        self.sec_2d.content_layout.addRow("Ref X PV:",              self.ref_x_pv_edit)
-        self.sec_2d.content_layout.addRow("Ref X position [mm]:",   self.ref_x_mm_spin)
-        self.sec_2d.content_layout.addRow("Ref Z PV:",              self.ref_z_pv_edit)
-        self.sec_2d.content_layout.addRow("Ref Z position [mm]:",   self.ref_z_mm_spin)
-        self.sec_2d.content_layout.addRow("Ref Rotation PV:",       self.ref_rot_pv_edit)
-        self.sec_2d.content_layout.addRow("Ref Rotation [deg]:",    self.ref_rot_deg_spin)
-        v.addWidget(self.sec_2d)
-
-        # ── Tomoscan settings (collapsible) ────────────────────────────
-        self.sec_tomo = _CollapsibleSection("Tomoscan settings")
-        self.tomo_start_pv_edit = QtWidgets.QLineEdit(DEFAULT_TOMOSCAN_START_PV)
-        self.tomo_wait_chk = QtWidgets.QCheckBox("Wait for scan to finish")
-        self.tomo_wait_chk.setChecked(True)
-        self.tomo_timeout_spin = QtWidgets.QSpinBox()
-        self.tomo_timeout_spin.setRange(60, 24 * 3600)
-        self.tomo_timeout_spin.setValue(3600)
-        self.tomo_timeout_spin.setSuffix(" s")
-        self.sec_tomo.content_layout.addRow("StartScan PV:", self.tomo_start_pv_edit)
-        self.sec_tomo.content_layout.addRow("",              self.tomo_wait_chk)
-        self.sec_tomo.content_layout.addRow("Timeout:",      self.tomo_timeout_spin)
-        v.addWidget(self.sec_tomo)
-
-        # Auto-expand the active mode's section
-        def _expand_for_mode():
-            self.sec_2d.setExpanded(self.mode_2d.isChecked())
-            self.sec_tomo.setExpanded(self.mode_tomo.isChecked())
-        self.mode_2d.toggled.connect(lambda _=None: _expand_for_mode())
-        self.mode_tomo.toggled.connect(lambda _=None: _expand_for_mode())
-        _expand_for_mode()
-
-        # ── Positions group ────────────────────────────────────────────
-        pos_box = QtWidgets.QGroupBox("Positions")
+        # ── Positions table ────────────────────────────────────────────
+        pos_box = QtWidgets.QGroupBox(
+            "Positions (click a column title to toggle it for the selected / all rows)")
         pv = QtWidgets.QVBoxLayout(pos_box)
-
-        self.pos_table = QtWidgets.QTableWidget(0, 0)
-        self.pos_table.horizontalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.Stretch)
-        self.pos_table.itemChanged.connect(self._on_pos_item_changed)
-        pv.addWidget(self.pos_table, 1)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self.add_col_btn = QtWidgets.QPushButton("Add Motor Column")
-        self.add_col_btn.clicked.connect(self._on_add_motor)
-        self.rm_col_btn = QtWidgets.QPushButton("Remove Selected Column")
-        self.rm_col_btn.clicked.connect(self._on_remove_selected_motor)
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.VLine)
-        self.add_row_btn = QtWidgets.QPushButton("Add Row")
-        self.add_row_btn.clicked.connect(lambda: self._on_add_row())
-        self.rm_row_btn = QtWidgets.QPushButton("Remove Selected Row")
-        self.rm_row_btn.clicked.connect(self._on_remove_row)
-        self.cap_row_btn = QtWidgets.QPushButton("Capture Live Values → New Row")
-        self.cap_row_btn.clicked.connect(self._on_capture_row)
-        btn_row.addWidget(self.add_col_btn)
-        btn_row.addWidget(self.rm_col_btn)
-        btn_row.addWidget(sep)
-        btn_row.addWidget(self.add_row_btn)
-        btn_row.addWidget(self.rm_row_btn)
-        btn_row.addWidget(self.cap_row_btn)
-        btn_row.addStretch()
-        pv.addLayout(btn_row)
+        self.table = QtWidgets.QTableWidget(0, COL_ACT0 + len(ACTIONS))
+        self.table.setHorizontalHeaderLabels(
+            ["#", "X [mm]", "Y [mm]"] + [t for _, t in ACTIONS])
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        hh.setSectionResizeMode(COL_N, QtWidgets.QHeaderView.ResizeToContents)
+        hh.sectionClicked.connect(self._on_header_clicked)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.itemChanged.connect(lambda _i: self._update_summary())
+        pv.addWidget(self.table, 1)
+        btns = QtWidgets.QHBoxLayout()
+        for text, slot in (("+ Current position", self._add_current),
+                           ("+ Row", lambda: self._add_row(0.0, 0.0)),
+                           ("Remove selected", self._remove_selected),
+                           ("Clear", self._clear)):
+            b = QtWidgets.QPushButton(text)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        btns.addStretch()
+        pv.addLayout(btns)
         v.addWidget(pos_box, 1)
+
+        # ── Where the scan parameters come from ────────────────────────
+        src_box = QtWidgets.QGroupBox("Scan parameters (from the owning plugins)")
+        f = QtWidgets.QFormLayout(src_box)
+        self.src_lbl = {}
+        for key, title in ACTIONS[1:]:
+            lbl = QtWidgets.QLabel("…")
+            lbl.setWordWrap(True)
+            lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            self.src_lbl[key] = lbl
+            f.addRow(f"{title}:", lbl)
+        refresh = QtWidgets.QPushButton("Refresh")
+        refresh.clicked.connect(self._refresh_sources)
+        f.addRow("", refresh)
+        v.addWidget(src_box)
+
+        # ── Image settings (DataMap's own) ─────────────────────────────
+        sec = _CollapsibleSection("Image settings (exposure, flat position, output)")
+        self.exposure = self._dspin(0.001, 60, 3, 0.1, " s")
+        self.output_dir = QtWidgets.QLineEdit()
+        self.ref_x_pv, self.ref_z_pv, self.ref_rot_pv = (QtWidgets.QLineEdit() for _ in range(3))
+        self.ref_x_mm = self._dspin(-100, 100, 4)
+        self.ref_z_mm = self._dspin(-100, 100, 4)
+        self.ref_rot = self._dspin(-360, 360, 3)
+        for label, wid in (("Exposure:", self.exposure), ("Output directory:", self.output_dir),
+                           ("Flat: X motor PV", self.ref_x_pv), ("Flat: X [mm]", self.ref_x_mm),
+                           ("Flat: Z motor PV", self.ref_z_pv), ("Flat: Z [mm]", self.ref_z_mm),
+                           ("Flat: rotation PV", self.ref_rot_pv), ("Flat: rotation [deg]", self.ref_rot)):
+            sec.content_layout.addRow(label, wid)
+        v.addWidget(sec)
         return w
 
-    def _build_motors_tab(self):
+    def _build_pv_tab(self):
         w = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(w)
-        self.motor_table = QtWidgets.QTableWidget(0, 2)
-        self.motor_table.setHorizontalHeaderLabels(["Name", "PV"])
-        self.motor_table.horizontalHeader().setStretchLastSection(True)
-        self.motor_table.itemChanged.connect(self._on_motor_item_changed)
-        v.addWidget(self.motor_table, 1)
+        f = QtWidgets.QFormLayout(w)
+        self.x_name, self.x_pv = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+        self.y_name, self.y_pv = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+        self.x_name.textChanged.connect(self._update_axis_names)
+        self.y_name.textChanged.connect(self._update_axis_names)
+        self.motor_tol = self._dspin(0.00001, 1, 5, 0.001, " mm")
+        self.settle = self._dspin(0, 30, 2, 0.1, " s")
+        self.detector_pva = QtWidgets.QLineEdit()
+        self.camera_prefix = QtWidgets.QLineEdit()
+        self.tomo_prefix = QtWidgets.QLineEdit()
+        self.tomo_timeout = QtWidgets.QSpinBox()
+        self.tomo_timeout.setRange(60, 7 * 24 * 3600); self.tomo_timeout.setSuffix(" s")
+        f.addRow(QtWidgets.QLabel("<b>Map motors</b>"))
+        f.addRow("X name:", self.x_name); f.addRow("X motor PV:", self.x_pv)
+        f.addRow("Y name:", self.y_name); f.addRow("Y motor PV:", self.y_pv)
+        f.addRow("Position tolerance:", self.motor_tol)
+        f.addRow("Settle after move:", self.settle)
+        f.addRow(QtWidgets.QLabel("<b>Detector (Image action)</b>"))
+        f.addRow("Detector PVA channel:", self.detector_pva)
+        f.addRow("Camera prefix:", self.camera_prefix)
+        f.addRow(QtWidgets.QLabel("<b>TomoScan (Tomo / 3D XANES)</b>"))
+        f.addRow("TomoScan prefix:", self.tomo_prefix)
+        f.addRow("Scan timeout:", self.tomo_timeout)
+        note = QtWidgets.QLabel(
+            "2D XANES and 3D XANES PVs are the ones saved in their own plugins.")
+        note.setWordWrap(True)
+        f.addRow(note)
         return w
 
-    # ── Motor model (single source of truth) ────────────────────────────
+    # ── Table model ─────────────────────────────────────────────────────
 
-    def _add_motor(self, name: str = "", pv: str = ""):
-        # Auto-name if blank
-        if not name:
-            name = f"M{len(self._motors) + 1}"
-        self._motors.append({"name": name, "pv": pv})
-        for row in self._rows:
-            row["values"].append("")
-        self._refresh_all_views()
-
-    def _remove_motor_at(self, col: int):
-        if not (0 <= col < len(self._motors)):
-            return
-        self._motors.pop(col)
-        for row in self._rows:
-            if col < len(row["values"]):
-                row["values"].pop(col)
-        self._refresh_all_views()
-
-    def _refresh_all_views(self):
-        self._suppress_sync = True
+    def _add_row(self, x: float, y: float, actions=()):
+        self._loading = True
         try:
-            self._refresh_motor_table()
-            self._refresh_position_table()
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            num = QtWidgets.QTableWidgetItem()
+            num.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.table.setItem(r, COL_N, num)
+            self.table.setItem(r, COL_X, QtWidgets.QTableWidgetItem(f"{x:.4f}"))
+            self.table.setItem(r, COL_Y, QtWidgets.QTableWidgetItem(f"{y:.4f}"))
+            for i, (key, _t) in enumerate(ACTIONS):
+                it = QtWidgets.QTableWidgetItem()
+                it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
+                            | QtCore.Qt.ItemIsUserCheckable)
+                it.setCheckState(QtCore.Qt.Checked if key in actions else QtCore.Qt.Unchecked)
+                it.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.table.setItem(r, COL_ACT0 + i, it)
         finally:
-            self._suppress_sync = False
+            self._loading = False
+        self._renumber()
 
-    def _refresh_motor_table(self):
-        self.motor_table.setRowCount(0)
-        for m in self._motors:
-            r = self.motor_table.rowCount()
-            self.motor_table.insertRow(r)
-            self.motor_table.setItem(r, 0, QtWidgets.QTableWidgetItem(m["name"]))
-            self.motor_table.setItem(r, 1, QtWidgets.QTableWidgetItem(m["pv"]))
+    def _renumber(self):
+        self._loading = True
+        for r in range(self.table.rowCount()):
+            self.table.item(r, COL_N).setText(str(r + 1))
+        self._loading = False
+        self._update_summary()
 
-    def _refresh_position_table(self):
-        headers = [m["name"] for m in self._motors]
-        self.pos_table.clear()
-        self.pos_table.setColumnCount(len(headers))
-        self.pos_table.setHorizontalHeaderLabels(headers)
-        self.pos_table.setRowCount(0)
-        for row in self._rows:
-            self._insert_pos_row_widget(row)
-        self.pos_table.horizontalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.Stretch)
-
-    def _insert_pos_row_widget(self, row: Dict[str, Any]):
-        r = self.pos_table.rowCount()
-        self.pos_table.insertRow(r)
-        for c, m in enumerate(self._motors):
-            val = ""
-            if c < len(row["values"]):
-                val = str(row["values"][c])
-            self.pos_table.setItem(r, c, QtWidgets.QTableWidgetItem(val))
-
-    # ── Edit-sync handlers ──────────────────────────────────────────────
-
-    def _on_motor_item_changed(self, item: QtWidgets.QTableWidgetItem):
-        if self._suppress_sync:
-            return
-        r, c = item.row(), item.column()
-        if not (0 <= r < len(self._motors)):
-            return
-        text = item.text().strip()
-        if c == 0:
-            self._motors[r]["name"] = text or f"M{r+1}"
-            # Update only the column header to avoid a full rebuild
-            self._suppress_sync = True
-            try:
-                self.pos_table.setHorizontalHeaderItem(
-                    r, QtWidgets.QTableWidgetItem(self._motors[r]["name"]))
-            finally:
-                self._suppress_sync = False
-        elif c == 1:
-            self._motors[r]["pv"] = text
-
-    def _on_pos_item_changed(self, item: QtWidgets.QTableWidgetItem):
-        if self._suppress_sync:
-            return
-        r, c = item.row(), item.column()
-        if c >= len(self._motors):
-            return
-        while r >= len(self._rows):
-            self._rows.append({"values": [""] * len(self._motors)})
-        # Pad values list to match motor count
-        while len(self._rows[r]["values"]) < len(self._motors):
-            self._rows[r]["values"].append("")
-        self._rows[r]["values"][c] = item.text()
-
-    # ── Button handlers ─────────────────────────────────────────────────
-
-    def _on_add_motor(self):
-        self._add_motor()
-
-    def _on_remove_selected_motor(self):
-        c = self.pos_table.currentColumn()
-        if c < 0 or c >= len(self._motors):
-            # Fall back to selected row in the Motor PVs tab
-            c = self.motor_table.currentRow()
-        if c < 0:
-            QtWidgets.QMessageBox.information(
-                self, "Select column",
-                "Click a motor column header (or a cell in that column) first.")
-            return
-        self._remove_motor_at(c)
-
-    def _on_add_row(self):
-        self._rows.append({"values": [""] * len(self._motors)})
-        self._suppress_sync = True
-        try:
-            self._insert_pos_row_widget(self._rows[-1])
-        finally:
-            self._suppress_sync = False
-
-    def _on_remove_row(self):
-        r = self.pos_table.currentRow()
-        if r < 0:
-            return
-        if r < len(self._rows):
-            self._rows.pop(r)
-        self._suppress_sync = True
-        try:
-            self.pos_table.removeRow(r)
-        finally:
-            self._suppress_sync = False
-
-    def _on_capture_row(self):
-        if not self._motors:
-            return
-        if not HAS_EPICS:
-            QtWidgets.QMessageBox.warning(
-                self, "EPICS",
-                "pyepics not installed; cannot read live motor values.")
-            return
-        vals = []
-        for m in self._motors:
-            try:
-                v = caget(m["pv"], timeout=2.0) if m["pv"] else None
-            except Exception:
-                v = None
-            vals.append("" if v is None else f"{float(v):.4f}")
-        self._rows.append({"values": vals})
-        self._suppress_sync = True
-        try:
-            self._insert_pos_row_widget(self._rows[-1])
-        finally:
-            self._suppress_sync = False
-
-    # ── Misc ────────────────────────────────────────────────────────────
-
-    def _browse_output(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Output directory", self.output_dir_edit.text())
-        if d:
-            self.output_dir_edit.setText(d)
-
-    def _log(self, msg):
-        self.log_text.appendPlainText(msg)
-
-    def _params(self) -> Dict[str, Any]:
-        return {
-            "detector_pva":   self.detector_pva_edit.text().strip(),
-            "camera_prefix":  self.camera_prefix_edit.text().strip(),
-            "exposure_s":     float(self.exposure_spin.value()),
-            "motor_settle_s": float(self.settle_spin.value()),
-            "output_dir":     self.output_dir_edit.text().strip(),
-            "ref_x_pv":       self.ref_x_pv_edit.text().strip(),
-            "ref_z_pv":       self.ref_z_pv_edit.text().strip(),
-            "ref_rot_pv":     self.ref_rot_pv_edit.text().strip(),
-            "ref_x_mm":       float(self.ref_x_mm_spin.value()),
-            "ref_z_mm":       float(self.ref_z_mm_spin.value()),
-            "ref_rot_deg":    float(self.ref_rot_deg_spin.value()),
-            "tomo_start_pv":  self.tomo_start_pv_edit.text().strip(),
-            "tomo_wait":      bool(self.tomo_wait_chk.isChecked()),
-            "tomo_timeout_s": int(self.tomo_timeout_spin.value()),
-        }
-
-    def _positions_for_run(self) -> List[List[Optional[float]]]:
+    def _rows(self) -> List[Dict[str, Any]]:
         out = []
-        for row in self._rows:
-            parsed = []
-            for c in range(len(self._motors)):
-                txt = row["values"][c] if c < len(row["values"]) else ""
-                txt = str(txt).strip()
-                if txt == "":
-                    parsed.append(None)
-                else:
-                    try:
-                        parsed.append(float(txt))
-                    except ValueError:
-                        parsed.append(None)
-            out.append(parsed)
+        for r in range(self.table.rowCount()):
+            def num(c):
+                try:
+                    return float(self.table.item(r, c).text())
+                except (AttributeError, ValueError):
+                    return None
+            acts = [key for i, (key, _t) in enumerate(ACTIONS)
+                    if self.table.item(r, COL_ACT0 + i).checkState() == QtCore.Qt.Checked]
+            out.append({"x": num(COL_X), "y": num(COL_Y), "actions": acts})
         return out
 
-    def _current_mode(self) -> str:
-        return "tomo" if self.mode_tomo.isChecked() else "2d"
+    def _selected_rows(self) -> List[int]:
+        return sorted({i.row() for i in self.table.selectedIndexes()})
 
-    # ── Run actions ─────────────────────────────────────────────────────
+    def _on_header_clicked(self, col: int):
+        if col < COL_ACT0:
+            return
+        rows = self._selected_rows() or list(range(self.table.rowCount()))
+        if not rows:
+            return
+        items = [self.table.item(r, col) for r in rows]
+        new = (QtCore.Qt.Unchecked if all(i.checkState() == QtCore.Qt.Checked for i in items)
+               else QtCore.Qt.Checked)
+        for i in items:
+            i.setCheckState(new)
 
-    def _start_jobs(self, jobs):
+    def _update_summary(self):
+        if self._loading:
+            return
+        rows = self._rows()
+        counts = {k: sum(k in r["actions"] for r in rows) for k, _ in ACTIONS}
+        busy = sum(bool(r["actions"]) for r in rows)
+        parts = [f"{ACTION_TITLE[k]} {n}" for k, n in counts.items() if n]
+        self.summary_lbl.setText(f"{busy}/{len(rows)} positions"
+                                 + (": " + ", ".join(parts) if parts else ""))
+
+    def _update_axis_names(self):
+        xn, yn = self.x_name.text() or "X", self.y_name.text() or "Y"
+        self.x_lbl.setText(xn); self.y_lbl.setText(yn)
+        self.table.setHorizontalHeaderItem(COL_X, QtWidgets.QTableWidgetItem(f"{xn} [mm]"))
+        self.table.setHorizontalHeaderItem(COL_Y, QtWidgets.QTableWidgetItem(f"{yn} [mm]"))
+
+    # ── Buttons ─────────────────────────────────────────────────────────
+
+    def _generate_grid(self):
+        if self.table.rowCount() and QtWidgets.QMessageBox.question(
+                self, "Replace positions",
+                f"Replace the {self.table.rowCount()} positions in the table?") \
+                != QtWidgets.QMessageBox.Yes:
+            return
+        self.table.setRowCount(0)
+        xs = [self.x_start.value() + i * self.x_step.value() for i in range(self.x_n.value())]
+        ys = [self.y_start.value() + j * self.y_step.value() for j in range(self.y_n.value())]
+        # Serpentine: every other row runs backwards, so the stage never
+        # flies back across the whole map between rows.
+        for j, y in enumerate(ys):
+            for x in (xs if j % 2 == 0 else reversed(xs)):
+                self._add_row(x, y)
+        self._log(f"Grid: {len(xs)}×{len(ys)} = {len(xs) * len(ys)} positions")
+
+    def _read_xy(self):
+        if not HAS_EPICS:
+            raise RuntimeError("pyepics not installed")
+        x = _fresh(self.x_pv.text().strip() + ".RBV")
+        y = _fresh(self.y_pv.text().strip() + ".RBV")
+        if x is None or y is None:
+            raise RuntimeError(f"cannot read {self.x_pv.text()} / {self.y_pv.text()}")
+        return float(x), float(y)
+
+    def _start_from_current(self):
+        try:
+            x, y = self._read_xy()
+        except RuntimeError as e:
+            self._log(f"[ERROR] {e}")
+            return
+        self.x_start.setValue(x); self.y_start.setValue(y)
+
+    def _add_current(self):
+        try:
+            self._add_row(*self._read_xy())
+        except RuntimeError as e:
+            self._log(f"[ERROR] {e}")
+
+    def _remove_selected(self):
+        for r in reversed(self._selected_rows()):
+            self.table.removeRow(r)
+        self._renumber()
+
+    def _clear(self):
+        self.table.setRowCount(0)
+        self._update_summary()
+
+    def _refresh_sources(self):
+        for key, fn in (("xanes2d", xanes2d_summary),
+                        ("tomo", lambda: tomo_summary(self.tomo_prefix.text().strip())),
+                        ("xanes3d", xanes3d_summary)):
+            try:
+                self.src_lbl[key].setText(fn())
+            except Exception as e:
+                self.src_lbl[key].setText(f"unavailable: {e}")
+
+    def _log(self, msg):
+        self.log_text.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    # ── Run ─────────────────────────────────────────────────────────────
+
+    def _pvs(self) -> Dict[str, Any]:
+        return {
+            "x_name": self.x_name.text().strip() or "X", "x_pv": self.x_pv.text().strip(),
+            "y_name": self.y_name.text().strip() or "Y", "y_pv": self.y_pv.text().strip(),
+            "motor_tol_mm": self.motor_tol.value(), "settle_s": self.settle.value(),
+            "detector_pva": self.detector_pva.text().strip(),
+            "camera_prefix": self.camera_prefix.text().strip(),
+            "tomoscan_prefix": self.tomo_prefix.text().strip(),
+            "tomo_timeout_s": self.tomo_timeout.value(),
+        }
+
+    def _image(self) -> Dict[str, Any]:
+        return {
+            "exposure_s": self.exposure.value(), "output_dir": self.output_dir.text().strip(),
+            "ref_x_pv": self.ref_x_pv.text().strip(), "ref_x_mm": self.ref_x_mm.value(),
+            "ref_z_pv": self.ref_z_pv.text().strip(), "ref_z_mm": self.ref_z_mm.value(),
+            "ref_rot_pv": self.ref_rot_pv.text().strip(), "ref_rot_deg": self.ref_rot.value(),
+        }
+
+    def _preflight(self, plan) -> List[str]:
+        """Problems that would make a run fail — checked before moving."""
+        p, probs = self._pvs(), []
+        if not HAS_EPICS:
+            probs.append("pyepics not installed")
+        if not (p["x_pv"] and p["y_pv"]):
+            probs.append("set the X and Y motor PVs (PVs tab)")
+        used = {a for *_, acts in plan for a in acts}
+        if "image" in used and not (HAS_PVA and HAS_H5PY):
+            probs.append("Image needs pvaccess and h5py")
+        if "xanes2d" in used:
+            try:
+                xanes2d_config("check", 0.0, 0.0)
+            except Exception as e:
+                probs.append(f"2D XANES: {e}")
+        return probs
+
+    def _start(self, selected_only: bool):
         if self._worker and self._worker.isRunning():
-            QtWidgets.QMessageBox.warning(
-                self, "Busy", "A run is already in progress.")
             return
-        motors_with_pv = [m for m in self._motors if m["pv"].strip()]
-        if not motors_with_pv:
-            QtWidgets.QMessageBox.warning(
-                self, "No motors",
-                "Assign at least one PV in the Motor PVs tab.")
+        rows = self._rows()
+        idx = self._selected_rows() if selected_only else range(len(rows))
+        plan, bad = [], []
+        for r in idx:
+            row = rows[r]
+            if not row["actions"]:
+                continue
+            if row["x"] is None or row["y"] is None:
+                bad.append(str(r + 1))
+                continue
+            plan.append((r, row["x"], row["y"], row["actions"]))
+        if bad:
+            QtWidgets.QMessageBox.warning(self, "Bad positions",
+                                          "Rows with invalid X/Y: " + ", ".join(bad))
             return
-        if not self._rows:
-            QtWidgets.QMessageBox.warning(
-                self, "No rows", "Add at least one row in the Positions table.")
-            return
-        positions = self._positions_for_run()
-        params = self._params()
-        self._save_settings()
-
-        self._worker = _DataMapWorker(jobs, self._motors, positions, params)
-        self._worker.log.connect(self._log)
-        self._worker.progress.connect(
-            lambda d, t: self._log(f"--- progress {d}/{t} ---"))
-        self._worker.done.connect(self._on_worker_done)
-        self._worker.error.connect(self._on_worker_error)
-
-        self.run_selected_btn.setEnabled(False)
-        self.run_all_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self._log(f"Starting {len(jobs)} job(s)")
-        self._worker.start()
-
-    def _on_run_selected(self):
-        r = self.pos_table.currentRow()
-        if r < 0:
+        if not plan:
             QtWidgets.QMessageBox.information(
-                self, "Select row", "Click a row in the Positions table first.")
+                self, "Nothing to do",
+                "Tick at least one action (Image / 2D XANES / Tomo / 3D XANES) "
+                "on the positions to run.")
             return
-        mode = self._current_mode()
-        self._start_jobs([(r, mode)])
-
-    def _on_run_all(self):
-        mode = self._current_mode()
-        jobs = [(i, mode) for i in range(len(self._rows))]
-        if not jobs:
+        probs = self._preflight(plan)
+        if probs:
+            QtWidgets.QMessageBox.warning(self, "Cannot start", "\n".join(probs))
             return
-        self._start_jobs(jobs)
+        n_act = sum(len(a) for *_, a in plan)
+        self._save_settings()
+        self._refresh_sources()
+        self._log("=" * 60)
+        self._log(f"DataMap: {len(plan)} positions, {n_act} actions")
+        self._worker = _DataMapWorker(plan, self._pvs(), self._image())
+        self._worker.log.connect(self._log)
+        self._worker.progress.connect(lambda d, t: (self.progress.setMaximum(t),
+                                                    self.progress.setValue(d)))
+        self._worker.current.connect(self.table.selectRow)
+        self._worker.done.connect(self._finish)
+        self._worker.error.connect(lambda m: (self._log(f"[ERROR] {m}"), self._finish()))
+        self.progress.setValue(0)
+        self._set_running(True)
+        self._worker.start()
 
     def _on_stop(self):
         if self._worker and self._worker.isRunning():
+            self._log("Stop requested — ending the current action…")
             self._worker.stop()
-            self._log("Stop requested.")
-
-    def _on_worker_done(self):
-        self._log("All jobs finished.")
-        self._finish()
-
-    def _on_worker_error(self, msg):
-        self._log(f"[ERROR] {msg}")
-        self._finish()
 
     def _finish(self):
-        self.run_selected_btn.setEnabled(True)
-        self.run_all_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._log("DataMap finished.")
+        self._set_running(False)
+
+    def _set_running(self, on: bool):
+        self.run_all_btn.setEnabled(not on)
+        self.run_sel_btn.setEnabled(not on)
+        self.stop_btn.setEnabled(on)
+        self.gen_btn.setEnabled(not on)
 
     # ── Persistence ─────────────────────────────────────────────────────
 
     def _restore_settings(self):
         s = load_settings(self.__class__.__name__)
-        motors = s.get("motors") or DEFAULT_MOTORS
-        self._motors = [{"name": m.get("name", f"M{i+1}"),
-                         "pv":   m.get("pv", "")}
-                        for i, m in enumerate(motors)]
-        # Positions stored as list of {values:[...]}
-        # (legacy entries may have an "action" key — silently ignored)
-        self._rows = []
-        for p in s.get("positions", []):
-            vals = list(p.get("values", []))
-            while len(vals) < len(self._motors):
-                vals.append("")
-            self._rows.append({"values": vals})
+        p, im = dict(DEFAULT_PVS), dict(DEFAULT_IMAGE)
+        if "pvs" not in s:
+            # Settings from the earlier DataMap (motor list + "acquisition").
+            for axis, m in zip(("x", "y"), s.get("motors") or []):
+                p[f"{axis}_name"], p[f"{axis}_pv"] = m.get("name", axis.upper()), m.get("pv", "")
+            acq = s.get("acquisition", {})
+            p.update({k: v for k, v in acq.items() if k in ("detector_pva", "camera_prefix")})
+            im.update({k: v for k, v in acq.items() if k in im})
+        p.update(s.get("pvs", {}))
+        im.update(s.get("image", {}))
 
-        # Acq settings
-        a = s.get("acquisition", {})
-        self.detector_pva_edit.setText(a.get("detector_pva",  DEFAULT_DETECTOR_PVA))
-        self.camera_prefix_edit.setText(a.get("camera_prefix", DEFAULT_CAMERA_PREFIX))
-        self.exposure_spin.setValue(float(a.get("exposure_s", 0.1)))
-        self.settle_spin.setValue(float(a.get("motor_settle_s", 0.1)))
-        self.output_dir_edit.setText(a.get("output_dir", DEFAULT_OUTPUT_DIR))
-        self.ref_x_pv_edit.setText(a.get("ref_x_pv",     DEFAULT_REF_X_PV))
-        self.ref_z_pv_edit.setText(a.get("ref_z_pv",     DEFAULT_REF_Z_PV))
-        self.ref_rot_pv_edit.setText(a.get("ref_rot_pv", DEFAULT_REF_ROT_PV))
-        self.ref_x_mm_spin.setValue(float(a.get("ref_x_mm",   0.0)))
-        self.ref_z_mm_spin.setValue(float(a.get("ref_z_mm",   0.0)))
-        self.ref_rot_deg_spin.setValue(float(a.get("ref_rot_deg", 0.0)))
-        self.tomo_start_pv_edit.setText(a.get("tomo_start_pv", DEFAULT_TOMOSCAN_START_PV))
-        self.tomo_wait_chk.setChecked(bool(a.get("tomo_wait", True)))
-        self.tomo_timeout_spin.setValue(int(a.get("tomo_timeout_s", 3600)))
+        self.x_name.setText(p["x_name"]); self.x_pv.setText(p["x_pv"])
+        self.y_name.setText(p["y_name"]); self.y_pv.setText(p["y_pv"])
+        self.motor_tol.setValue(float(p["motor_tol_mm"])); self.settle.setValue(float(p["settle_s"]))
+        self.detector_pva.setText(p["detector_pva"]); self.camera_prefix.setText(p["camera_prefix"])
+        self.tomo_prefix.setText(p["tomoscan_prefix"]); self.tomo_timeout.setValue(int(p["tomo_timeout_s"]))
+        self.exposure.setValue(float(im["exposure_s"])); self.output_dir.setText(im["output_dir"])
+        self.ref_x_pv.setText(im["ref_x_pv"]); self.ref_x_mm.setValue(float(im["ref_x_mm"]))
+        self.ref_z_pv.setText(im["ref_z_pv"]); self.ref_z_mm.setValue(float(im["ref_z_mm"]))
+        self.ref_rot_pv.setText(im["ref_rot_pv"]); self.ref_rot.setValue(float(im["ref_rot_deg"]))
 
-        # Mode (default 2D)
-        mode = s.get("mode", "2d")
-        if mode == "tomo":
-            self.mode_tomo.setChecked(True)
-        else:
-            self.mode_2d.setChecked(True)
+        gr = s.get("grid", {})
+        for wid, k in ((self.x_start, "x_start"), (self.x_step, "x_step"),
+                       (self.y_start, "y_start"), (self.y_step, "y_step")):
+            if k in gr:
+                wid.setValue(float(gr[k]))
+        if "x_n" in gr: self.x_n.setValue(int(gr["x_n"]))
+        if "y_n" in gr: self.y_n.setValue(int(gr["y_n"]))
 
-        self._refresh_all_views()
+        for row in s.get("map", []):
+            try:
+                self._add_row(float(row["x"]), float(row["y"]), row.get("actions", []))
+            except (KeyError, TypeError, ValueError):
+                pass
+        self._update_axis_names()
 
     def _save_settings(self):
         save_settings(self.__class__.__name__, {
-            "motors":      self._motors,
-            "positions":   self._rows,
-            "mode":        self._current_mode(),
-            "acquisition": self._params(),
+            "pvs":   self._pvs(),
+            "image": self._image(),
+            "grid":  {"x_start": self.x_start.value(), "x_step": self.x_step.value(),
+                      "x_n": self.x_n.value(), "y_start": self.y_start.value(),
+                      "y_step": self.y_step.value(), "y_n": self.y_n.value()},
+            "map":   [r for r in self._rows() if r["x"] is not None and r["y"] is not None],
         })
 
     def closeEvent(self, e):
+        if self._worker and self._worker.isRunning():
+            if QtWidgets.QMessageBox.question(
+                    self, "DataMap running",
+                    "A map is running. Stop it and close?") != QtWidgets.QMessageBox.Yes:
+                e.ignore()
+                return
+            self._worker.stop()
+            self._worker.wait(5000)
         try:
             self._save_settings()
         except Exception:
             pass
-        if self._worker and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(2000)
         super().closeEvent(e)
