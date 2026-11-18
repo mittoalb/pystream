@@ -195,6 +195,9 @@ def xanes2d_config(tag: str, data_x: float, data_z: float):
         "qgmax_timeout_s": float(sc.get("qgmax_timeout") or 300.0),
         "repeat_count":      1,
         "repeat_interval_s": 0.0,
+        # the shutter choices made in the XANES 2D GUI
+        "use_fast_shutter": bool(sc.get("use_fast_shutter", True)),
+        "use_b_shutter":    bool(sc.get("use_b_shutter", True)),
     }
     return pvs, scan, params
 

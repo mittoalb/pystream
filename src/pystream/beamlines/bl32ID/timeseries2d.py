@@ -173,7 +173,7 @@ class _SeriesWorker(QtCore.QThread):
 
     def _shutter(self, open_: bool):
         pv = self.cfg["pvs"].get("fast_shutter_pv", "").strip()
-        if pv:
+        if pv and self.cfg["use_fast_shutter"]:
             self.log.emit(f"  shutter {'open' if open_ else 'close'} ({pv})")
             caput(pv, 1 if open_ else 0, wait=False)          # as XANES 2D
 
@@ -189,7 +189,7 @@ class _SeriesWorker(QtCore.QThread):
         open raises (images would be dark); a failed close only warns."""
         p = self.cfg["pvs"]
         pv = p.get("b_shutter_open_pv" if open_ else "b_shutter_close_pv", "").strip()
-        if not pv:
+        if not pv or not self.cfg["use_b_shutter"]:
             return
         word = "open" if open_ else "closed"
         if self._b_closed() is (not open_):
@@ -239,7 +239,7 @@ class _SeriesWorker(QtCore.QThread):
         cam_pvs = [p["cam_image_mode_pv"], p["cam_num_images_pv"],
                    p["cam_acquire_time_pv"], p["cam_acquire_pv"]]
         cam_before = {}
-        shutter_pv = p.get("fast_shutter_pv", "").strip()
+        shutter_pv = p.get("fast_shutter_pv", "").strip() if c["use_fast_shutter"] else ""
         shutter_before = None
         b_closed_before = None
         f = None
@@ -249,7 +249,7 @@ class _SeriesWorker(QtCore.QThread):
             cam_before = {pv: caget(pv, timeout=2.0, use_monitor=False) for pv in cam_pvs}
             if shutter_pv:
                 shutter_before = caget(shutter_pv, timeout=2.0, use_monitor=False)
-            b_closed_before = self._b_closed()
+            b_closed_before = self._b_closed() if c["use_b_shutter"] else None
             if cam_before[p["cam_acquire_pv"]]:
                 self._put(p["cam_acquire_pv"], 0)
                 time.sleep(0.3)
@@ -438,6 +438,11 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
         f.addRow("Every (start to start):", self.every)
         f.addRow("Repeats:", self.repeats)
         f.addRow("Exposure:", self.exposure)
+        self.use_fast = QtWidgets.QCheckBox("Use fast shutter (closed between repeats)")
+        self.use_b = QtWidgets.QCheckBox("Use B-station shutter (closed for waits ≥ 1 min)")
+        for cb in (self.use_fast, self.use_b):
+            cb.setChecked(True)
+            f.addRow("", cb)
         self.estimate = QtWidgets.QLabel("")
         f.addRow("", self.estimate)
         for s in (self.images, self.refs, self.every, self.repeats, self.exposure):
@@ -587,6 +592,8 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
             "reference": (self.rx.value(), self.rz.value(), self.rrot.value() if rot else None),
             "tolerance": self.tolerance.value(), "settle_s": self.settle.value(),
             "path": self.path.text().strip(),
+            "use_fast_shutter": self.use_fast.isChecked(),
+            "use_b_shutter": self.use_b.isChecked(),
         }
 
     # ── run ─────────────────────────────────────────────────────────────
@@ -643,6 +650,7 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
             "sample": [self.sx.value(), self.sz.value(), self.srot.value()],
             "reference": [self.rx.value(), self.rz.value(), self.rrot.value()],
             "tolerance": c["tolerance"], "settle_s": c["settle_s"], "path": c["path"],
+            "use_fast_shutter": c["use_fast_shutter"], "use_b_shutter": c["use_b_shutter"],
         })
 
     def _restore(self):
@@ -663,6 +671,8 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
         self.tolerance.setValue(float(s.get("tolerance", 0.001)))
         self.settle.setValue(float(s.get("settle_s", 0.5)))
         self.path.setText(s.get("path", ""))
+        self.use_fast.setChecked(bool(s.get("use_fast_shutter", True)))
+        self.use_b.setChecked(bool(s.get("use_b_shutter", True)))
         self._update_estimate()
 
     def closeEvent(self, e):

@@ -173,8 +173,12 @@ Every *Y* minutes, *N* times: take *X* images at the sample position, then
   (`32idb:rshtrB:Close.PROC`). Before the next repeat it is opened again,
   and the series waits for `PB:32ID:STA_B_SBS_CLSD_PL` to report open. If
   the PSS doesn't open it within 30 s, the series stops with an error
-  rather than taking dark images. Leave the B-shutter PVs blank to turn
-  this off. XANES 2D's repeats do the same.
+  rather than taking dark images. XANES 2D's repeats do the same.
+- **Choosing shutters:** *Use fast shutter* and *Use B-station shutter*
+  (in XANES 2D: *Use fast shutter* and *Close B-station shutter between
+  repeats*) decide whether each shutter is touched at all. When unticked,
+  that shutter is never opened, closed or restored. DataMap's 2D XANES
+  action follows the choice saved in XANES 2D.
 - **One HDF5 file**, written as it goes, so Stop keeps everything taken
   so far:
   - `/exchange/data`, `/exchange/data_white`: images
