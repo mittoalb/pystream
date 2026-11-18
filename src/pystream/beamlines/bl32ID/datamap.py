@@ -17,7 +17,9 @@ them, so DataMap always runs what those plugins would run:
                 Save Settings (energies, exposure, Ref position, PVs) and
                 the ZP calibration from bl_gui. The DATA position is
                 replaced by the current map position.
-  * Tomo      ← the TomoScan IOC's own PVs (set them in bl_gui → TomoScan).
+  * Tomo      ← the TomoScan IOC's own PVs (set them in bl_gui → TomoScan);
+                run with the standard `tomoscan single` CLI in the tomoscan
+                conda env (same host/env settings as the XANES plugin).
   * 3D XANES  ← energies from 32id:TXMOptics:XanesStart/End/Step (what the
                 XANES GUI primes), launch settings from
                 ~/.xanes_gui_settings.json.
@@ -33,6 +35,7 @@ Settings persist to ~/.pystream/bl32ID_settings.json under "DataMapDialog".
 
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -110,6 +113,9 @@ XANES3D_LAUNCH_DEFAULTS = {
     "conda_path":  "/home/beams/USERTXM/conda/anaconda",
     "script_name": "/home/beams/USERTXM/Software/xanes_gui/xanes_energy.py",
 }
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 # ── Scan-parameter sources ───────────────────────────────────────────────
@@ -230,7 +236,8 @@ def tomo_summary(prefix: str) -> str:
         return f"TomoScan IOC {prefix} not reachable"
     return (f"{num['NumAngles']} angles from {num['RotationStart']:g}° step "
             f"{num['RotationStep']:g}°, exposure {num['ExposureTime']:g} s, "
-            f"flats {txt['FlatFieldMode']}, file '{txt['FileName']}'  [{prefix}]")
+            f"flats {txt['FlatFieldMode']}, file '{txt['FileName']}'; "
+            f"runs `tomoscan single` (conda env {xanes3d_launch_config()['conda_env']})")
 
 
 def xanes3d_launch_config() -> dict:
@@ -240,20 +247,34 @@ def xanes3d_launch_config() -> dict:
     return cfg
 
 
-def xanes3d_command(cfg: dict) -> List[str]:
-    """Same command the XANES GUI's Start runs (gui.StartScriptWorker /
-    headless.build_3d_launch_command)."""
+def conda_command(cfg: dict, program: str, local_hint: str = "") -> List[str]:
+    """Run `program` in the tomoscan conda env, locally if this machine can
+    (same host, or the env / script is on the shared filesystem), else over
+    ssh — the way the XANES GUI launches its scripts."""
     host = socket.gethostname()
     is_local = (host == cfg["remote_host"] or host.split(".")[0] == cfg["remote_host"]
                 or cfg["remote_host"] in ("localhost", "127.0.0.1", "")
-                or os.path.exists(cfg["script_name"]))
+                or (local_hint and os.path.exists(local_hint)))
     inner = (f"cd {cfg['work_dir']} && "
              f"source {cfg['conda_path']}/etc/profile.d/conda.sh && "
-             f"conda activate {cfg['conda_env']} && python {cfg['script_name']}")
+             f"conda activate {cfg['conda_env']} && {program}")
     if is_local:
         return ["bash", "-l", "-c", inner]
     return ["ssh", "-t", f"{cfg['remote_user']}@{cfg['remote_host']}",
             f'bash -l -c "{inner}"']
+
+
+def xanes3d_command(cfg: dict) -> List[str]:
+    """Same command the XANES GUI's Start runs (gui.StartScriptWorker /
+    headless.build_3d_launch_command)."""
+    return conda_command(cfg, f"python {cfg['script_name']}", cfg["script_name"])
+
+
+def tomo_command(cfg: dict, prefix: str) -> List[str]:
+    """`tomoscan single` — the standard TomoScan CLI. It checks that the
+    server is running and idle, runs one scan and waits for it."""
+    return conda_command(cfg, f"tomoscan single --tomoscan-prefix {prefix}",
+                         f"{cfg['conda_path']}/envs/{cfg['conda_env']}")
 
 
 def xanes3d_summary() -> str:
@@ -364,28 +385,24 @@ class _DataMapWorker(QtCore.QThread):
                 return False
             time.sleep(0.1)
 
-    def _run_proc(self, cmd, is_tomo=False) -> int:
-        """Run a command, streaming its output to the log. For the
-        StartScan caput the output (Old/New lines) is shown only on failure."""
+    def _run_proc(self, cmd, is_tomo=False, keep=False):
+        """Run a command, streaming its output to the log. `is_tomo` makes
+        Stop also send TomoScan AbortScan. With `keep`, returns
+        (rc, lines) instead of rc."""
         self._proc_is_tomo = is_tomo
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True,
                                       bufsize=1, start_new_session=True)
-        held = []
+        lines = []
         try:
             for line in self._proc.stdout:
-                line = line.rstrip()
+                line = _ANSI.sub("", line).rstrip()     # tomoscan logs in colour
                 if not line:
                     continue
-                if is_tomo:
-                    held.append(line)
-                else:
-                    self.log.emit("    " + line)
+                lines.append(line)
+                self.log.emit("    " + line)
             rc = self._proc.wait()
-            if is_tomo and rc != 0 and not self._stop:
-                for line in held[-15:]:
-                    self.log.emit("    " + line)
-            return rc
+            return (rc, lines) if keep else rc
         finally:
             self._proc = None
 
@@ -460,8 +477,11 @@ class _DataMapWorker(QtCore.QThread):
             ex.create_dataset("data_flat", data=flat[np.newaxis])
             meta = f.create_group("measurement/instrument/datamap")
             meta.attrs["position"] = n
-            meta.attrs[f"{self.pvs['x_name']}_mm"] = x
-            meta.attrs[f"{self.pvs['y_name']}_mm"] = y
+            for name, pv, v in ((self.pvs['x_name'], self.pvs['x_pv'], x),
+                                (self.pvs['y_name'], self.pvs['y_pv'], y)):
+                v = _fresh(pv + ".RBV") if v is None else v
+                if v is not None:
+                    meta.attrs[f"{name}_mm"] = float(v)
         self.log.emit(f"    saved {path}")
 
     def _do_xanes2d(self, n, x, y):
@@ -494,13 +514,20 @@ class _DataMapWorker(QtCore.QThread):
     def _do_tomo(self, n, x, y):
         old = self._pin_sample_in()
         try:
-            pv = self.pvs["tomoscan_prefix"] + "StartScan"
-            self.log.emit(f"    StartScan (waits for the scan to finish)")
-            # -c: put-callback, returns when the busy record is Done again.
-            rc = self._run_proc(["caput", "-c", "-w", str(self.pvs["tomo_timeout_s"]),
-                                 pv, "1"], is_tomo=True)
-            if rc != 0 and not self._stop:
-                raise RuntimeError(f"StartScan caput exit code {rc}")
+            cmd = tomo_command(xanes3d_launch_config(), self.pvs["tomoscan_prefix"])
+            self.log.emit(f"    {cmd[-1] if cmd[0] == 'ssh' else cmd[-1].split('&& ')[-1]}")
+            rc, out = self._run_proc(cmd, is_tomo=True, keep=True)
+            if self._stop:
+                return
+            # `tomoscan single` exits 0 even when it refuses to scan.
+            # (its message really says "is not runnig")
+            refused = [l for l in out if any(k in l.lower() for k in
+                       ("is busy", "is not runn", "cannot connect", "not found"))]
+            if rc != 0 or refused:
+                raise RuntimeError(refused[0].strip() if refused
+                                   else f"tomoscan exit code {rc}")
+            if not any("scan end" in l.lower() for l in out):
+                raise RuntimeError("tomoscan finished without 'scan end' — check the log above")
         finally:
             self._restore(old)
 
@@ -563,10 +590,12 @@ class _DataMapWorker(QtCore.QThread):
             done_before = (k - 1) * per
             self.current.emit(row)
             names = ", ".join(ACTION_TITLE[a] for a in actions)
+            fmt = lambda v: "stay" if v is None else f"{v:.4f}"
             self.log.emit(f"[{i}/{per}] position #{n}  "
-                          f"{self.pvs['x_name']}={x:.4f} {self.pvs['y_name']}={y:.4f}  "
+                          f"{self.pvs['x_name']}={fmt(x)} {self.pvs['y_name']}={fmt(y)}  "
                           f"→ {names}")
-            if not (self._move(self.pvs["x_pv"], x) and self._move(self.pvs["y_pv"], y)):
+            if not ((x is None or self._move(self.pvs["x_pv"], x))
+                    and (y is None or self._move(self.pvs["y_pv"], y))):
                 self.log.emit(f"    ✗ position #{n} skipped: motors did not get there")
                 failures += 1
                 self.progress.emit(done_before + i, total)
@@ -707,7 +736,7 @@ class DataMapDialog(QtWidgets.QDialog):
         pv.addWidget(self.table, 1)
         btns = QtWidgets.QHBoxLayout()
         for text, slot in (("+ Current position", self._add_current),
-                           ("+ Row", lambda: self._add_row(0.0, 0.0)),
+                           ("+ Row (stay here)", lambda: self._add_row(None, None)),
                            ("Remove selected", self._remove_selected),
                            ("Clear", self._clear)):
             b = QtWidgets.QPushButton(text)
@@ -781,7 +810,8 @@ class DataMapDialog(QtWidgets.QDialog):
 
     # ── Table model ─────────────────────────────────────────────────────
 
-    def _add_row(self, x: float, y: float, actions=()):
+    def _add_row(self, x: Optional[float], y: Optional[float], actions=()):
+        """x/y None = empty cell = that axis is not moved."""
         self._loading = True
         try:
             r = self.table.rowCount()
@@ -789,8 +819,10 @@ class DataMapDialog(QtWidgets.QDialog):
             num = QtWidgets.QTableWidgetItem()
             num.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
             self.table.setItem(r, COL_N, num)
-            self.table.setItem(r, COL_X, QtWidgets.QTableWidgetItem(f"{x:.4f}"))
-            self.table.setItem(r, COL_Y, QtWidgets.QTableWidgetItem(f"{y:.4f}"))
+            self.table.setItem(r, COL_X, QtWidgets.QTableWidgetItem(
+                "" if x is None else f"{x:.4f}"))
+            self.table.setItem(r, COL_Y, QtWidgets.QTableWidgetItem(
+                "" if y is None else f"{y:.4f}"))
             for i, (key, _t) in enumerate(ACTIONS):
                 it = QtWidgets.QTableWidgetItem()
                 it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
@@ -813,10 +845,14 @@ class DataMapDialog(QtWidgets.QDialog):
         out = []
         for r in range(self.table.rowCount()):
             def num(c):
-                try:
-                    return float(self.table.item(r, c).text())
-                except (AttributeError, ValueError):
+                """None for an empty cell (= don't move), "bad" for junk."""
+                txt = (self.table.item(r, c).text() if self.table.item(r, c) else "").strip()
+                if not txt:
                     return None
+                try:
+                    return float(txt)
+                except ValueError:
+                    return "bad"
             acts = [key for i, (key, _t) in enumerate(ACTIONS)
                     if self.table.item(r, COL_ACT0 + i).checkState() == QtCore.Qt.Checked]
             out.append({"x": num(COL_X), "y": num(COL_Y), "actions": acts})
@@ -941,8 +977,10 @@ class DataMapDialog(QtWidgets.QDialog):
         p, probs = self._pvs(), []
         if not HAS_EPICS:
             probs.append("pyepics not installed")
-        if not (p["x_pv"] and p["y_pv"]):
-            probs.append("set the X and Y motor PVs (PVs tab)")
+        if any(x is not None for _r, x, _y, _a in plan) and not p["x_pv"]:
+            probs.append("set the X motor PV (PVs tab), or leave X empty to stay")
+        if any(y is not None for _r, _x, y, _a in plan) and not p["y_pv"]:
+            probs.append("set the Y motor PV (PVs tab), or leave Y empty to stay")
         used = {a for *_, acts in plan for a in acts}
         if "image" in used and not (HAS_PVA and HAS_H5PY):
             probs.append("Image needs pvaccess and h5py")
@@ -963,7 +1001,7 @@ class DataMapDialog(QtWidgets.QDialog):
             row = rows[r]
             if not row["actions"]:
                 continue
-            if row["x"] is None or row["y"] is None:
+            if "bad" in (row["x"], row["y"]):
                 bad.append(str(r + 1))
                 continue
             plan.append((r, row["x"], row["y"], row["actions"]))
@@ -1054,7 +1092,8 @@ class DataMapDialog(QtWidgets.QDialog):
 
         for row in s.get("map", []):
             try:
-                self._add_row(float(row["x"]), float(row["y"]), row.get("actions", []))
+                fx = lambda v: None if v is None else float(v)
+                self._add_row(fx(row.get("x")), fx(row.get("y")), row.get("actions", []))
             except (KeyError, TypeError, ValueError):
                 pass
         self._update_axis_names()
@@ -1066,7 +1105,7 @@ class DataMapDialog(QtWidgets.QDialog):
             "grid":  {"x_start": self.x_start.value(), "x_step": self.x_step.value(),
                       "x_n": self.x_n.value(), "y_start": self.y_start.value(),
                       "y_step": self.y_step.value(), "y_n": self.y_n.value()},
-            "map":   [r for r in self._rows() if r["x"] is not None and r["y"] is not None],
+            "map":   [r for r in self._rows() if "bad" not in (r["x"], r["y"])],
             "repeat": {"n": self.repeat_n.value(), "every_min": self.repeat_every.value()},
         })
 

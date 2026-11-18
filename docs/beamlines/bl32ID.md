@@ -128,6 +128,8 @@ A mosaic of X-Y positions. At each position, tick any of **Image**,
   *Generate grid*. Rows are in serpentine order, so the stage doesn't fly
   back across the map between rows. *Start = current position* fills in
   the start values from the motors. *+ Current position* adds one row.
+  An empty X or Y cell means "don't move that axis", so *+ Row (stay
+  here)* adds a row that runs wherever the sample is.
 - **Ticking actions**: click a column title (Image, 2D XANES, …) to tick
   or untick it for the selected rows, or for all rows when none are
   selected.
@@ -136,7 +138,10 @@ A mosaic of X-Y positions. At each position, tick any of **Image**,
   - *2D XANES*: whatever the XANES 2D GUI last saved with **Save
     Settings**, plus bl_gui's ZP calibration. The DATA position is
     replaced by the map position.
-  - *Tomo*: the TomoScan IOC's current settings (bl_gui → TomoScan).
+  - *Tomo*: the TomoScan IOC's current settings (bl_gui → TomoScan), run
+    with the standard `tomoscan single` command in the tomoscan conda env.
+    If the server isn't running or is busy, that position fails with
+    tomoscan's own message.
   - *3D XANES*: energies from `32id:TXMOptics:XanesStart/End/Step`, with
     one tomography per energy using the TomoScan settings.
   - *Image*: DataMap's own exposure and flat position (*Image settings*).
@@ -149,8 +154,8 @@ A mosaic of X-Y positions. At each position, tick any of **Image**,
 - **Repeat N × every X min** repeats the whole run, for time series. The
   interval runs from the start of one repeat to the start of the next;
   if a repeat takes longer, the next one starts right away. For a time
-  series of tomographies at one position, use one row (*+ Current
-  position*) with only Tomo ticked.
+  series of tomographies at one position, use one *+ Row (stay here)*
+  with only Tomo ticked.
 
 ### Röntgen (AI)
 
