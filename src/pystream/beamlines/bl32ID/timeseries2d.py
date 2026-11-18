@@ -120,33 +120,51 @@ class _SeriesWorker(QtCore.QThread):
     # ── EPICS ──────────────────────────────────────────────────────────
 
     def _put(self, pv, val, wait=True, timeout=30.0):
-        if not caput(pv, val, wait=wait, timeout=timeout):
-            raise RuntimeError(f"caput {pv}={val} failed")
+        """caput like XANES 2D does it. pyepics returns None when the PV
+        can't be reached; a put-completion timeout is reported by the
+        caller from the readback, not here."""
+        if caput(pv, val, wait=wait, timeout=timeout) is None:
+            raise RuntimeError(f"cannot reach {pv}")
 
     def _rbv(self, pv) -> float:
         v = caget(pv + ".RBV", timeout=2.0, use_monitor=False)
         return float("nan") if v is None else float(v)
 
     def _move_to(self, which: str, target):
-        """target = (x, z, rot); None entries are not moved."""
+        """target = (x, z, rot); None entries are not moved. Every step is
+        logged before it happens and bounded in time."""
         c = self.cfg
+        tol = c["tolerance"]
         for pv, t in zip((c["pvs"]["topx_pv"], c["pvs"]["topz_pv"], c["pvs"]["rot_pv"]), target):
             if t is None or self._stop:
                 continue
-            self._put(pv, float(t), timeout=300.0)
-            deadline = time.monotonic() + 10.0
-            while abs(self._rbv(pv) - t) > c["tolerance"]:
+            # "In position" = the motor record's own retry deadband, if larger.
+            rdbd = caget(pv + ".RDBD", timeout=2.0, use_monitor=False)
+            tol = max(c["tolerance"], abs(float(rdbd)) if rdbd is not None else 0.0)
+            here = self._rbv(pv)
+            if abs(here - t) <= tol:
+                self.log.emit(f"  {pv} already at {here:.4f} ({which})")
+                continue
+            self.log.emit(f"  move {pv} {here:.4f} → {t:.4f} ({which})")
+            t0 = time.monotonic()
+            self._put(pv, float(t), wait=True, timeout=60.0)   # XANES 2D uses 60 s
+            if time.monotonic() - t0 > 59:
+                self.log.emit(f"  ⚠ {pv}: no move-complete after 60 s — checking readback")
+            deadline = time.monotonic() + 30.0
+            while abs(self._rbv(pv) - t) > tol:
+                if self._stop:
+                    return
                 if time.monotonic() > deadline:
-                    raise RuntimeError(f"{pv} did not reach {t:.4f} "
-                                       f"(at {self._rbv(pv):.4f}) — {which} position")
+                    raise RuntimeError(f"{pv} did not reach {t:.4f} (at {self._rbv(pv):.4f}, "
+                                       f"tolerance {tol}) — {which} position")
                 time.sleep(0.1)
         time.sleep(c["settle_s"])
 
     def _shutter(self, open_: bool):
         pv = self.cfg["pvs"].get("fast_shutter_pv", "").strip()
         if pv:
-            caput(pv, 1 if open_ else 0, wait=True, timeout=5.0)
-            self.log.emit(f"  shutter {'open' if open_ else 'closed'}")
+            self.log.emit(f"  shutter {'open' if open_ else 'close'} ({pv})")
+            caput(pv, 1 if open_ else 0, wait=False)          # as XANES 2D
 
     def _snap(self, ch) -> np.ndarray:
         """Trigger one frame and wait for a frame newer than before the
@@ -179,7 +197,7 @@ class _SeriesWorker(QtCore.QThread):
         shutter_before = None
         f = None
         try:
-            epics.ca.use_initial_context()
+            self.log.emit(f"Camera: stop, Single mode, {c['exposure_s']} s exposure")
             ch = pva.Channel(p["detector_pv"])
             cam_before = {pv: caget(pv, timeout=2.0, use_monitor=False) for pv in cam_pvs}
             if shutter_pv:
@@ -209,20 +227,20 @@ class _SeriesWorker(QtCore.QThread):
                 ts["sample_rbv"].resize((k, 3))
                 ts["sample_rbv"][k - 1] = [self._rbv(p[q]) for q in ("topx_pv", "topz_pv", "rot_pv")]
                 for i in range(X):
+                    self.log.emit(f"  sample image {i + 1}/{X}")
                     self._append(f, "data", self._snap(ch), k)
                     n_done += 1
                     self.progress.emit(n_done, total)
-                self.log.emit(f"  {X} sample image(s)")
 
                 if F:
                     self._move_to("reference", c["reference"])
                     ts["reference_rbv"].resize((k, 3))
                     ts["reference_rbv"][k - 1] = [self._rbv(p[q]) for q in ("topx_pv", "topz_pv", "rot_pv")]
                     for i in range(F):
+                        self.log.emit(f"  reference image {i + 1}/{F}")
                         self._append(f, "data_white", self._snap(ch), k)
                         n_done += 1
                         self.progress.emit(n_done, total)
-                    self.log.emit(f"  {F} reference image(s)")
                 f.flush()
 
                 if k < N and not self._stop:
@@ -436,7 +454,15 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
     # ── helpers ─────────────────────────────────────────────────────────
 
     def _log(self, msg):
-        self.log_text.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        self.log_text.appendPlainText(line)
+        # Also next to the data, so the log survives a pystream restart.
+        if getattr(self, "_logfile", None):
+            try:
+                with open(self._logfile, "a") as fh:
+                    fh.write(line + "\n")
+            except OSError:
+                pass
 
     def _update_estimate(self):
         n, every = self.repeats.value(), self.every.value()
@@ -525,6 +551,7 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
                 != QtWidgets.QMessageBox.Yes:
             return
         self._save()
+        self._logfile = os.path.splitext(c["path"])[0] + ".log"
         self._log("=" * 50)
         self._log(f"{c['repeats']} × ({c['images']} images + {c['references']} references) "
                   f"every {c['interval_s'] / 60:g} min → {c['path']}")
@@ -544,6 +571,7 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
 
     def _finished(self, path):
         self._log(f"Done: {path}")
+        self._logfile = None
         self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False)
 
     # ── persistence ─────────────────────────────────────────────────────
@@ -587,7 +615,13 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
                 e.ignore()
                 return
             self._worker.stop()
-            self._worker.wait(10000)
+            if not self._worker.wait(10000):
+                # Still inside a move/acquisition: destroying a running
+                # QThread would take pystream down — hide instead.
+                self._log("Still finishing the current step; window hidden.")
+                e.ignore()
+                self.hide()
+                return
         try:
             self._save()
         except Exception:
