@@ -13,7 +13,7 @@ from `__all__` in [bl32ID/__init__.py](../../src/pystream/beamlines/bl32ID/__ini
 |---|---|
 | **Alignment ▾** | Mosalign, CoR, AlignPart, QGMax |
 | **Detector ▾** | Detector |
-| **Scans ▾** | XANES, XANES 2D, DataMap, aTomo |
+| **Scans ▾** | XANES, XANES 2D, DataMap, 2D Time Series, aTomo |
 | **Viewers ▾** | XANES 2D Viewer |
 | **Calculators ▾** | TXM Optics, X-ray Tools |
 | **Test ▾** | AutoROT, AutoCenter, Autofocus *(under development)* |
@@ -157,6 +157,27 @@ A mosaic of X-Y positions. At each position, tick any of **Image**,
   series of tomographies at one position, use one *+ Row (stay here)*
   with only Tomo ticked.
 
+### 2D Time Series
+
+Every *Y* minutes, *N* times: take *X* images at the sample position, then
+*F* reference images at the reference position.
+
+- **Load from XANES 2D** fills in the sample and reference positions, the
+  motor and camera PVs, the exposure and the fast shutter, all from the
+  XANES 2D plugin's saved settings. Everything stays editable. *Sample /
+  Reference = current* read the positions from the motors.
+- **Timing:** the interval runs from the start of one repeat to the start
+  of the next. Between repeats the sample waits at the reference position
+  with the fast shutter closed.
+- **One HDF5 file**, written as it goes, so Stop keeps everything taken
+  so far:
+  - `/exchange/data`, `/exchange/data_white`: images
+  - `/measurement/timeseries/*_repeat`, `*_time`: repeat number and time
+    of each image
+  - `sample_rbv`, `reference_rbv`: readbacks per repeat
+  - `/measurement/positions`: target positions and motor PVs
+- **At the end**, the camera (ImageMode, NumImages, AcquireTime, Acquire)
+  and the shutter go back to what they were before the start.
 ### Röntgen (AI)
 
 Core pystream feature — always visible as a bottom panel, not a bl32ID
