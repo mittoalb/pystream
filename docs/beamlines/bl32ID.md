@@ -169,7 +169,7 @@ Every *Y* minutes, *N* times: take *X* images at the sample position, then
 - **Timing:** the interval runs from the start of one repeat to the start
   of the next. Between repeats the sample waits at the reference position
   with the fast shutter closed.
-- **B-station shutter:** for waits of a minute or more it is also closed
+- **B-station shutter:** when the interval is a minute or more it is also closed
   (`32idb:rshtrB:Close.PROC`). Before the next repeat it is opened again,
   and the series waits for `PB:32ID:STA_B_SBS_CLSD_PL` to report open. If
   the PSS doesn't open it within 30 s, the series stops with an error
@@ -179,6 +179,12 @@ Every *Y* minutes, *N* times: take *X* images at the sample position, then
   repeats*) decide whether each shutter is touched at all. When unticked,
   that shutter is never opened, closed or restored. DataMap's 2D XANES
   action follows the choice saved in XANES 2D.
+- **File name:** the output is saved as `<name>_001.h5`, then `_002`, and
+  so on, always the next free number, so nothing is overwritten. The step
+  log goes next to it as `<name>_NNN.log`.
+- **Lost frames:** an image that doesn't arrive is triggered again once,
+  then logged and skipped. The series stops only after 5 lost images in
+  a row.
 - **One HDF5 file**, written as it goes, so Stop keeps everything taken
   so far:
   - `/exchange/data`, `/exchange/data_white`: images

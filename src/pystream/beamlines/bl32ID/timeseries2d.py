@@ -22,8 +22,8 @@ Positions, motor PVs, camera PVs, exposure and the fast shutter come from
 the XANES 2D plugin's saved settings (~/.xanes_gui_2d_settings.json,
 "Load from XANES 2D"); they can be edited here afterwards. The interval
 is start-to-start. Between repeats the sample waits at the reference
-position with the fast shutter closed, and for waits of a minute or more
-the B-station shutter too (opened again, with its status checked, before
+position with the fast shutter closed, and when the interval is a minute
+or more the B-station shutter too (same rule as XANES 2D) (opened again, with its status checked, before
 the next repeat). At the end both shutters and the camera's ImageMode / NumImages / AcquireTime /
 Acquire go back to what they were before the start.
 
@@ -79,7 +79,8 @@ DEFAULT_PVS = {
 }
 OPTIONAL_PVS = {"fast_shutter_pv", "b_shutter_open_pv", "b_shutter_close_pv",
                 "b_shutter_status_pv"}
-B_SHUTTER_MIN_WAIT_S = 60.0     # only cycle the B shutter for waits this long
+B_SHUTTER_MIN_WAIT_S = 60.0     # cycle the B shutter when the interval is this long
+B_SHUTTER_MIN_LEFT_S = 10.0     # …unless less than this is left to wait (strokes)
 B_SHUTTER_TIMEOUT_S = 30.0
 PV_LABELS = [
     ("topx_pv", "Sample X motor"), ("topz_pv", "Sample Z motor"),
@@ -93,6 +94,23 @@ PV_LABELS = [
 ]
 _NTNDA_KEYS = ("ushortValue", "shortValue", "intValue", "uintValue",
                "floatValue", "doubleValue", "ubyteValue", "byteValue")
+
+
+def next_indexed_path(path: str) -> str:
+    """<dir>/<stem>_NNN<ext> with NNN one above the highest existing index
+    (001 if none), so a new series never overwrites an old one. A trailing
+    _NNN already in the name is treated as the stem's index."""
+    import re
+    d, base = os.path.split(path)
+    stem, ext = os.path.splitext(base)
+    ext = ext or ".h5"
+    stem = re.sub(r"_\d{3,}$", "", stem)
+    pat = re.compile(r"^" + re.escape(stem) + r"_(\d{3,})" + re.escape(ext) + r"$")
+    try:
+        used = [int(m.group(1)) for fn in os.listdir(d or ".") if (m := pat.match(fn))]
+    except OSError:
+        used = []
+    return os.path.join(d, f"{stem}_{max(used, default=0) + 1:03d}{ext}")
 
 
 def _decode(st) -> np.ndarray:
@@ -116,6 +134,7 @@ def _uid(ch) -> Optional[int]:
 # ── Worker ───────────────────────────────────────────────────────────────
 
 class _SeriesWorker(QtCore.QThread):
+    """Runs one series; see the module docstring for the file layout."""
     log      = QtCore.pyqtSignal(str)
     progress = QtCore.pyqtSignal(int, int)      # images done, total
     done     = QtCore.pyqtSignal(str)           # file path
@@ -212,24 +231,43 @@ class _SeriesWorker(QtCore.QThread):
             raise RuntimeError(msg + " — check the PSS / hutch search")
         self.log.emit("  ⚠ " + msg)
 
-    def _snap(self, ch) -> np.ndarray:
-        """Trigger one frame and wait for a frame newer than before the
-        trigger (and at least one exposure later)."""
-        p, exp = self.cfg["pvs"], self.cfg["exposure_s"]
-        before = _uid(ch)
-        t0 = time.monotonic()
-        self._put(p["cam_acquire_pv"], 1, wait=False)
-        deadline = t0 + max(10.0, exp * 3 + 10)
+    def _wait_camera_idle(self, timeout: float):
+        """Acquire must be back to 0 before the next trigger: the frame reaches
+        the PVA stream slightly BEFORE the driver finishes, and a trigger sent
+        in that gap is ignored by the camera."""
+        acq = self.cfg["pvs"]["cam_acquire_pv"]
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            v = caget(acq, timeout=2.0, use_monitor=False)
+            if v is not None and int(v) == 0:
+                return
             if self._stop:
                 raise InterruptedError
-            if time.monotonic() - t0 >= exp:
-                uid = _uid(ch)
-                if uid is not None and uid != before:
-                    return _decode(ch.get(""))
-            time.sleep(0.01)
-        raise RuntimeError(f"no new frame on {p['detector_pv']} within "
-                           f"{deadline - t0:.0f}s")
+            time.sleep(0.02)
+        raise RuntimeError(f"camera still acquiring after {timeout:.0f}s ({acq})")
+
+    def _snap(self, ch) -> np.ndarray:
+        """One frame: wait for the camera to be idle, trigger Acquire as the
+        busy record it is (the put completes when the frame is done), then
+        take the first frame newer than before the trigger. One retry."""
+        p, exp = self.cfg["pvs"], self.cfg["exposure_s"]
+        for attempt in (1, 2):
+            self._wait_camera_idle(timeout=exp + 15)
+            before = _uid(ch)
+            t0 = time.monotonic()
+            caput(p["cam_acquire_pv"], 1, wait=True, timeout=exp * 2 + 15)
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if self._stop:
+                    raise InterruptedError
+                if time.monotonic() - t0 >= exp:
+                    uid = _uid(ch)
+                    if uid is not None and uid != before:
+                        return _decode(ch.get(""))
+                time.sleep(0.01)
+            if attempt == 1:
+                self.log.emit("  ⚠ no new frame — triggering again")
+        raise RuntimeError(f"no new frame on {p['detector_pv']} after 2 triggers")
 
     # ── main ───────────────────────────────────────────────────────────
 
@@ -277,7 +315,7 @@ class _SeriesWorker(QtCore.QThread):
                 ts["sample_rbv"][k - 1] = [self._rbv(p[q]) for q in ("topx_pv", "topz_pv", "rot_pv")]
                 for i in range(X):
                     self.log.emit(f"  sample image {i + 1}/{X}")
-                    self._append(f, "data", self._snap(ch), k)
+                    self._take(f, ch, "data", k)
                     n_done += 1
                     self.progress.emit(n_done, total)
 
@@ -287,7 +325,7 @@ class _SeriesWorker(QtCore.QThread):
                     ts["reference_rbv"][k - 1] = [self._rbv(p[q]) for q in ("topx_pv", "topz_pv", "rot_pv")]
                     for i in range(F):
                         self.log.emit(f"  reference image {i + 1}/{F}")
-                        self._append(f, "data_white", self._snap(ch), k)
+                        self._take(f, ch, "data_white", k)
                         n_done += 1
                         self.progress.emit(n_done, total)
                 f.flush()
@@ -296,9 +334,13 @@ class _SeriesWorker(QtCore.QThread):
                     self._shutter(False)
                     t_next = t_start + c["interval_s"]
                     left = t_next - time.monotonic()
-                    if left >= B_SHUTTER_MIN_WAIT_S:
-                        self._b_shutter(False)
-                        left = t_next - time.monotonic()
+                    # Same rule as XANES 2D: interval >= 1 min → close B.
+                    if c["interval_s"] >= B_SHUTTER_MIN_WAIT_S and c["use_b_shutter"]:
+                        if left >= B_SHUTTER_MIN_LEFT_S:
+                            self._b_shutter(False)
+                            left = t_next - time.monotonic()
+                        else:
+                            self.log.emit(f"  B shutter left open: only {left:.0f}s to wait")
                     if left <= 0:
                         self.log.emit("  repeat took longer than the interval — next starts now")
                     else:
@@ -329,6 +371,21 @@ class _SeriesWorker(QtCore.QThread):
                 except Exception as e:
                     self.log.emit(f"[WARN] B shutter restore: {e}")
             self.done.emit(path)
+
+    MAX_FAILS_IN_A_ROW = 5
+
+    def _take(self, f, ch, name, k):
+        """Acquire + append one image. A lost frame is logged and skipped
+        (its repeat/time rows simply aren't written); only several failures
+        in a row end the series."""
+        try:
+            self._append(f, name, self._snap(ch), k)
+            self._fails = 0
+        except RuntimeError as e:
+            self._fails = getattr(self, "_fails", 0) + 1
+            self.log.emit(f"  ✗ image lost: {e}")
+            if self._fails >= self.MAX_FAILS_IN_A_ROW:
+                raise RuntimeError(f"{self._fails} images lost in a row — stopping") from e
 
     def _restore_camera(self, before):
         p = self.cfg["pvs"]
@@ -439,7 +496,8 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
         f.addRow("Repeats:", self.repeats)
         f.addRow("Exposure:", self.exposure)
         self.use_fast = QtWidgets.QCheckBox("Use fast shutter (closed between repeats)")
-        self.use_b = QtWidgets.QCheckBox("Use B-station shutter (closed for waits ≥ 1 min)")
+        self.use_b = QtWidgets.QCheckBox("Use B-station shutter (closed between repeats "
+                                         "when the interval is ≥ 1 min)")
         for cb in (self.use_fast, self.use_b):
             cb.setChecked(True)
             f.addRow("", cb)
@@ -611,11 +669,9 @@ class TimeSeries2DDialog(QtWidgets.QDialog):
         if probs:
             QtWidgets.QMessageBox.warning(self, "Cannot start", "\n".join(probs))
             return
-        if os.path.exists(c["path"]) and QtWidgets.QMessageBox.question(
-                self, "File exists", f"{c['path']} exists. Overwrite?") \
-                != QtWidgets.QMessageBox.Yes:
-            return
         self._save()
+        # Never overwrite: write to the next free <name>_NNN.h5.
+        c["path"] = next_indexed_path(c["path"])
         self._logfile = os.path.splitext(c["path"])[0] + ".log"
         self._log("=" * 50)
         self._log(f"{c['repeats']} × ({c['images']} images + {c['references']} references) "
