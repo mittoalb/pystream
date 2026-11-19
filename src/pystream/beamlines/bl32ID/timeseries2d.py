@@ -124,13 +124,6 @@ def _decode(st) -> np.ndarray:
     return flat.reshape(int(dims[1]["size"]), int(dims[0]["size"]))
 
 
-def _uid(ch) -> Optional[int]:
-    try:
-        return int(ch.get("field(uniqueId)")["uniqueId"])
-    except Exception:
-        return None
-
-
 # ── Worker ───────────────────────────────────────────────────────────────
 
 class _SeriesWorker(QtCore.QThread):
@@ -247,27 +240,23 @@ class _SeriesWorker(QtCore.QThread):
         raise RuntimeError(f"camera still acquiring after {timeout:.0f}s ({acq})")
 
     def _snap(self, ch) -> np.ndarray:
-        """One frame: wait for the camera to be idle, trigger Acquire as the
-        busy record it is (the put completes when the frame is done), then
-        take the first frame newer than before the trigger. One retry."""
+        """One frame, the way XANES 2D takes it (proven on this camera):
+        trigger Acquire, wait exposure + 0.2 s, take the current image. The
+        frame uniqueId is NOT used — on this PVA stream it doesn't reliably
+        advance. Consecutive frames at one position also need the camera to
+        be finished (Acquire back to 0) before reading / re-triggering,
+        otherwise the next trigger lands while it's busy and is ignored."""
         p, exp = self.cfg["pvs"], self.cfg["exposure_s"]
-        for attempt in (1, 2):
-            self._wait_camera_idle(timeout=exp + 15)
-            before = _uid(ch)
-            t0 = time.monotonic()
-            caput(p["cam_acquire_pv"], 1, wait=True, timeout=exp * 2 + 15)
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline:
-                if self._stop:
-                    raise InterruptedError
-                if time.monotonic() - t0 >= exp:
-                    uid = _uid(ch)
-                    if uid is not None and uid != before:
-                        return _decode(ch.get(""))
-                time.sleep(0.01)
-            if attempt == 1:
-                self.log.emit("  ⚠ no new frame — triggering again")
-        raise RuntimeError(f"no new frame on {p['detector_pv']} after 2 triggers")
+        acq = p["cam_acquire_pv"]
+        self._wait_camera_idle(timeout=exp + 15)
+        caput(acq, 1, wait=False)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < exp + 0.2:
+            if self._stop:
+                raise InterruptedError
+            time.sleep(0.02)
+        self._wait_camera_idle(timeout=exp + 15)        # frame delivered
+        return _decode(ch.get(""))
 
     # ── main ───────────────────────────────────────────────────────────
 
