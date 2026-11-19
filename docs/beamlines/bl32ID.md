@@ -182,9 +182,8 @@ Every *Y* minutes, *N* times: take *X* images at the sample position, then
 - **File name:** the output is saved as `<name>_001.h5`, then `_002`, and
   so on, always the next free number, so nothing is overwritten. The step
   log goes next to it as `<name>_NNN.log`.
-- **Lost frames:** an image that doesn't arrive is triggered again once,
-  then logged and skipped. The series stops only after 5 lost images in
-  a row.
+- **Lost frames:** an image that doesn't arrive is logged and skipped.
+  The series stops only after 5 lost images in a row.
 - **One HDF5 file**, written as it goes, so Stop keeps everything taken
   so far:
   - `/exchange/data`, `/exchange/data_white`: images
