@@ -1616,9 +1616,12 @@ class PvViewerApp(QtWidgets.QMainWindow):
         left_layout.addWidget(record_group)
         
         # Save button
-        btn_save_frame = QtWidgets.QPushButton("Save Current Frame...")
-        btn_save_frame.clicked.connect(self._save_frame)
-        left_layout.addWidget(btn_save_frame)
+        self.btn_save_frame = QtWidgets.QPushButton("Save Current Frame")
+        self.btn_save_frame.setToolTip(
+            "Save the displayed frame as a TIFF in the Output File folder, "
+            "named <prefix>_NNN.tiff (next free number, never overwrites).")
+        self.btn_save_frame.clicked.connect(self._save_frame)
+        left_layout.addWidget(self.btn_save_frame)
         
         left_layout.addStretch()
         
@@ -2414,15 +2417,37 @@ class PvViewerApp(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.information(self, "Reset View", "No image loaded yet.")
 
+    @staticmethod
+    def _next_frame_path(folder: str, prefix: str, ext: str = ".tiff") -> str:
+        """<folder>/<prefix>_NNN<ext>, NNN one above the highest existing
+        index, so a saved frame never overwrites an earlier one."""
+        import re
+        pat = re.compile(r"^" + re.escape(prefix) + r"_(\d{3,})" + re.escape(ext) + r"$")
+        try:
+            used = [int(m.group(1)) for f in os.listdir(folder) if (m := pat.match(f))]
+        except OSError:
+            used = []
+        return os.path.join(folder, f"{prefix}_{max(used, default=0) + 1:03d}{ext}")
+
     def _save_frame(self):
+        """Save the displayed frame without asking: folder = Output File,
+        name = Prefix + next free index + .tiff."""
         if self._last_display_img is None:
             QtWidgets.QMessageBox.information(self, "Save Frame", "No image to save yet.")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Frame", "", "TIFF Image (*.tiff *.tif);;NumPy Array (*.npy);;PNG Image (*.png);;All Files (*)"
-        )
-        if not path:
+        folder = self.record_path_entry.text().strip()
+        if not folder:
+            QtWidgets.QMessageBox.warning(
+                self, "Save Frame",
+                "Set the Output File folder (Recording box) first.")
             return
+        prefix = self.record_prefix_entry.text().strip() or "frame"
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(self, "Save Frame", f"Cannot use folder:\n{folder}\n{e}")
+            return
+        path = self._next_frame_path(folder, prefix)
         try:
             if path.lower().endswith((".tiff", ".tif")):
                 from PIL import Image
@@ -2455,7 +2480,9 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 np.save(path, self._last_display_img)
             if LOGGER:
                 LOGGER.info("Saved frame to %s", path)
-            QtWidgets.QMessageBox.information(self, "Save Frame", f"Saved to:\n{path}")
+            if not self.recording:
+                self.lbl_record_status.setText(f"Saved {os.path.basename(path)}\nin {folder}")
+            self.btn_save_frame.setToolTip(f"Last saved: {path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save Frame", f"Failed to save frame:\n{e}")
             if LOGGER:
