@@ -188,6 +188,7 @@ def xanes2d_config(tag: str, data_x: float, data_z: float):
         "zp_cal_source":        gui_2d.BL_GUI_CAL_FILE,
         "motor_settle_s":       float(sc.get("motor_settle") or 0.5),
         "post_energy_settle_s": float(sc.get("post_energy_settle") or 0.0),
+        "ref_every_n":          max(1, int(float(sc.get("ref_every") or 1))),
         "master_path": os.path.join(sc.get("save_dir") or "/tmp",
                                     f"{stem}_{tag}{ext or '.h5'}"),
         "qgmax_every_n":   int(float(sc.get("qgmax_every") or 0)),
