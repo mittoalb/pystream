@@ -47,6 +47,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from .plugin_settings import load_settings, save_settings
+from ...scan_status import ScanStatus
 
 try:
     import epics
@@ -344,6 +345,7 @@ class _DataMapWorker(QtCore.QThread):
         self._proc: Optional[subprocess.Popen] = None   # tomo caput / 3D script
         self._proc_is_tomo = False
         self._x2d_worker = None
+        self._status: Optional[ScanStatus] = None
 
     def stop(self):
         """Called from the GUI thread. Ends the running action, then the
@@ -549,6 +551,14 @@ class _DataMapWorker(QtCore.QThread):
     # ── Main loop ───────────────────────────────────────────────────────
 
     def run(self):
+        # Published to the shared scan registry (Agents panel, Slack bot).
+        actions = sorted({ACTION_TITLE[a] for _r, _x, _y, acts in self.plan for a in acts})
+        total = len(self.plan) * self.repeats
+        self._status = status = ScanStatus(
+            "DataMap", total=total, mode=", ".join(actions),
+            positions=len(self.plan), repeats=self.repeats,
+            interval_s=self.interval_s)
+        outcome = None            # set on every exit path; None = crashed
         try:
             if HAS_EPICS:
                 epics.ca.use_initial_context()
@@ -565,11 +575,19 @@ class _DataMapWorker(QtCore.QThread):
                     self._wait_until(t0 + self.interval_s, k + 1)
             if self._stop:
                 self.log.emit("Stopped by user.")
+                outcome = ("aborted", "stopped by user")
             elif failures:
                 self.log.emit(f"Finished with {failures} failure(s) — see above.")
+                outcome = ("finish", f"finished with {failures} failure(s)")
+            else:
+                outcome = ("finish", f"{total} position(s) done")
             self.done.emit()
         except Exception as e:
+            outcome = ("error", f"{type(e).__name__}: {e}")
             self.error.emit(f"{type(e).__name__}: {e}")
+        finally:
+            kind, text = outcome or ("error", "worker exited unexpectedly")
+            getattr(status, kind)(text)
 
     def _wait_until(self, t_next: float, k_next: int):
         """Interval is start-to-start: wait out what is left of it."""
@@ -580,6 +598,8 @@ class _DataMapWorker(QtCore.QThread):
             return
         at = time.strftime("%H:%M:%S", time.localtime(time.time() + left))
         self.log.emit(f"  waiting {left / 60:.1f} min — repeat {k_next} at {at}")
+        if self._status is not None:
+            self._status.activity(f"waiting — repeat {k_next}/{self.repeats} at {at}")
         while not self._stop and time.monotonic() < t_next:
             time.sleep(min(0.5, max(0.0, t_next - time.monotonic())))
 
@@ -603,11 +623,16 @@ class _DataMapWorker(QtCore.QThread):
                 self.log.emit(f"    ✗ position #{n} skipped: motors did not get there")
                 failures += 1
                 self.progress.emit(done_before + i, total)
+                if self._status is not None:
+                    self._status.step(done_before + i, total, f"position {i}/{per} (#{n}) skipped")
                 continue
             for a in actions:
                 if self._stop:
                     break
                 self.log.emit(f"  ▶ {ACTION_TITLE[a]}")
+                if self._status is not None:
+                    rtag = f"repeat {k}/{self.repeats}, " if self.repeats > 1 else ""
+                    self._status.activity(f"{rtag}position {i}/{per} (#{n}): {ACTION_TITLE[a]}")
                 try:
                     getattr(self, f"_do_{a}")(n, x, y)
                     if not self._stop:
@@ -616,6 +641,8 @@ class _DataMapWorker(QtCore.QThread):
                     failures += 1
                     self.log.emit(f"  ✗ {ACTION_TITLE[a]} failed: {e}")
             self.progress.emit(done_before + i, total)
+            if self._status is not None:
+                self._status.step(done_before + i, total, f"position {i}/{per} (#{n}) done")
         return failures
 
 

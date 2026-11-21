@@ -70,6 +70,7 @@ def provide_agent_context():
         from .agent_tools import (
             anthropic_tool_specs, openai_tool_specs, get_tool,
             WRITE_TOOLS, _bash_is_destructive, SYSTEM_PROMPT_ADDENDUM,
+            tool_beamline_snapshot, format_snapshot_text,
         )
         return {
             "tool_specs_anthropic":     anthropic_tool_specs(),
@@ -78,6 +79,10 @@ def provide_agent_context():
             "write_tools":              WRITE_TOOLS,
             "is_destructive":           _bash_is_destructive,
             "system_prompt_addendum":   SYSTEM_PROMPT_ADDENDUM,
+            # Read-only one-call status, rendered as Slack/markdown
+            # text — used by the Slack bot's `status` command.
+            "status_snapshot_text":
+                lambda: format_snapshot_text(tool_beamline_snapshot()),
         }
     except Exception:
         return {}

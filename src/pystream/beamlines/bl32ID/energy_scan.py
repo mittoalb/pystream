@@ -44,6 +44,13 @@ from typing import List, Optional, Tuple
 import h5py
 import numpy as np
 
+try:    # run as `python energy_scan.py` too, where pystream may not import
+    from pystream.scan_status import ScanStatus
+except Exception:                                    # pragma: no cover
+    class ScanStatus:                                # no-op stand-in
+        def __init__(self, *a, **k): pass
+        def __getattr__(self, _name): return lambda *a, **k: None
+
 
 HC_EV_NM = 1239.84198  # eV·nm
 
@@ -567,6 +574,14 @@ def run_scan(cfg: ScanConfig) -> None:
           f"(step {cfg.de_eV} eV)")
     print(f"Output master file: {master_path}")
 
+    # Published to the shared scan registry (Agents panel, Slack bot).
+    status = ScanStatus(
+        "Energy scan", total=len(energies), file=str(master_path),
+        dir=str(root), e_start_eV=energies[0], e_end_eV=energies[-1],
+        de_eV=cfg.de_eV, take_reference=cfg.take_reference)
+    outcome = None            # set on every exit path; None = crashed
+    n_done = 0
+
     instrument_snapshot_written = False
     try:
         for i, e in enumerate(energies, start=1):
@@ -576,6 +591,7 @@ def run_scan(cfg: ScanConfig) -> None:
 
             t_start = time.time()
             print(f"[{i}/{len(energies)}] E = {e:.2f} eV", flush=True)
+            status.activity(f"{e / 1000:.3f} keV ({i}/{len(energies)})")
 
             set_energy(cfg, e)
             energy_rbv = _try_caget_float(cfg.energy_pv)
@@ -647,6 +663,20 @@ def run_scan(cfg: ScanConfig) -> None:
             ])
             log_file.flush()
             print(f"    step time: {time.time() - t_start:.1f} s", flush=True)
+            n_done = i
+            status.step(i, text=f"{e / 1000:.3f} keV ({i}/{len(energies)}) done")
+        if n_done < len(energies):
+            outcome = ("aborted", f"stopped by user after {n_done}/{len(energies)} "
+                                  f"energies → {master_path}")
+        else:
+            outcome = ("finish", f"{n_done} energies → {master_path}")
+    except KeyboardInterrupt:
+        outcome = ("aborted", f"interrupted after {n_done}/{len(energies)} "
+                              f"energies → {master_path}")
+        raise
+    except Exception as ex:
+        outcome = ("error", f"{type(ex).__name__}: {ex}")
+        raise
     finally:
         master.set_end_time()
         master.close()
@@ -658,6 +688,9 @@ def run_scan(cfg: ScanConfig) -> None:
                 pass  # not empty — keep any residual files for debugging
         print(f"Log written to {log_path}")
         print(f"Master HDF5: {master_path}")
+        # Last, after the files are closed.
+        kind, text = outcome or ("error", "scan exited unexpectedly")
+        getattr(status, kind)(text)
 
 
 def print_dry_run(cfg: ScanConfig) -> None:

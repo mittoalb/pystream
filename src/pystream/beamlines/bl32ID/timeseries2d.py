@@ -41,6 +41,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from .plugin_settings import load_settings, save_settings
 from .datamap import XANES2D_SETTINGS, _read_json, _age
+from ...scan_status import ScanStatus
 
 try:
     import epics
@@ -270,6 +271,15 @@ class _SeriesWorker(QtCore.QThread):
         shutter_before = None
         b_closed_before = None
         f = None
+        # Published to the shared scan registry (Agents panel, Slack bot).
+        # outcome: None = crashed before finishing; set on every exit path.
+        status = ScanStatus(
+            "2D Time Series",
+            total=c["repeats"] * (c["images"] + c["references"]),
+            file=path, repeats=c["repeats"], images_per_repeat=c["images"],
+            references_per_repeat=c["references"],
+            exposure_s=c["exposure_s"], interval_s=c["interval_s"])
+        outcome = None
         try:
             self.log.emit(f"Camera: stop, Single mode, {c['exposure_s']} s exposure")
             ch = pva.Channel(p["detector_pv"])
@@ -296,6 +306,7 @@ class _SeriesWorker(QtCore.QThread):
                     break
                 t_start = time.monotonic()
                 self.log.emit(f"══ repeat {k}/{N} ══")
+                status.activity(f"repeat {k}/{N}: images")
                 self._b_shutter(True)
                 self._shutter(True)
 
@@ -307,6 +318,7 @@ class _SeriesWorker(QtCore.QThread):
                     self._take(f, ch, "data", k)
                     n_done += 1
                     self.progress.emit(n_done, total)
+                    status.step(n_done, text=f"repeat {k}/{N}: sample image {i + 1}/{X}")
 
                 if F:
                     self._move_to("reference", c["reference"])
@@ -317,6 +329,7 @@ class _SeriesWorker(QtCore.QThread):
                         self._take(f, ch, "data_white", k)
                         n_done += 1
                         self.progress.emit(n_done, total)
+                        status.step(n_done, text=f"repeat {k}/{N}: reference image {i + 1}/{F}")
                 f.flush()
 
                 if k < N and not self._stop:
@@ -335,16 +348,21 @@ class _SeriesWorker(QtCore.QThread):
                     else:
                         at = time.strftime("%H:%M:%S", time.localtime(time.time() + left))
                         self.log.emit(f"  waiting {left / 60:.1f} min — repeat {k + 1} at {at}")
+                        status.activity(f"waiting — repeat {k + 1}/{N} at {at}")
                         while not self._stop and time.monotonic() < t_next:
                             time.sleep(0.2)
             if self._stop:
                 self.log.emit("Stopped by user — file keeps everything taken so far.")
+                outcome = ("aborted", f"stopped by user after {n_done}/{total} images → {path}")
             else:
                 self.log.emit("Series complete.")
+                outcome = ("finish", f"{n_done}/{total} images → {path}")
         except InterruptedError:
             self.log.emit("Stopped by user — file keeps everything taken so far.")
+            outcome = ("aborted", f"stopped by user → {path}")
         except Exception as e:
             self.log.emit(f"[ERROR] {type(e).__name__}: {e}")
+            outcome = ("error", f"{type(e).__name__}: {e}")
         finally:
             if f is not None:
                 f["measurement/timeseries"].attrs["end_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -359,6 +377,9 @@ class _SeriesWorker(QtCore.QThread):
                     self._b_shutter(not b_closed_before)
                 except Exception as e:
                     self.log.emit(f"[WARN] B shutter restore: {e}")
+            # Last, after the file is closed and shutters restored.
+            kind, text = outcome or ("error", "worker exited unexpectedly")
+            getattr(status, kind)(text)
             self.done.emit(path)
 
     MAX_FAILS_IN_A_ROW = 5

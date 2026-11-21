@@ -1423,6 +1423,213 @@ def tool_read_scan_metadata(path: str) -> dict:
 # Each entry: name, description (visible to the model), JSON-schema for
 # inputs, the Python callable. Keep descriptions concrete — that's how the
 # model decides when to use the tool.
+# ── one-call beamline status snapshot (read-only) ─────────────────────
+#
+# Answers "what's going on at the beamline" in one round: beam, shutters,
+# energy, TomoScan, camera + file writer, scans published to the shared
+# registry (XANES, Time Series, DataMap …), IOCs. Used by the agent and
+# by the read-only Slack bot's `status` command. Every value that can't
+# be read comes back as None — never raises.
+
+SNAPSHOT_PVS = {
+    "beam": {
+        "ring_current_mA":   "S:SRcurrentAI",
+        "ring_mode":         "S:ActualMode",
+        "A_shutter_closed":  "PB:32ID:STA_A_FES_CLSD_PL",   # 1 = closed
+        "B_shutter_closed":  "PB:32ID:STA_B_SBS_CLSD_PL",   # 1 = closed
+        "fast_shutter":      "32idbTXM:uniblitz:control",
+        "energy_keV":        "32id:TXMOptics:Energy_RBV",
+        "energy_busy":       "32id:TXMOptics:EnergyBusy",
+        "undulator_keV":     "S32ID:USID:EnergyM.VAL",
+    },
+    "camera": {
+        "acquire":           "32idbSP1:cam1:Acquire_RBV",
+        "state":             "32idbSP1:cam1:DetectorState_RBV",
+        "frame_rate_hz":     "32idbSP1:cam1:ArrayRate_RBV",
+        "exposure_s":        "32idbSP1:cam1:AcquireTime_RBV",
+        "image_mode":        "32idbSP1:cam1:ImageMode_RBV",
+        "frames":            "32idbSP1:cam1:ArrayCounter_RBV",
+    },
+    "file_writer": {
+        "capture":           "32idbSP1:HDF1:Capture_RBV",
+        "captured":          "32idbSP1:HDF1:NumCaptured_RBV",
+        "to_capture":        "32idbSP1:HDF1:NumCapture_RBV",
+        "file":              "32idbSP1:HDF1:FullFileName_RBV",
+        "write_status":      "32idbSP1:HDF1:WriteStatus",
+        "write_message":     "32idbSP1:HDF1:WriteMessage",
+    },
+}
+
+_SNAPSHOT_TOMOSCAN_FIELDS = (
+    "ServerRunning", "ScanStatus", "StartScan", "ScanType",
+    "ImagesCollected", "NumAngles", "ElapsedTime", "RemainingTime",
+    "FilePath", "FileName",
+)
+
+
+def _caget_flat(epics, pvs: list, timeout: float = 1.5) -> dict:
+    """One batched read; unreachable PVs → None after ~1 s total (not
+    pyepics' default 5 s per connection)."""
+    try:
+        vals = epics.caget_many(pvs, as_string=True, timeout=timeout,
+                                connection_timeout=1.0)
+    except Exception:
+        vals = [None] * len(pvs)
+    return dict(zip(pvs, vals))
+
+
+def _ioc_states(timeout: float = 8.0) -> dict:
+    """{ioc: panel status}. The panel ssh-probes some hosts, which can
+    take ~6 s, so the per-request timeout is generous; requests run in
+    parallel."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(name):
+        try:
+            return name, _panel_post("status", name, timeout=timeout).get("status")
+        except Exception:
+            return name, None
+    with ThreadPoolExecutor(max_workers=len(CONTROL_PANEL_IOCS)) as ex:
+        return dict(ex.map(one, CONTROL_PANEL_IOCS))
+
+
+def tool_beamline_snapshot(include_iocs: bool = True) -> dict:
+    """Beam, shutters, energy, TomoScan, camera, file writer, running
+    scans and IOC states in one call. READ-ONLY."""
+    from concurrent.futures import ThreadPoolExecutor
+    out: dict = {"time": time.strftime("%Y-%m-%d %H:%M:%S")}
+    pool = ThreadPoolExecutor(max_workers=1)
+    iocs_f = pool.submit(_ioc_states) if include_iocs else None
+    try:
+        import epics
+    except Exception as ex:
+        epics = None
+        out["epics_error"] = f"pyepics unavailable: {ex}"
+    if epics is not None:
+        tomo_pvs = {scan: {f: prefix + f for f in _SNAPSHOT_TOMOSCAN_FIELDS}
+                    for scan, prefix in TOMOSCAN_PREFIXES.items()}
+        allpvs = [pv for g in SNAPSHOT_PVS.values() for pv in g.values()]
+        allpvs += [pv for g in tomo_pvs.values() for pv in g.values()]
+        vals = _caget_flat(epics, allpvs)
+        for group, names in SNAPSHOT_PVS.items():
+            out[group] = {k: vals.get(pv) for k, pv in names.items()}
+        tomo = {}
+        for scan, names in tomo_pvs.items():
+            t = {k: vals.get(pv) for k, pv in names.items()}
+            if t.get("ServerRunning") is None:
+                tomo[scan] = {"reachable": False}
+            else:
+                t["reachable"] = True
+                t["scan_in_progress"] = t.get("StartScan") == "Acquire"
+                tomo[scan] = t
+        out["tomoscan"] = tomo
+    try:
+        from beamline_agent.core_tools import tool_list_running_scans
+        out["scans"] = tool_list_running_scans(include_agents=False).get("scans", [])
+    except Exception as ex:
+        out["scans_error"] = f"{type(ex).__name__}: {ex}"
+    if iocs_f is not None:
+        try:
+            out["iocs"] = iocs_f.result(timeout=15)
+        except Exception as ex:
+            out["iocs_error"] = f"{type(ex).__name__}: {ex}"
+    pool.shutdown(wait=False)
+    return out
+
+
+def _onoff(closed_val) -> str:
+    if closed_val is None:
+        return "?"
+    return "closed" if str(closed_val).strip() in ("1", "Closed", "CLOSED") else "open"
+
+
+def format_snapshot_text(snap: dict) -> str:
+    """Compact Slack/markdown rendering of tool_beamline_snapshot()."""
+    def v(x, unit="", nd=None):
+        if x is None or x == "":
+            return "n/a"
+        if nd is not None:
+            try:
+                return f"{float(x):.{nd}f}{unit}"
+            except (TypeError, ValueError):
+                pass
+        return f"{x}{unit}"
+
+    L = [f"*32-ID status* — {snap.get('time', '')}"]
+    if snap.get("epics_error"):
+        L.append(f"⚠️ {snap['epics_error']}")
+    elif all(x is None for g in ("beam", "camera", "file_writer")
+             for x in (snap.get(g) or {}).values()):
+        L.append("⚠️ no EPICS PV answered — this host may not reach the "
+                 "beamline network (values below are n/a)")
+    b = snap.get("beam") or {}
+    if b:
+        L.append(f"*Beam*: ring {v(b.get('ring_current_mA'), ' mA', 1)}"
+                 f" ({v(b.get('ring_mode'))}) · A-shutter "
+                 f"{_onoff(b.get('A_shutter_closed'))} · B-shutter "
+                 f"{_onoff(b.get('B_shutter_closed'))} · fast shutter "
+                 f"{v(b.get('fast_shutter'))}")
+        busy = " (moving)" if str(b.get("energy_busy")) in ("1", "Busy") else ""
+        L.append(f"*Energy*: {v(b.get('energy_keV'), ' keV', 4)}{busy}"
+                 f" · undulator {v(b.get('undulator_keV'), ' keV', 3)}")
+    scans = snap.get("scans") or []
+    active = [s for s in scans if s.get("state") not in ("done", "error")]
+    tomo = snap.get("tomoscan") or {}
+    tomo_active = {k: t for k, t in tomo.items() if t.get("scan_in_progress")}
+    if not active and not tomo_active:
+        L.append("*Scans*: none running")
+    for s in active:
+        pr = s.get("progress") or {}
+        frac = f" {pr['done']}/{pr['total']}" if pr else ""
+        info = s.get("info") or {}
+        f = info.get("file") or info.get("master") or info.get("dir")
+        L.append(f"*Scan*: {s.get('name')}{frac} — {s.get('activity') or s.get('state')}"
+                 f" · {s.get('running_for')} · {s.get('host')}"
+                 + (f"\n      → `{f}`" if f else "")
+                 + (f"  ⚠️ {s['state']}" if str(s.get("state", "")).startswith("stale") else ""))
+    for k, t in tomo_active.items():
+        L.append(f"*{k}*: {v(t.get('ScanType'))} {v(t.get('ImagesCollected'))}/"
+                 f"{v(t.get('NumAngles'))} · {v(t.get('ScanStatus'))} · "
+                 f"remaining {v(t.get('RemainingTime'))}\n      → "
+                 f"`{v(t.get('FilePath'))}/{v(t.get('FileName'))}`")
+    recent = [s for s in scans if s.get("state") in ("done", "error")]
+    for s in recent[:3]:
+        icon = "❌" if s.get("state") == "error" else "✅"
+        L.append(f"{icon} {s.get('name')}: {s.get('activity')} "
+                 f"({s.get('last_update_ago')} ago)")
+    c = snap.get("camera") or {}
+    w = snap.get("file_writer") or {}
+    if c:
+        L.append(f"*Camera*: {v(c.get('acquire'))} / {v(c.get('state'))} · "
+                 f"{v(c.get('frame_rate_hz'), ' Hz', 1)} · exp "
+                 f"{v(c.get('exposure_s'), ' s', 3)} · {v(c.get('image_mode'))}")
+    if w:
+        L.append(f"*HDF writer*: {v(w.get('capture'))} "
+                 f"{v(w.get('captured'))}/{v(w.get('to_capture'))} · "
+                 f"{v(w.get('write_status'))}"
+                 + (f" — {w['write_message']}" if w.get("write_message") else "")
+                 + (f"\n      → `{w['file']}`" if w.get("file") else ""))
+    unreach = [k for k, t in tomo.items() if not t.get("reachable")]
+    if unreach:
+        L.append(f"TomoScan not reachable: {', '.join(unreach)}")
+    iocs = snap.get("iocs")
+    if iocs:
+        if all(st is None for st in iocs.values()):
+            L.append("*IOCs*: control panel unreachable")
+        else:
+            up = [n for n, st in iocs.items() if st == "up"]
+            down = [n for n, st in iocs.items() if st in ("down", "stopped")]
+            unk = [n for n, st in iocs.items()
+                   if n not in up and n not in down and st != "not found"]
+            line = f"*IOCs*: {len(up)} up"
+            if down:
+                line += f" · down: {', '.join(down)}"
+            if unk:
+                line += f" · unknown: {', '.join(unk)}"
+            L.append(line)
+    return "\n".join(L)
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "bash",
@@ -1752,6 +1959,18 @@ TOOLS += [
           "Abort a running TomoScan and wait until it has stopped. Runs "
           "immediately, no dialog.",
           tool_tomoscan_abort, {"scan": _TOMOSCAN_SCAN}),
+    _spec("beamline_snapshot",
+          "ONE call for 'what's going on at the beamline': ring current, "
+          "shutters, energy, every TomoScan, camera acquire/frame rate, "
+          "HDF writer (capturing? n/N, file), scans published by XANES / "
+          "Time Series / DataMap (name, progress, file), and IOC up/down. "
+          "Use FIRST for any 'is a scan running', 'is there beam', 'is it "
+          "saving data', 'status' question; drill down with the specific "
+          "tools after. Read-only.",
+          tool_beamline_snapshot,
+          {"include_iocs": {"type": "boolean",
+                            "description": "Also query the IOC panel "
+                            "(default true, adds ~1-3 s)."}}),
 ]
 
 
