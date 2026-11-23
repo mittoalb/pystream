@@ -331,6 +331,7 @@ class _DataMapWorker(QtCore.QThread):
 
     log      = QtCore.pyqtSignal(str)
     progress = QtCore.pyqtSignal(int, int)   # positions done, total
+    detail   = QtCore.pyqtSignal(str)        # progress inside an action ("" = none)
     current  = QtCore.pyqtSignal(int)        # table row being worked on
     done     = QtCore.pyqtSignal()
     error    = QtCore.pyqtSignal(str)
@@ -509,11 +510,14 @@ class _DataMapWorker(QtCore.QThread):
         w.log.connect(lambda m: self.log.emit("    " + m), direct)
         w.error.connect(lambda m: result.__setitem__("error", m), direct)
         w.done.connect(lambda p: result.__setitem__("path", p), direct)
+        w.progress.connect(lambda d, t: self.detail.emit(
+            f"#{n} XANES 2D: energy {d}/{t}"), direct)
         self._x2d_worker = w
         try:
             w.run()            # inline in this thread, no second QThread
         finally:
             self._x2d_worker = None
+            self.detail.emit("")
         if result["error"]:
             raise RuntimeError(result["error"])
 
@@ -1062,10 +1066,13 @@ class DataMapDialog(QtWidgets.QDialog):
         self._worker.log.connect(self._log)
         self._worker.progress.connect(lambda d, t: (self.progress.setMaximum(t),
                                                     self.progress.setValue(d)))
+        self._worker.detail.connect(self._on_detail)
         self._worker.current.connect(self.table.selectRow)
         self._worker.done.connect(self._finish)
-        self._worker.error.connect(lambda m: (self._log(f"[ERROR] {m}"), self._finish()))
+        self._worker.error.connect(lambda m: (self._log(f"[ERROR] {m}"),
+                                              self._finish(error=True)))
         self.progress.setValue(0)
+        self.progress.setFormat("%v/%m positions")
         self._set_running(True)
         self._worker.start()
 
@@ -1074,8 +1081,21 @@ class DataMapDialog(QtWidgets.QDialog):
             self._log("Stop requested — ending the current action…")
             self._worker.stop()
 
-    def _finish(self):
-        self._log("DataMap finished.")
+    def _on_detail(self, text: str):
+        """Progress inside the current action (energies of a 2D XANES)."""
+        self.progress.setFormat("%v/%m positions" + (f" — {text}" if text else ""))
+
+    def _finish(self, error: bool = False):
+        now = time.strftime("%H:%M")
+        if error:
+            end = f"Error {now}"
+        elif self._worker is not None and self._worker._stop:
+            end = f"Stopped {now}"
+        else:
+            end = f"Finished {now}"
+            self.progress.setValue(self.progress.maximum())
+        self.progress.setFormat(f"{end} — %v/%m positions")
+        self._log(f"DataMap {end.lower()}.")
         self._set_running(False)
 
     def _set_running(self, on: bool):
