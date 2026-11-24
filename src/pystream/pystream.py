@@ -27,7 +27,7 @@ from typing import Optional, Tuple, Dict
 import numpy as np
 import pvaccess as pva
 
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import QSettings
 
 # Disable matplotlib in pyqtgraph to avoid C++ library conflicts
@@ -953,6 +953,18 @@ class PvViewerApp(QtWidgets.QMainWindow):
                 "dark theme. Open when debugging agent behavior.")
             btn_console.clicked.connect(self._open_agent_console)
             top_layout.addWidget(btn_console)
+
+        # Help: opens the user guide (HTML) in the browser. Right-click to
+        # set which page / URL it opens.
+        btn_help = QtWidgets.QPushButton("❓ Help")
+        btn_help.setMaximumWidth(110)
+        btn_help.setToolTip("Open the user guide in the web browser.\n"
+                            "Right-click to choose which page or URL it opens.")
+        btn_help.clicked.connect(self._open_help)
+        btn_help.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        btn_help.customContextMenuRequested.connect(
+            lambda pos, b=btn_help: self._help_menu(b.mapToGlobal(pos)))
+        top_layout.addWidget(btn_help)
 
         top_layout.addStretch()
         
@@ -2529,6 +2541,56 @@ class PvViewerApp(QtWidgets.QMainWindow):
                             "isn't installed — pip install beamline-agent")
             return
         self._agent_bundle["open_agents_panel"]()
+
+    # ── Help button ────────────────────────────────────────────────────
+    HELP_DEFAULT = "/home/beams/USERTXM/Software/32id-gui-docs/docs/_build/html/index.html"
+
+    def _help_target(self) -> str:
+        return QSettings("APS", "pystream").value("help/docs_path", self.HELP_DEFAULT) \
+            or self.HELP_DEFAULT
+
+    def _open_help(self):
+        target = self._help_target().strip()
+        if "://" in target:
+            url = QtCore.QUrl(target)
+        else:
+            path = os.path.expanduser(target)
+            if os.path.isdir(path):
+                path = os.path.join(path, "index.html")
+            if not os.path.isfile(path):
+                QtWidgets.QMessageBox.warning(
+                    self, "Help",
+                    f"The user guide was not found:\n{path}\n\n"
+                    "Right-click the Help button to choose the page or URL.")
+                return
+            url = QtCore.QUrl.fromLocalFile(path)
+        if not QtGui.QDesktopServices.openUrl(url):
+            QtWidgets.QMessageBox.warning(self, "Help", f"Could not open {url.toString()}")
+
+    def _help_menu(self, global_pos):
+        m = QtWidgets.QMenu(self)
+        m.addAction(f"Opens: {self._help_target()}").setEnabled(False)
+        m.addSeparator()
+        a_file = m.addAction("Choose HTML file…")
+        a_text = m.addAction("Enter path or URL…")
+        a_reset = m.addAction("Reset to default")
+        chosen = m.exec_(global_pos)
+        settings = QSettings("APS", "pystream")
+        if chosen is a_file:
+            cur = os.path.expanduser(self._help_target())
+            start = cur if "://" not in cur and os.path.exists(cur) else os.path.expanduser("~")
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "User guide page", start, "HTML (*.html *.htm);;All files (*)")
+            if path:
+                settings.setValue("help/docs_path", path)
+        elif chosen is a_text:
+            text, ok = QtWidgets.QInputDialog.getText(
+                self, "Help", "Page (file path or URL) the Help button opens:",
+                text=self._help_target())
+            if ok and text.strip():
+                settings.setValue("help/docs_path", text.strip())
+        elif chosen is a_reset:
+            settings.remove("help/docs_path")
 
     def _open_agent_console(self):
         """Open (or focus) the singleton Agent Console dialog. See
