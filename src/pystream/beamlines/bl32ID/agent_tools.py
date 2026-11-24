@@ -223,7 +223,7 @@ STATUS_PAGES_FILE = os.path.join(PYSTREAM_HOME, "status_pages.json")
 # Tools that pop the Yes/No dialog. IOC start/stop/restart (ioc_action)
 # is deliberately NOT here: the user wants it to run without asking, and
 # the tool verifies the end state itself.
-WRITE_TOOLS = {"caput", "tomoscan_start"}
+WRITE_TOOLS = {"caput", "tomoscan_start", "schedule_job"}
 
 
 # Patterns that should pop a confirmation dialog when seen in a bash command.
@@ -1811,6 +1811,78 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# ── job scheduler (fixed actions; runner = bl32ID/scheduler.py) ─────────
+
+def _job_row(j: dict) -> dict:
+    from . import scheduler as sch
+    row = {"id": j["id"], "name": j["name"], "state": j["state"],
+           "trigger": sch.describe_trigger(j["trigger"]),
+           "actions": [sch.describe_action(a) for a in j["actions"]],
+           "fired": j.get("fire_count", 0),
+           "created": sch.fmt_ts(j.get("created_ts")), "by": j.get("created_by")}
+    if j.get("runs"):
+        last = j["runs"][-1]
+        row["last_run"] = {"at": sch.fmt_ts(last.get("start_ts")),
+                           "ok": last.get("ok"), "results": last.get("results")}
+    return row
+
+
+def tool_schedule_job(name: str, trigger: dict, actions: list,
+                      on_error: str = "stop") -> dict:
+    """Add a job; starts the scheduler process on this host if none runs."""
+    from . import scheduler as sch
+    try:
+        job = sch.new_job(name, trigger, actions, on_error)
+    except ValueError as ex:
+        return {"error": str(ex)}
+    sch.modify(lambda d: d["jobs"].__setitem__(job["id"], job))
+    try:
+        runner = sch.ensure_runner()
+    except Exception as ex:
+        runner = f"could not start the scheduler: {ex}"
+    return {"scheduled": _job_row(job), "scheduler": runner}
+
+
+def tool_list_jobs(include_finished: bool = False) -> dict:
+    from . import scheduler as sch
+    jobs = sch.load()["jobs"].values()
+    rows = [_job_row(j) for j in sorted(jobs, key=lambda j: j.get("created_ts", 0))
+            if include_finished or j.get("state") in sch.ACTIVE]
+    r = sch.runner_alive()
+    return {"jobs": rows,
+            "scheduler": f"running ({r['id']})" if r else
+                         "NOT running — jobs will not fire (schedule_job starts it)"}
+
+
+def tool_cancel_job(job_id: str) -> dict:
+    from . import scheduler as sch
+
+    def f(d):
+        j = d["jobs"].get(job_id)
+        if j is None:
+            return {"error": f"no job {job_id}"}
+        if j["state"] in sch.FINAL:
+            return {"error": f"job {job_id} already {j['state']}"}
+        was = j["state"]
+        j["state"] = "cancelled"
+        return {"cancelled": job_id, "was": was,
+                "note": "a running job stops before its next action / during a wait"
+                        if was == "running" else ""}
+    return sch.modify(f)
+
+
+def tool_job_log(job_id: str) -> dict:
+    from . import scheduler as sch
+    j = sch.load()["jobs"].get(job_id)
+    if j is None:
+        return {"error": f"no job {job_id}"}
+    return {"job": _job_row(j),
+            "runs": [{"start": sch.fmt_ts(r.get("start_ts")),
+                      "end": sch.fmt_ts(r.get("end_ts")), "ok": r.get("ok"),
+                      "results": r.get("results")} for r in j.get("runs", [])],
+            "log_file": sch.LOG_FILE}
+
+
 def _spec(name, description, func, properties=None, required=()):
     return {"name": name, "description": description, "func": func,
             "schema": {"type": "object", "properties": properties or {},
@@ -1824,7 +1896,9 @@ _TOMOSCAN_SCAN = {"type": "string", "enum": sorted(TOMOSCAN_PREFIXES),
 _DOCS_DIR_HELP = {
     "type": "string",
     "description": "Defaults to ~/.pystream/docs (reference docs). Use "
-                   "~/.pystream/procedures for the beamline procedures.",
+                   "~/.pystream/procedures for the beamline procedures, "
+                   "/home/beams/USERTXM/Software/32id-gui-docs/docs for the "
+                   "GUI user guides (bl_gui, pystream, XANES, mosalign).",
 }
 
 # Tools that were implemented above but never offered to the model. The
@@ -1971,6 +2045,47 @@ TOOLS += [
           {"include_iocs": {"type": "boolean",
                             "description": "Also query the IOC panel "
                             "(default true, adds ~1-3 s)."}}),
+    _spec("schedule_job",
+          "Schedule beamline actions to run UNATTENDED later: at a time, "
+          "repeatedly, when a scan ends, or when a PV condition holds. "
+          "WRITE action — Yes/No dialog once; then it fires by itself. Only "
+          "these actions exist (the A shutter is never touched):\n"
+          "  {type:b_shutter, state:open|close}\n"
+          "  {type:helium, value:0-10}  (He box PLC AO1, volts)\n"
+          "  {type:shaker, state:start|stop}\n"
+          "  {type:camera, state:start|stop}\n"
+          "  {type:tomoscan, state:start|abort, scan:TomoScan|TomoScanStep|TomoScanStream}\n"
+          "  {type:wait, seconds:90|'5m'}\n"
+          "  {type:wait_until, pv, op, value, timeout:'30m'}\n"
+          "Triggers:\n"
+          "  {type:at, time:'02:00'|'2026-11-24 02:00'|'+30m'}\n"
+          "  {type:every, interval:'2h', start?, until?, count?}\n"
+          "  {type:scan_end, scan:'XANES 2D'}  (registry scan name, done/error)\n"
+          "  {type:scan_end, tomoscan:'TomoScan'}  (StartScan back to 0)\n"
+          "  {type:pv, pv, op:'>'|'<'|'=='|…, value, hold_s?, edge?}\n"
+          "  optional on any: repeat (pv/scan_end), max_fires, expires.\n"
+          "Before calling, state the job in one line (trigger → actions). "
+          "Times are local. Missed time triggers (scheduler down >10 min) "
+          "are skipped, not run late.",
+          tool_schedule_job,
+          {"name": {"type": "string", "description": "Short job name."},
+           "trigger": {"type": "object", "description": "See above."},
+           "actions": {"type": "array", "items": {"type": "object"},
+                       "description": "Run in order."},
+           "on_error": {"type": "string", "enum": ["stop", "continue"],
+                        "description": "If an action fails (default stop)."}},
+          required=("name", "trigger", "actions")),
+    _spec("list_jobs",
+          "Scheduled jobs (waiting / running; include_finished for done, "
+          "failed, cancelled, missed) with trigger, actions, last run, and "
+          "whether the scheduler process is alive. Read-only.",
+          tool_list_jobs,
+          {"include_finished": {"type": "boolean"}}),
+    _spec("cancel_job", "Cancel a scheduled job by id. Runs immediately.",
+          tool_cancel_job, {"job_id": _STR}, required=("job_id",)),
+    _spec("job_log", "Run history of one job: when it fired and each "
+          "action's result. Read-only.",
+          tool_job_log, {"job_id": _STR}, required=("job_id",)),
 ]
 
 
@@ -2022,10 +2137,26 @@ SYSTEM_PROMPT_ADDENDUM = """
 | IOC start/stop                | IOC Control Panel → ioc_status / ioc_action          |
 | Procedures (how-to)           | ~/.pystream/procedures → search_docs / read_doc       |
 | Project docs                  | ~/.pystream/docs (AGENTS.md / README of each project) |
+| GUI user guides (bl_gui, pystream + plugins, XANES 1D/2D, mosalign, assistant) | /home/beams/USERTXM/Software/32id-gui-docs/docs (Markdown; HTML in docs/_build/html) → search_docs / read_doc / list_docs with `directory=` that path |
+| Unattended jobs (later / on schedule / when a scan ends / on a PV condition) | schedule_job, list_jobs, cancel_job, job_log |
 | Source code                   | ~/Software/<project> (bl_gui, pystream, beamline-agent, xanes_gui, …); EPICS support under /home/beams19/USERTXM/epics/synApps/support |
 
+For "how do I … in bl_gui / pystream / XANES / mosalign", read the GUI
+user guide first (search_docs with directory=
+/home/beams/USERTXM/Software/32id-gui-docs/docs), then answer with the
+real button / field names from it.
+
+UNATTENDED JOBS. schedule_job runs fixed actions later without you:
+B shutter open/close, helium 0–10 V, shaker start/stop, camera
+start/stop, TomoScan start/abort, wait, wait_until. NEVER the A shutter.
+Triggers: at a time, every N, when a scan ends (registry name or
+TomoScan), when a PV condition holds. State the job in one line
+(trigger → actions) before calling; the user approves once. "Is anything
+scheduled" → list_jobs. Jobs need the scheduler process (schedule_job
+starts it; list_jobs says if it is down).
+
 If the user names something you don't recognise, LOOK IT UP before
-asking: search_docs (both doc dirs), `bl-cli layout actions`,
+asking: search_docs (all three doc dirs), `bl-cli layout actions`,
 list_bl_gui_displays, or `grep -rn` in ~/Software/<project>.
 
 # 32-ID TOOLS (beyond the core ones)

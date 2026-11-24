@@ -18,6 +18,7 @@ from .blgui import BLGuiDialog
 # widget of its own — the chat is always the bottom panel.
 from .datamap import DataMapDialog
 from .timeseries2d import TimeSeries2DDialog
+from .jobs import JobsDialog
 from .xraytools import XRayToolsDialog
 from .autofocus import AutofocusLauncherDialog
 from .atomo import AtomoLauncherDialog
@@ -26,7 +27,7 @@ from .atomo import AtomoLauncherDialog
 # `beamline_agent.chat.AgentDialog` (imported by beamline-agent's
 # mount()). The chat still surfaces at the bottom of the pystream
 # window when beamline-agent is installed.
-__all__ = ['MotorScanDialog', 'CenterOfRotationDialog', 'ParticleAlignDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'DataMapDialog', 'TimeSeries2DDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
+__all__ = ['MotorScanDialog', 'CenterOfRotationDialog', 'ParticleAlignDialog', 'DetectorControlDialog', 'XANESGuiDialog', 'XANES2DGuiDialog', 'XANES2DViewerDialog', 'OpticsCalcDialog', 'RotationAxisDialog', 'QGMaxDialog', 'AutoCenterDialog', 'BLGuiDialog', 'DataMapDialog', 'TimeSeries2DDialog', 'JobsDialog', 'XRayToolsDialog', 'AutofocusLauncherDialog', 'AtomoLauncherDialog']
 
 
 def start_background_services(parent_window):
